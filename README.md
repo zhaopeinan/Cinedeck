@@ -1,3 +1,5 @@
+<img src="docs/cinedeck-banner.png" alt="Cinedeck — 让每一页幻灯片化作一段影像" width="100%">
+
 # Cinedeck
 
 Cinedeck turns a PPTX deck into a lecture video. Speaker notes are the script. Each slide stays on screen for the length of its narration, in the original page order.
