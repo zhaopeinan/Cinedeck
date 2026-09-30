@@ -15,6 +15,9 @@ smoke_out/
 zhangbing/
 reference_system_screenshot/
 
+# Cloned on first API start; not part of this repository
+voicebox/
+
 # Secrets
 .env
 .env.*
