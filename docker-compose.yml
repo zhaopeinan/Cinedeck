@@ -1,0 +1,116 @@
+version: '3.8'
+
+networks:
+  default:
+  # Duix lite compose 使用的网络，便于 dispatcher 用容器名访问 :8383
+  deploy_ai_network:
+    external: true
+    name: deploy_ai_network
+
+services:
+  # Dispatcher - Node.js API server
+  dispatcher:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: ppt-audio-dispatcher:latest
+    ports:
+      - "3001:3001"
+    volumes:
+      # 代码里 DATA_DIR = path.resolve(cwd, '..', 'data') => /data
+      - app-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /opt/opentalking/avatar-jobs:/opt/opentalking/avatar-jobs
+      - /opt/opentalking/scripts:/opt/opentalking/scripts:ro
+      - /data/duix_avatar_data/face2face:/data/duix_avatar_data/face2face
+    networks:
+      - default
+      - deploy_ai_network
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - VOICEBOX_BASE_URL=http://ppt-audio-voicebox:17493
+      - AVATAR_JOBS_DIR=/opt/opentalking/avatar-jobs
+      - DUIX_CONTAINER=duix-avatar-gen-video
+      - DUIX_DATA_HOST=/data/duix_avatar_data/face2face
+      - DUIX_DATA_CONTAINER=/code/data
+      - DUIX_API_BASE=http://duix-avatar-gen-video:8383
+      - AVATAR_STOP_CONTAINERS=ppt-audio-voicebox,ollama
+      - OPENTALKING_CONTAINER=opentalking-smoke
+      - AVATAR_STOP_ITRANS=1
+      - HYPERFRAMES_IMAGE=ppt-audio-hyperframes:latest
+      - HYPERFRAMES_DATA_HOST=/var/lib/docker/volumes/ppt_audio_app-data/_data
+      # Enable NVENC inside container (encode + CUDA driver libs)
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    security_opt:
+      - seccomp:unconfined
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Worker - LibreOffice + Voicebox + Task Executor
+  # 服务器 HTTPS 受限时可能无法构建；可用 profile 跳过：docker compose --profile full up -d
+  worker:
+    profiles: ["full"]
+    build:
+      context: ./docker/worker
+      dockerfile: Dockerfile
+    volumes:
+      - app-data:/data
+    environment:
+      - DISPATCHER_URL=http://dispatcher:3001
+      - POLL_INTERVAL=2000
+      - DATA_DIR=/data
+    depends_on:
+      dispatcher:
+        condition: service_healthy
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+    restart: unless-stopped
+
+  # Official HyperFrames renderer (Node 22 + Chromium). Used via docker run by dispatcher.
+  hyperframes:
+    build:
+      context: ./docker/hyperframes
+      dockerfile: Dockerfile
+    image: ppt-audio-hyperframes:latest
+    profiles: ["hyperframes"]
+    volumes:
+      - app-data:/data
+    entrypoint: ["sleep", "infinity"]
+    restart: unless-stopped
+
+  # Frontend - React SPA
+  frontend:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    image: ppt-audio-frontend:latest
+    ports:
+      - "5173:80"
+    depends_on:
+      - dispatcher
+    security_opt:
+      - seccomp:unconfined
+    restart: unless-stopped
+
+volumes:
+  app-data:
+    driver: local

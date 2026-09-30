@@ -1,0 +1,40 @@
+# Dependencies and build output
+node_modules/
+**/dist/
+dist-ssr/
+
+# Runtime data: projects, uploads, generated media, database
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Local scratch, model caches, smoke tests, and personal media
+.tmp*
+smoke_out/
+zhangbing/
+reference_system_screenshot/
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
+
+# Logs and bulky local artifacts
+*.log
+*.tar.gz
+*.zip
+*.mp4
+*.mov
+*.wav
+*.mp3
+*.pptx
+*.ppt

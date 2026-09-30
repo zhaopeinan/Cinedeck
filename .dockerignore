@@ -1,0 +1,8 @@
+node_modules
+**/node_modules
+**/dist
+.DS_Store
+data/projects
+reference_system_screenshot
+*.md
+.git
