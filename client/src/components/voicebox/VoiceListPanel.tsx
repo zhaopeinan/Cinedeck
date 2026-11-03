@@ -41,7 +41,7 @@ export const VoiceListPanel: React.FC<VoiceListPanelProps> = ({
     setDownloadingId(voice.id);
     try {
       await downloadVoiceSample(voice.id, voice.name || `voice-${String(voice.id).slice(0, 8)}`);
-      message.success('已开始下载参考音频');
+      message.success(voice.source === 'personal' ? '已开始下载参考音频' : '已开始下载试听音频');
     } catch (err: any) {
       message.error(err?.message || '下载失败');
     } finally {
@@ -80,17 +80,15 @@ export const VoiceListPanel: React.FC<VoiceListPanelProps> = ({
                 >
                   {playingVoiceId === voice.id ? '停止' : previewLoadingVoiceId === voice.id ? '合成中' : '试听'}
                 </Button>,
-                isClone ? (
-                  <Button
-                    key="download"
-                    type="text"
-                    loading={downloadingId === voice.id}
-                    icon={<DownloadOutlined />}
-                    onClick={(e) => { e.stopPropagation(); void handleDownload(voice); }}
-                  >
-                    下载
-                  </Button>
-                ) : null,
+                <Button
+                  key="download"
+                  type="text"
+                  loading={downloadingId === voice.id}
+                  icon={<DownloadOutlined />}
+                  onClick={(e) => { e.stopPropagation(); void handleDownload(voice); }}
+                >
+                  下载
+                </Button>,
                 onDeleteVoice && isClone ? (
                   <Popconfirm
                     key="del"
