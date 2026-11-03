@@ -62,7 +62,7 @@ export function createVoiceboxRouter(
   router.post('/voices', voiceUpload.single('audio'), async (req: Request, res: Response) => {
     try {
       const file = req.file;
-      const { name, language, description } = req.body;
+      const { name, language, description, referenceText, reference_text } = req.body;
 
       if (!name || !language) {
         return res.status(400).json({ success: false, data: null, error: { code: '3006', message: '缺少必要参数：name, language' } });
@@ -77,6 +77,7 @@ export function createVoiceboxRouter(
         description: description || '',
         audioPath: file.path,
         originalName: file.originalname,
+        referenceText: referenceText || reference_text || '',
       });
       res.json({ success: true, data: voice, error: null });
     } catch (error: any) {

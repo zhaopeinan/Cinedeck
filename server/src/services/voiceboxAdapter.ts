@@ -83,6 +83,35 @@ export class VoiceboxAdapter {
    * Voicebox requires two steps: create profile, then add sample audio.
    * Params: { name, language, description, recordingPath (path to audio file) }
    */
+  /**
+   * Qwen voice-clone needs the transcript of the reference audio.
+   * Using the profile name as reference_text breaks alignment and often
+   * yields extremely short generations.
+   */
+  private async resolveReferenceText(params: {
+    audioPath: string;
+    originalName?: string;
+    language?: string;
+    fallback?: string;
+  }): Promise<string> {
+    try {
+      const tr = await this.transcribeAudio({
+        audioPath: params.audioPath,
+        originalName: params.originalName,
+        language: toVoiceboxLanguage(params.language),
+        model: 'base',
+      });
+      const text = String(tr.text || '').trim();
+      if (text) return text.slice(0, 1000);
+    } catch (err: any) {
+      console.warn('[Voicebox] reference audio transcription failed:', err?.message || err);
+    }
+    const fallback = String(params.fallback || '').trim();
+    if (fallback && !/^\S{1,40}$/.test(fallback)) return fallback.slice(0, 1000);
+    // Last resort: generic placeholder (still better than a short display name).
+    return '这是一段用于音色克隆的参考录音。';
+  }
+
   async createVoice(params: { name: string; language: string; description?: string; recordingPath: string; authorize: boolean }): Promise<any> {
     // Step 1: Create the profile
     const createRes = await axios.post(`${this.baseUrl}/profiles`, {
@@ -96,9 +125,14 @@ export class VoiceboxAdapter {
 
     // Step 2: Add the audio sample
     if (params.recordingPath && fs.existsSync(params.recordingPath)) {
+      const referenceText = await this.resolveReferenceText({
+        audioPath: params.recordingPath,
+        language: params.language,
+        fallback: params.description,
+      });
       const formData = new FormData();
       formData.append('file', fs.createReadStream(params.recordingPath));
-      formData.append('reference_text', params.name); // Use name as reference text
+      formData.append('reference_text', referenceText);
 
       await axios.post(`${this.baseUrl}/profiles/${profile.id}/samples`, formData, {
         headers: formData.getHeaders(),
@@ -113,7 +147,14 @@ export class VoiceboxAdapter {
    * Create a voice profile from a multer file upload.
    * Used when the proxy receives multipart form data from the frontend.
    */
-  async createVoiceFromUpload(params: { name: string; language: string; description?: string; audioPath: string; originalName?: string }): Promise<any> {
+  async createVoiceFromUpload(params: {
+    name: string;
+    language: string;
+    description?: string;
+    audioPath: string;
+    originalName?: string;
+    referenceText?: string;
+  }): Promise<any> {
     // Step 1: Create the profile
     const createRes = await axios.post(`${this.baseUrl}/profiles`, {
       name: params.name,
@@ -126,16 +167,25 @@ export class VoiceboxAdapter {
 
     // Step 2: Add the audio sample
     if (params.audioPath && fs.existsSync(params.audioPath)) {
+      const provided = String(params.referenceText || '').trim();
+      const referenceText = provided
+        ? provided.slice(0, 1000)
+        : await this.resolveReferenceText({
+          audioPath: params.audioPath,
+          originalName: params.originalName,
+          language: params.language,
+          fallback: params.description,
+        });
       const formData = new FormData();
       formData.append('file', fs.createReadStream(params.audioPath), {
         filename: params.originalName || 'recording.webm',
         contentType: 'audio/webm',
       });
-      formData.append('reference_text', params.name);
+      formData.append('reference_text', referenceText);
 
       await axios.post(`${this.baseUrl}/profiles/${profile.id}/samples`, formData, {
         headers: formData.getHeaders(),
-        timeout: 30000,
+        timeout: 60000,
       });
     }
 
