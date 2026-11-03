@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Button, Checkbox, Form, Input, Modal, Progress, Radio, Select, Space, Tag, Typography, Upload, message,
+  Alert, Button, Checkbox, Form, Input, Modal, Progress, Radio, Select, Space, Tag, Typography, Upload, message,
 } from 'antd';
 import { PlayCircleOutlined, SoundOutlined } from '@ant-design/icons';
 import { voiceboxApi } from '../../api';
+import { getMicrophoneUnsupportedReason, requestMicrophoneStream } from '../../utils/getUserMedia';
 
 const { Text } = Typography;
 
@@ -84,7 +85,7 @@ export const VoiceCloneModal: React.FC<VoiceCloneModalProps> = ({
 
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await requestMicrophoneStream({ audio: true });
       streamRef.current = stream;
       const recorder = new MediaRecorder(stream);
       mediaRecorderRef.current = recorder;
@@ -130,7 +131,15 @@ export const VoiceCloneModal: React.FC<VoiceCloneModalProps> = ({
       setRecordedBlob(null);
       setQualityCheck(null);
     } catch (err: any) {
-      message.error(err.name === 'NotAllowedError' ? '麦克风权限被拒绝' : `录音失败：${err.message}`);
+      if (err?.name === 'NotAllowedError' || err?.name === 'PermissionDeniedError') {
+        message.error('麦克风权限被拒绝，请在浏览器地址栏允许麦克风后重试');
+        return;
+      }
+      if (err?.name === 'NotFoundError' || err?.name === 'DevicesNotFoundError') {
+        message.error('未检测到麦克风设备');
+        return;
+      }
+      message.error(err?.message ? `录音失败：${err.message}` : '录音失败');
     }
   };
 
@@ -191,6 +200,10 @@ export const VoiceCloneModal: React.FC<VoiceCloneModalProps> = ({
   };
 
   const showModeSwitch = allowed.length > 1;
+  const micUnsupportedReason = useMemo(
+    () => (open && cloneMode === 'record' ? getMicrophoneUnsupportedReason() : null),
+    [open, cloneMode],
+  );
 
   return (
     <Modal
@@ -249,6 +262,20 @@ export const VoiceCloneModal: React.FC<VoiceCloneModalProps> = ({
         </Upload.Dragger>
       ) : (
         <div>
+          {micUnsupportedReason && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="当前页面无法使用麦克风"
+              description={
+                <div>
+                  <div>{micUnsupportedReason}</div>
+                  <div style={{ marginTop: 8 }}>也可改用「上传音频」完成克隆。</div>
+                </div>
+              }
+            />
+          )}
           {!authConfirmed && (
             <div style={{ background: '#f6f6f6', padding: 12, borderRadius: 8, marginBottom: 12 }}>
               <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
@@ -261,7 +288,12 @@ export const VoiceCloneModal: React.FC<VoiceCloneModalProps> = ({
           )}
           <div style={{ textAlign: 'center' }}>
             {!isRecording && !recordedBlob && (
-              <Button type="primary" icon={<SoundOutlined />} disabled={!authConfirmed} onClick={() => void startRecording()}>
+              <Button
+                type="primary"
+                icon={<SoundOutlined />}
+                disabled={!authConfirmed || !!micUnsupportedReason}
+                onClick={() => void startRecording()}
+              >
                 开始录音
               </Button>
             )}

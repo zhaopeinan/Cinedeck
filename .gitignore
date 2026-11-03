@@ -16,7 +16,7 @@ zhangbing/
 reference_system_screenshot/
 
 # Cloned on first API start; not part of this repository
-voicebox/
+/voicebox/
 
 # Secrets
 .env
