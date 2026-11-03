@@ -67,17 +67,29 @@ export function createVoiceboxRouter(
       if (!name || !language) {
         return res.status(400).json({ success: false, data: null, error: { code: '3006', message: '缺少必要参数：name, language' } });
       }
+      if (!file?.path) {
+        return res.status(400).json({ success: false, data: null, error: { code: '3006', message: '请上传或录制参考音频' } });
+      }
 
       const voice = await voicebox.createVoiceFromUpload({
         name,
         language,
         description: description || '',
-        audioPath: file?.path || '',
-        originalName: file?.originalname,
+        audioPath: file.path,
+        originalName: file.originalname,
       });
       res.json({ success: true, data: voice, error: null });
     } catch (error: any) {
-      res.status(503).json({ success: false, data: null, error: { code: '3006', message: error.message || 'Voicebox服务未启动，无法创建音色' } });
+      const status = error?.response?.status;
+      const detail = error?.response?.data?.detail;
+      let message = error?.message || 'Voicebox服务未启动，无法创建音色';
+      if (Array.isArray(detail) && detail[0]?.msg) {
+        message = detail.map((d: any) => d.msg).filter(Boolean).join('；');
+      } else if (typeof detail === 'string') {
+        message = detail;
+      }
+      const code = status && status >= 400 && status < 500 ? status : 503;
+      res.status(code).json({ success: false, data: null, error: { code: '3006', message } });
     }
   });
 

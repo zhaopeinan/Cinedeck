@@ -183,7 +183,7 @@ export const VoiceCloneModal: React.FC<VoiceCloneModalProps> = ({
         formData.append('audio', audioBlob as Blob, 'recording.webm');
       }
       formData.append('name', values.name);
-      formData.append('language', values.language || 'zh-CN');
+      formData.append('language', values.language || 'zh');
       formData.append('description', values.description || '');
       const created = await voiceboxApi.createVoice(formData);
       const newId = created.data.data?.id as string | undefined;
@@ -218,12 +218,12 @@ export const VoiceCloneModal: React.FC<VoiceCloneModalProps> = ({
         disabled: cloneMode === 'record' && (!recordedBlob || !qualityCheck?.passed),
       }}
     >
-      <Form form={form} layout="vertical" initialValues={{ language: 'zh-CN' }}>
+      <Form form={form} layout="vertical" initialValues={{ language: 'zh' }}>
         <Form.Item name="name" label="音色名称" rules={[{ required: true, message: '请输入名称' }]}>
           <Input placeholder="例如：老师旁白" />
         </Form.Item>
         <Form.Item name="language" label="语言" rules={[{ required: true }]}>
-          <Select options={[{ value: 'zh-CN', label: '中文' }, { value: 'en-US', label: 'English' }]} />
+          <Select options={[{ value: 'zh', label: '中文' }, { value: 'en', label: 'English' }]} />
         </Form.Item>
         <Form.Item name="description" label="描述">
           <Input.TextArea rows={2} placeholder="可选" />

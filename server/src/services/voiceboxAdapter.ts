@@ -7,6 +7,19 @@ import path from 'path';
 
 const VOICEBOX_BASE_URL = process.env.VOICEBOX_BASE_URL || 'http://localhost:17493';
 
+/** Voicebox VoiceProfileCreate.language: short codes only (zh|en|ja|...). */
+const VOICEBOX_LANGS = new Set([
+  'zh', 'en', 'ja', 'ko', 'de', 'fr', 'ru', 'pt', 'es', 'it',
+  'he', 'ar', 'da', 'el', 'fi', 'hi', 'ms', 'nl', 'no', 'pl', 'sv', 'sw', 'tr',
+]);
+
+export function toVoiceboxLanguage(lang?: string | null): string {
+  const raw = String(lang || 'zh').trim().toLowerCase();
+  if (!raw) return 'zh';
+  const primary = raw.split(/[-_]/)[0] || 'zh';
+  return VOICEBOX_LANGS.has(primary) ? primary : 'zh';
+}
+
 export class VoiceboxAdapter {
   private baseUrl: string;
 
@@ -74,7 +87,7 @@ export class VoiceboxAdapter {
     // Step 1: Create the profile
     const createRes = await axios.post(`${this.baseUrl}/profiles`, {
       name: params.name,
-      language: params.language,
+      language: toVoiceboxLanguage(params.language),
       description: params.description || '',
       voice_type: 'cloned',
     }, { timeout: 30000 });
@@ -104,7 +117,7 @@ export class VoiceboxAdapter {
     // Step 1: Create the profile
     const createRes = await axios.post(`${this.baseUrl}/profiles`, {
       name: params.name,
-      language: params.language,
+      language: toVoiceboxLanguage(params.language),
       description: params.description || '',
       voice_type: 'cloned',
     }, { timeout: 30000 });

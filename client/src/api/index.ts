@@ -51,7 +51,11 @@ apiClient.interceptors.response.use(
     } else if (error.response.status === 403) {
       message.error('没有权限执行此操作');
     } else if (error.response.status >= 500) {
-      message.error('服务器错误，请稍后重试');
+      const serverMsg = error.response?.data?.error?.message;
+      message.error(serverMsg || '服务器错误，请稍后重试');
+    } else if (error.response.status === 422 || error.response.status === 400) {
+      const serverMsg = error.response?.data?.error?.message;
+      if (serverMsg) message.error(serverMsg);
     }
     return Promise.reject(error);
   }
@@ -144,7 +148,11 @@ export const projectApi = {
 export const voiceboxApi = {
   healthCheck: () => apiClient.get<ApiResponse<any>>('/voicebox/health'),
   listVoices: (filter?: { language?: string }) => apiClient.get<ApiResponse<any[]>>('/voicebox/voices', { params: filter }),
-  createVoice: (data: any) => apiClient.post<ApiResponse<any>>('/voicebox/voices', data),
+  createVoice: (data: FormData) =>
+    apiClient.post<ApiResponse<any>>('/voicebox/voices', data, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000,
+    }),
   deleteVoice: (id: string) => apiClient.delete<ApiResponse<any>>(`/voicebox/voices/${id}`),
   getVoiceSampleUrl: (id: string) => withToken(`/api/v1/voicebox/voices/${id}/sample`),
   listModels: (filter?: { language?: string }) => apiClient.get<ApiResponse<any[]>>('/voicebox/models', { params: filter }),
