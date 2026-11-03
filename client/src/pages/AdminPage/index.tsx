@@ -710,8 +710,9 @@ export const AdminPage: React.FC = () => {
         >
           <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
             外部系统通过 <Text code>Authorization: Bearer sk_...</Text> 调用{' '}
-            <Text code>/api/open/v1/tts</Text> 与 <Text code>/api/open/v1/avatar</Text>。
-            密钥可随时在列表中查看与复制。
+            <Text code>/api/open/v1/tts</Text>、<Text code>/api/open/v1/avatar</Text>
+            （含 Duix 生成与绿幕叠底 <Text code>/compose</Text>）。密钥可随时查看与复制。详见{' '}
+            <Text code>docs/open-platform.md</Text>。
           </Text>
           <Table
             rowKey="id"

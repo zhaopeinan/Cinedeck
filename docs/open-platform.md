@@ -1,6 +1,6 @@
 # 开放平台 API
 
-通过 API Key 对外暴露 Voicebox TTS 与 Duix 数字人能力。
+通过 API Key 对外暴露 Voicebox TTS、Duix 数字人生成，以及**绿幕叠底视频合成**能力。
 
 ## 鉴权
 
@@ -104,6 +104,59 @@ curl -sS -X POST "$BASE/avatar/jobs" \
 curl -sS -H "Authorization: Bearer $API_KEY" "$BASE/avatar/jobs/<job-id>"
 curl -sS -H "Authorization: Bearer $API_KEY" \
   "$BASE/avatar/jobs/<job-id>/video" -o avatar.mp4
+```
+
+### 绿幕叠底视频（compose）
+
+把绿幕数字人片叠到任意底视频上（纯 ffmpeg，不占 Duix GPU）。需同一 Key 的 `avatar` scope。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/avatar/compose` | 提交预览或导出 |
+| GET | `/avatar/compose/:id` | 查询进度 |
+| GET | `/avatar/compose/:id/video` | 下载预览/成片 |
+
+字段（multipart）：
+
+- `mode`：`preview`（约前 8 秒）或 `export`（全片）
+- `background`：底视频（必填，≤200MB）
+- `greenscreen`：绿幕视频文件；**或** `greenscreenJobId`（本 Key 下已完成的 `/avatar/jobs` 成片）
+- `layout`：JSON，如 `{"x":0.72,"y":0.52,"w":0.25,"h":0.444}`（相对底画面 0–1）
+- `chromaSimilarity`：抠绿强度，默认 `0.28`，约 `0.05–0.6`（越大抠得越狠）
+- `chromaBlend`：可选，默认 `0.1`
+
+导出示例（上传绿幕 + 底视频）：
+
+```bash
+curl -sS -X POST "$BASE/avatar/compose" \
+  -H "Authorization: Bearer $API_KEY" \
+  -F "mode=export" \
+  -F "background=@bg.mp4" \
+  -F "greenscreen=@avatar_greenscreen.mp4" \
+  -F 'layout={"x":0.72,"y":0.52,"w":0.25,"h":0.444}' \
+  -F "chromaSimilarity=0.28"
+```
+
+先 Duix 生成再合成：
+
+```bash
+# 1) 生成绿幕数字人 → 得到 job-id
+# 2) 叠底：
+curl -sS -X POST "$BASE/avatar/compose" \
+  -H "Authorization: Bearer $API_KEY" \
+  -F "mode=preview" \
+  -F "background=@bg.mp4" \
+  -F "greenscreenJobId=<job-id>" \
+  -F 'layout={"x":0.7,"y":0.5,"w":0.28,"h":0.5}' \
+  -F "chromaSimilarity=0.30"
+```
+
+轮询与下载：
+
+```bash
+curl -sS -H "Authorization: Bearer $API_KEY" "$BASE/avatar/compose/<compose-id>"
+curl -sS -H "Authorization: Bearer $API_KEY" \
+  "$BASE/avatar/compose/<compose-id>/video" -o composed.mp4
 ```
 
 ---
