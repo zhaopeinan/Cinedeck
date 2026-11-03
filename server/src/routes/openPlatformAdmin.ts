@@ -24,13 +24,10 @@ export function createOpenPlatformAdminRouter(openApiKeys: OpenApiKeyService): R
       const name = String(req.body?.name || '').trim();
       const scopes = parseScopesBody(req.body?.scopes);
       const createdBy = (req as any).user?.id || null;
-      const result = openApiKeys.create({ name, scopes, createdBy });
+      const key = openApiKeys.create({ name, scopes, createdBy });
       res.json({
         success: true,
-        data: {
-          ...result.key,
-          apiKey: result.apiKey,
-        },
+        data: key,
         error: null,
       });
     } catch (error: any) {

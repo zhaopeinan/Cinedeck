@@ -5,7 +5,7 @@
 ## 鉴权
 
 1. 管理员登录后台 → **开放平台** → 创建密钥（勾选 `tts` / `avatar`）
-2. 明文 `sk_...` 仅创建时显示一次，请妥善保存
+2. 完整 `sk_...` 会一直显示在密钥列表中，可随时复制
 3. 调用时任选一种方式：
 
 ```http
@@ -113,6 +113,6 @@ curl -sS -H "Authorization: Bearer $API_KEY" \
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/api/v1/open-platform/keys` | 列表 |
-| POST | `/api/v1/open-platform/keys` | 创建（返回一次 `apiKey`） |
+| POST | `/api/v1/open-platform/keys` | 创建（响应含完整 `apiKey`，列表也可回看） |
 | PATCH | `/api/v1/open-platform/keys/:id` | 改名 / scopes / 启用禁用 |
 | DELETE | `/api/v1/open-platform/keys/:id` | 删除 |

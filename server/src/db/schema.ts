@@ -366,6 +366,11 @@ export function initDatabase(dbPath?: string): Database.Database {
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_open_api_keys_status ON open_api_keys(status);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_open_api_keys_prefix ON open_api_keys(key_prefix);`);
+  // Plaintext key kept for admin re-view (per product request)
+  const openKeyCols = db.prepare('PRAGMA table_info(open_api_keys)').all() as any[];
+  if (!openKeyCols.find((c) => c.name === 'api_key')) {
+    db.exec('ALTER TABLE open_api_keys ADD COLUMN api_key TEXT');
+  }
 
   return db;
 }

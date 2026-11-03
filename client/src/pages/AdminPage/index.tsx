@@ -107,7 +107,6 @@ export const AdminPage: React.FC = () => {
   const [createKeyOpen, setCreateKeyOpen] = useState(false);
   const [createKeySubmitting, setCreateKeySubmitting] = useState(false);
   const [createKeyForm] = Form.useForm();
-  const [createdApiKey, setCreatedApiKey] = useState<string | null>(null);
 
   // Auth: ensure user is loaded; redirect to login if no token
   useEffect(() => {
@@ -219,21 +218,28 @@ export const AdminPage: React.FC = () => {
     try {
       const values = await createKeyForm.validateFields();
       setCreateKeySubmitting(true);
-      const res = await openPlatformApi.createKey({
+      await openPlatformApi.createKey({
         name: values.name,
         scopes: values.scopes || [],
       });
-      const data = res.data.data;
-      setCreatedApiKey(data?.apiKey || null);
       setCreateKeyOpen(false);
       createKeyForm.resetFields();
-      message.success('密钥已创建，请立即复制保存');
+      message.success('密钥已创建');
       await loadApiKeys();
     } catch (err: any) {
       if (err?.errorFields) return;
       message.error(getErrMsg(err));
     } finally {
       setCreateKeySubmitting(false);
+    }
+  };
+
+  const handleCopyApiKey = async (apiKey: string) => {
+    try {
+      await navigator.clipboard.writeText(apiKey);
+      message.success('已复制到剪贴板');
+    } catch {
+      message.error('复制失败，请手动选中复制');
     }
   };
 
@@ -705,25 +711,40 @@ export const AdminPage: React.FC = () => {
           <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
             外部系统通过 <Text code>Authorization: Bearer sk_...</Text> 调用{' '}
             <Text code>/api/open/v1/tts</Text> 与 <Text code>/api/open/v1/avatar</Text>。
-            明文密钥仅在创建时显示一次。
+            密钥可随时在列表中查看与复制。
           </Text>
           <Table
             rowKey="id"
             loading={apiKeysLoading}
             dataSource={apiKeys}
             pagination={false}
+            scroll={{ x: 1100 }}
             columns={[
               {
                 title: '名称',
                 dataIndex: 'name',
                 key: 'name',
+                width: 140,
               },
               {
-                title: '前缀',
-                dataIndex: 'keyPrefix',
-                key: 'keyPrefix',
-                width: 140,
-                render: (p: string) => <Text code>{p}…</Text>,
+                title: 'API Key',
+                dataIndex: 'apiKey',
+                key: 'apiKey',
+                width: 360,
+                render: (key: string | null) =>
+                  key ? (
+                    <Space size={4}>
+                      <Text code copyable={false} style={{ wordBreak: 'break-all' }}>{key}</Text>
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<CopyOutlined />}
+                        onClick={() => handleCopyApiKey(key)}
+                      />
+                    </Space>
+                  ) : (
+                    <Text type="secondary">（旧密钥无明文，请删除后重建）</Text>
+                  ),
               },
               {
                 title: '权限',
@@ -770,6 +791,7 @@ export const AdminPage: React.FC = () => {
                 title: '操作',
                 key: 'action',
                 width: 80,
+                fixed: 'right',
                 render: (_: any, record: any) => (
                   <Popconfirm
                     title="确认删除该密钥？"
@@ -934,34 +956,6 @@ export const AdminPage: React.FC = () => {
         </Form>
       </Modal>
 
-      <Modal
-        title="请立即复制 API Key"
-        open={!!createdApiKey}
-        onOk={() => setCreatedApiKey(null)}
-        onCancel={() => setCreatedApiKey(null)}
-        okText="已保存"
-        cancelButtonProps={{ style: { display: 'none' } }}
-      >
-        <Text type="danger" style={{ display: 'block', marginBottom: 12 }}>
-          明文密钥仅显示一次，关闭后无法再次查看。
-        </Text>
-        <Input.TextArea value={createdApiKey || ''} readOnly autoSize={{ minRows: 2, maxRows: 4 }} />
-        <Button
-          type="link"
-          icon={<CopyOutlined />}
-          style={{ paddingLeft: 0, marginTop: 8 }}
-          onClick={async () => {
-            try {
-              await navigator.clipboard.writeText(createdApiKey || '');
-              message.success('已复制到剪贴板');
-            } catch {
-              message.error('复制失败，请手动选中复制');
-            }
-          }}
-        >
-          复制
-        </Button>
-      </Modal>
     </div>
   );
 };

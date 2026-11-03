@@ -10,6 +10,7 @@ export interface OpenApiKeyRow {
   name: string;
   key_prefix: string;
   key_hash: string;
+  api_key: string | null;
   scopes: string;
   status: string;
   created_by: string | null;
@@ -22,6 +23,8 @@ export interface OpenApiKeyPublic {
   id: string;
   name: string;
   keyPrefix: string;
+  /** Full plaintext key — always visible to admins */
+  apiKey: string | null;
   scopes: OpenApiScope[];
   status: 'active' | 'disabled';
   createdBy: string | null;
@@ -72,6 +75,7 @@ function toPublic(row: OpenApiKeyRow): OpenApiKeyPublic {
     id: row.id,
     name: row.name,
     keyPrefix: row.key_prefix,
+    apiKey: row.api_key || null,
     scopes: parseScopes(row.scopes),
     status: row.status === 'disabled' ? 'disabled' : 'active',
     createdBy: row.created_by,
@@ -100,12 +104,11 @@ export class OpenApiKeyService {
     return row ? toPublic(row) : null;
   }
 
-  /** Create key. Plaintext returned once only. */
   create(input: {
     name: string;
     scopes: OpenApiScope[];
     createdBy?: string | null;
-  }): { key: OpenApiKeyPublic; apiKey: string } {
+  }): OpenApiKeyPublic {
     const name = String(input.name || '').trim();
     if (!name) throw new Error('名称不能为空');
     const scopes = parseScopes(input.scopes);
@@ -121,13 +124,22 @@ export class OpenApiKeyService {
     this.db
       .prepare(`
         INSERT INTO open_api_keys (
-          id, name, key_prefix, key_hash, scopes, status, created_by, last_used_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?)
+          id, name, key_prefix, key_hash, api_key, scopes, status, created_by, last_used_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?)
       `)
-      .run(id, name, keyPrefix, keyHash, JSON.stringify(scopes), input.createdBy || null, now, now);
+      .run(
+        id,
+        name,
+        keyPrefix,
+        keyHash,
+        apiKey,
+        JSON.stringify(scopes),
+        input.createdBy || null,
+        now,
+        now,
+      );
 
-    const key = this.getById(id)!;
-    return { key, apiKey };
+    return this.getById(id)!;
   }
 
   update(
