@@ -1,6 +1,9 @@
-import React from 'react';
-import { Button, List, Popconfirm, Space, Spin, Tag, Typography } from 'antd';
-import { CheckCircleFilled, DeleteOutlined, PauseOutlined, PlayCircleOutlined } from '@ant-design/icons';
+import React, { useState } from 'react';
+import { Button, List, Popconfirm, Space, Spin, Tag, Typography, message } from 'antd';
+import {
+  CheckCircleFilled, DeleteOutlined, DownloadOutlined, PauseOutlined, PlayCircleOutlined,
+} from '@ant-design/icons';
+import { downloadVoiceSample } from './playVoiceSample';
 
 const { Paragraph, Text } = Typography;
 
@@ -30,7 +33,23 @@ export const VoiceListPanel: React.FC<VoiceListPanelProps> = ({
   onDeleteVoice,
   emptyText = '暂无音色。可先克隆一段参考音频。',
   selectionHighlight = true,
-}) => (
+}) => {
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+
+  const handleDownload = async (voice: any) => {
+    if (!voice?.id || downloadingId) return;
+    setDownloadingId(voice.id);
+    try {
+      await downloadVoiceSample(voice.id, voice.name || `voice-${String(voice.id).slice(0, 8)}`);
+      message.success('已开始下载参考音频');
+    } catch (err: any) {
+      message.error(err?.message || '下载失败');
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
+  return (
   <Spin spinning={!!loading}>
     {voices.length === 0 ? (
       <Paragraph type="secondary" style={{ margin: 0 }}>{emptyText}</Paragraph>
@@ -41,6 +60,7 @@ export const VoiceListPanel: React.FC<VoiceListPanelProps> = ({
         renderItem={(voice: any) => {
           const selected = selectionHighlight && selectedVoiceId === voice.id;
           const selectable = !!onSelectVoice;
+          const isClone = voice.source === 'personal';
           return (
             <List.Item
               onClick={() => selectable && onSelectVoice?.(voice.id)}
@@ -60,7 +80,18 @@ export const VoiceListPanel: React.FC<VoiceListPanelProps> = ({
                 >
                   {playingVoiceId === voice.id ? '停止' : previewLoadingVoiceId === voice.id ? '合成中' : '试听'}
                 </Button>,
-                onDeleteVoice && voice.source === 'personal' ? (
+                isClone ? (
+                  <Button
+                    key="download"
+                    type="text"
+                    loading={downloadingId === voice.id}
+                    icon={<DownloadOutlined />}
+                    onClick={(e) => { e.stopPropagation(); void handleDownload(voice); }}
+                  >
+                    下载
+                  </Button>
+                ) : null,
+                onDeleteVoice && isClone ? (
                   <Popconfirm
                     key="del"
                     title="确认删除此音色？"
@@ -80,8 +111,8 @@ export const VoiceListPanel: React.FC<VoiceListPanelProps> = ({
                     {voice.name}
                     {selected && <CheckCircleFilled style={{ color: '#1677ff' }} />}
                     <Tag>{voice.language}</Tag>
-                    <Tag color={voice.source === 'personal' ? 'purple' : voice.source === 'preset' ? 'cyan' : 'blue'}>
-                      {voice.source === 'personal' ? '克隆' : voice.source === 'preset' ? '预置' : '预置'}
+                    <Tag color={isClone ? 'purple' : voice.source === 'preset' ? 'cyan' : 'blue'}>
+                      {isClone ? '克隆' : '预置'}
                     </Tag>
                   </Space>
                 }
@@ -93,6 +124,7 @@ export const VoiceListPanel: React.FC<VoiceListPanelProps> = ({
       />
     )}
   </Spin>
-);
+  );
+};
 
 export default VoiceListPanel;

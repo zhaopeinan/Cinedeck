@@ -9,4 +9,4 @@ export type { ModelListPanelProps } from './ModelListPanel';
 export { ModelDetailModal } from './ModelDetailModal';
 export type { ModelDetailModalProps } from './ModelDetailModal';
 export { useVoiceboxCatalog } from './useVoiceboxCatalog';
-export { fetchVoiceSampleObjectUrl } from './playVoiceSample';
+export { fetchVoiceSampleObjectUrl, downloadVoiceSample } from './playVoiceSample';
