@@ -25,6 +25,7 @@ reference_system_screenshot/
 *.pem
 *.key
 credentials.json
+!client/certs/.gitkeep
 
 # OS and editors
 .DS_Store

@@ -97,14 +97,17 @@ services:
     entrypoint: ["sleep", "infinity"]
     restart: unless-stopped
 
-  # Frontend - React SPA
+  # Frontend - React SPA (HTTPS for microphone / getUserMedia)
   frontend:
     build:
       context: .
       dockerfile: client/Dockerfile
     image: ppt-audio-frontend:latest
     ports:
-      - "5173:80"
+      - "5173:80"   # HTTP → 301 https://$host/
+      - "443:443"   # 自签 HTTPS，访问 https://<IP>/
+    volumes:
+      - ./client/certs:/etc/nginx/certs:ro
     depends_on:
       - dispatcher
     security_opt:
