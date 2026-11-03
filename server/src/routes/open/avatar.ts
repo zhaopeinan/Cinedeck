@@ -31,6 +31,7 @@ import {
 } from '../../services/avatarComposeService';
 import { createApiKeyAuth } from '../../middleware/apiKeyAuth';
 import { OpenApiKeyService } from '../../services/openApiKeyService';
+import { sendMediaFile } from '../../utils/sendMediaFile';
 
 const MAX_PHOTO_BYTES = 20 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
@@ -264,9 +265,11 @@ export function createOpenAvatarRouter(openApiKeys: OpenApiKeyService): Router {
         error: { code: '404', message: '视频不存在' },
       });
     }
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', `inline; filename="avatar-${job.id}.mp4"`);
-    fs.createReadStream(job.outputPath).pipe(res);
+    sendMediaFile(req, res, job.outputPath, {
+      contentType: 'video/mp4',
+      fileName: `avatar-${job.id}.mp4`,
+      disposition: 'inline',
+    });
   });
 
   router.post('/jobs/:id/cancel', (req: Request, res: Response) => {
@@ -445,9 +448,11 @@ export function createOpenAvatarRouter(openApiKeys: OpenApiKeyService): Router {
       });
     }
     const name = job.mode === 'preview' ? `compose-preview-${job.id}.mp4` : `compose-${job.id}.mp4`;
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', `inline; filename="${name}"`);
-    fs.createReadStream(job.outputPath).pipe(res);
+    sendMediaFile(req, res, job.outputPath, {
+      contentType: 'video/mp4',
+      fileName: name,
+      disposition: 'inline',
+    });
   });
 
   return router;

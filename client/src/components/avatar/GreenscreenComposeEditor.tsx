@@ -41,6 +41,7 @@ export const GreenscreenComposeEditor: React.FC<GreenscreenComposeEditorProps> =
     startY: number;
     origin: AvatarLayout;
   }>(null);
+  const [gsReady, setGsReady] = useState(false);
   const chromaRef = useRef(chromaSimilarity);
   chromaRef.current = chromaSimilarity;
 
@@ -119,43 +120,47 @@ export const GreenscreenComposeEditor: React.FC<GreenscreenComposeEditorProps> =
     const offCtx = offscreen.getContext('2d', { willReadFrequently: true });
     const ctx = canvas.getContext('2d');
 
+    setGsReady(false);
+
     const paint = () => {
       if (stopped || !offCtx || !ctx) return;
       const gw = gs.videoWidth || 0;
       const gh = gs.videoHeight || 0;
       if (gw > 0 && gh > 0) {
-        // Downscale for realtime performance
-        const maxW = 480;
-        const scale = Math.min(1, maxW / gw);
-        const dw = Math.max(2, Math.floor(gw * scale));
-        const dh = Math.max(2, Math.floor(gh * scale));
-        if (offscreen.width !== dw || offscreen.height !== dh) {
-          offscreen.width = dw;
-          offscreen.height = dh;
-          canvas.width = dw;
-          canvas.height = dh;
-        }
-        offCtx.drawImage(gs, 0, 0, dw, dh);
-        const frame = offCtx.getImageData(0, 0, dw, dh);
-        const data = frame.data;
-        // Map similarity (0.05–0.6) → green-dominance threshold
-        const sim = Math.min(0.6, Math.max(0.05, chromaRef.current));
-        const greenBias = 25 + sim * 180; // how much G must exceed R/B
-        const maxRb = 200 - sim * 120;
-        for (let i = 0; i < data.length; i += 4) {
-          const r = data[i];
-          const g = data[i + 1];
-          const b = data[i + 2];
-          if (g > r + greenBias * 0.35 && g > b + greenBias * 0.35 && r < maxRb && b < maxRb) {
-            data[i + 3] = 0;
-          } else if (g > r + 10 && g > b + 10 && g > 80) {
-            // soft edge
-            const excess = Math.min(g - r, g - b);
-            const alpha = Math.max(0, Math.min(255, 255 - excess * sim * 4));
-            data[i + 3] = alpha;
+        try {
+          // Downscale for realtime performance
+          const maxW = 480;
+          const scale = Math.min(1, maxW / gw);
+          const dw = Math.max(2, Math.floor(gw * scale));
+          const dh = Math.max(2, Math.floor(gh * scale));
+          if (offscreen.width !== dw || offscreen.height !== dh) {
+            offscreen.width = dw;
+            offscreen.height = dh;
+            canvas.width = dw;
+            canvas.height = dh;
           }
+          offCtx.drawImage(gs, 0, 0, dw, dh);
+          const frame = offCtx.getImageData(0, 0, dw, dh);
+          const data = frame.data;
+          const sim = Math.min(0.6, Math.max(0.05, chromaRef.current));
+          const greenBias = 25 + sim * 180;
+          const maxRb = 200 - sim * 120;
+          for (let i = 0; i < data.length; i += 4) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            if (g > r + greenBias * 0.35 && g > b + greenBias * 0.35 && r < maxRb && b < maxRb) {
+              data[i + 3] = 0;
+            } else if (g > r + 10 && g > b + 10 && g > 80) {
+              const excess = Math.min(g - r, g - b);
+              const alpha = Math.max(0, Math.min(255, 255 - excess * sim * 4));
+              data[i + 3] = alpha;
+            }
+          }
+          ctx.putImageData(frame, 0, 0);
+        } catch {
+          // SecurityError / incomplete frame — keep looping
         }
-        ctx.putImageData(frame, 0, 0);
       }
       raf = requestAnimationFrame(paint);
     };
@@ -164,6 +169,7 @@ export const GreenscreenComposeEditor: React.FC<GreenscreenComposeEditorProps> =
       try {
         bg.muted = true;
         gs.muted = true;
+        gs.preload = 'auto';
         await Promise.all([bg.play().catch(() => undefined), gs.play().catch(() => undefined)]);
       } catch { /* ignore */ }
     };
@@ -172,12 +178,20 @@ export const GreenscreenComposeEditor: React.FC<GreenscreenComposeEditorProps> =
       if (bg.videoWidth && bg.videoHeight) setBgAr(bg.videoWidth / bg.videoHeight);
     };
     const onMetaGs = () => {
-      if (gs.videoWidth && gs.videoHeight) setGsAr(gs.videoWidth / gs.videoHeight);
+      if (gs.videoWidth && gs.videoHeight) {
+        setGsAr(gs.videoWidth / gs.videoHeight);
+        setGsReady(true);
+      }
+    };
+    const onCanPlayGs = () => {
+      if (gs.videoWidth && gs.videoHeight) setGsReady(true);
     };
     bg.addEventListener('loadedmetadata', onMetaBg);
     gs.addEventListener('loadedmetadata', onMetaGs);
+    gs.addEventListener('canplay', onCanPlayGs);
     if (bg.readyState >= 1) onMetaBg();
     if (gs.readyState >= 1) onMetaGs();
+    if (gs.readyState >= 3) onCanPlayGs();
 
     void syncPlay();
     raf = requestAnimationFrame(paint);
@@ -187,6 +201,7 @@ export const GreenscreenComposeEditor: React.FC<GreenscreenComposeEditorProps> =
       cancelAnimationFrame(raf);
       bg.removeEventListener('loadedmetadata', onMetaBg);
       gs.removeEventListener('loadedmetadata', onMetaGs);
+      gs.removeEventListener('canplay', onCanPlayGs);
       bg.pause();
       gs.pause();
     };
@@ -218,14 +233,23 @@ export const GreenscreenComposeEditor: React.FC<GreenscreenComposeEditorProps> =
           playsInline
           style={{ display: 'block', width: '100%', height: 'auto', borderRadius: 8 }}
         />
-        {/* Hidden source for chroma sampling */}
+        {/* Decode source: real-sized (off-layout) so browsers don't throttle 1×1 videos */}
         <video
           ref={gsRef}
           src={greenscreenUrl}
           muted
           loop
           playsInline
-          style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }}
+          preload="auto"
+          style={{
+            position: 'absolute',
+            left: -9999,
+            top: 0,
+            width: 320,
+            height: 320,
+            opacity: 0,
+            pointerEvents: 'none',
+          }}
         />
         <div
           style={{
@@ -240,7 +264,7 @@ export const GreenscreenComposeEditor: React.FC<GreenscreenComposeEditorProps> =
             cursor: disabled ? 'default' : 'move',
             overflow: 'hidden',
             borderRadius: 4,
-            background: 'transparent',
+            background: gsReady ? 'transparent' : 'rgba(0,0,0,0.45)',
           }}
           onPointerDown={(e) => {
             if (disabled) return;
@@ -248,6 +272,23 @@ export const GreenscreenComposeEditor: React.FC<GreenscreenComposeEditorProps> =
             setDrag({ mode: 'move', startX: e.clientX, startY: e.clientY, origin: layout });
           }}
         >
+          {!gsReady && (
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#fff',
+                fontSize: 12,
+                zIndex: 1,
+                pointerEvents: 'none',
+              }}
+            >
+              绿幕解码中…
+            </div>
+          )}
           <canvas
             ref={canvasRef}
             style={{

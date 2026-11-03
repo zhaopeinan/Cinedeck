@@ -30,6 +30,8 @@ const STOP_PEER_CONTAINERS = [OPENTALKING_CONTAINER].filter(Boolean);
 const STOP_ITRANS = process.env.AVATAR_STOP_ITRANS !== '0';
 const MAX_AUDIO_SECONDS = Number(process.env.AVATAR_MAX_AUDIO_SECONDS || 120);
 const MAX_TEMPLATE_SECONDS = Number(process.env.AVATAR_MAX_TEMPLATE_SECONDS || 60);
+/** Cap long edge of Duix template / output (avoids 4K ~100MB+ clips). */
+const MAX_AVATAR_EDGE = Math.max(480, Number(process.env.AVATAR_MAX_EDGE || 1080));
 /**
  * Duix lips sometimes feel late; keep at 0 unless explicitly tuned.
  * (Compose-time A/V sync is handled separately — do not use this to paper over mux delay.)
@@ -293,6 +295,58 @@ async function remuxAvatarToDriveAudio(opts: {
   log(`remux lip-sync ok lag=${lipLag.toFixed(3)}s audio=${audioDur.toFixed(3)}s videoWas=${videoDur.toFixed(3)}s -> ${opts.outputPath}`);
 }
 
+/** Scale so long edge ≤ maxEdge, keep even dimensions. */
+function scaleFilterMaxEdge(maxEdge: number): string {
+  const e = Math.max(2, Math.floor(maxEdge / 2) * 2);
+  // min(e,iw)/min(e,ih) then force even via trunc
+  return `scale='min(${e}\\,iw)':'min(${e}\\,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2`;
+}
+
+async function ffprobeSize(filePath: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve) => {
+    const child = spawn('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height',
+      '-of', 'csv=p=0:s=x',
+      filePath,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.on('close', () => {
+      const [w, h] = String(stdout).trim().split('x').map((x) => parseInt(x, 10));
+      resolve({ width: w || 0, height: h || 0 });
+    });
+  });
+}
+
+/** If output exceeds max edge, recompress in-place to capped mp4. */
+async function downscaleAvatarOutputIfNeeded(filePath: string): Promise<void> {
+  const { width, height } = await ffprobeSize(filePath);
+  const longEdge = Math.max(width, height);
+  if (!(longEdge > MAX_AVATAR_EDGE)) return;
+  const tmp = `${filePath}.scaled.mp4`;
+  log(`downscale avatar ${width}x${height} → max ${MAX_AVATAR_EDGE}: ${path.basename(filePath)}`);
+  const r = await runCmd(
+    'ffmpeg',
+    [
+      '-y', '-i', filePath,
+      '-vf', scaleFilterMaxEdge(MAX_AVATAR_EDGE),
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'veryfast', '-crf', '20',
+      '-c:a', 'aac', '-b:a', '160k',
+      '-movflags', '+faststart',
+      tmp,
+    ],
+    { timeoutMs: 600000 },
+  );
+  if (r.code !== 0 || !fs.existsSync(tmp) || fs.statSync(tmp).size < 1000) {
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+    log(`downscale failed, keep original: ${(r.stderr || '').slice(-300)}`);
+    return;
+  }
+  fs.renameSync(tmp, filePath);
+}
+
 async function prepareMediaInJobDir(
   jobDir: string,
   driveMode: AvatarDriveMode = 'photo',
@@ -302,6 +356,7 @@ async function prepareMediaInJobDir(
   const audioWav = path.join(jobDir, 'audio_16k.wav');
   const templateMp4 = path.join(jobDir, 'template.mp4');
   const maxAudio = opts?.maxAudioSeconds ?? MAX_AUDIO_SECONDS;
+  const vf = scaleFilterMaxEdge(MAX_AVATAR_EDGE);
 
   const a = await runCmd(
     'ffmpeg',
@@ -319,7 +374,7 @@ async function prepareMediaInJobDir(
       [
         '-y', '-i', srcVideo,
         '-t', String(MAX_TEMPLATE_SECONDS),
-        '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+        '-vf', vf,
         '-r', '25',
         '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an',
         templateMp4,
@@ -336,7 +391,7 @@ async function prepareMediaInJobDir(
       [
         '-y', '-loop', '1', '-i', photo,
         '-t', '4', '-r', '25',
-        '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+        '-vf', vf,
         '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an',
         templateMp4,
       ],
@@ -457,6 +512,7 @@ async function runDuixViaHttp(job: AvatarJob): Promise<void> {
 
   const outputPath = path.join(hostJobDir, 'output.mp4');
   fs.copyFileSync(resultHost, outputPath);
+  await downscaleAvatarOutputIfNeeded(outputPath);
   updateAvatarJob(job.id, {
     outputPath,
     stage: 'muxed',
@@ -854,6 +910,7 @@ async function synthesizeDuixClipOnce(opts: {
     driveAudioPath: driveAudio,
     outputPath,
   });
+  await downscaleAvatarOutputIfNeeded(outputPath);
   opts.onProgress?.('视频已生成', 95);
   return outputPath;
 }

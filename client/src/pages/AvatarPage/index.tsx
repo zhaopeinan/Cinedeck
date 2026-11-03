@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Alert, Button, Card, Col, Progress, Row, Space, Steps, Tabs, Typography, Upload, message, Checkbox,
+  Alert, Button, Card, Col, Progress, Row, Space, Steps, Tabs, Typography, Upload, message, Checkbox, Modal,
 } from 'antd';
 import {
   ArrowLeftOutlined, InboxOutlined, SoundOutlined, PictureOutlined,
@@ -90,6 +90,9 @@ const AvatarPage: React.FC = () => {
   const [composeSubmitting, setComposeSubmitting] = useState(false);
   const [composeJob, setComposeJob] = useState<ComposeState | null>(null);
   const composePollRef = useRef<number | null>(null);
+  const [gsLocalizing, setGsLocalizing] = useState(false);
+  const [gsLocalProgress, setGsLocalProgress] = useState<{ loaded: number; total: number | null } | null>(null);
+  const gsBlobUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     document.title = 'Cinedeck · 数字人解说';
@@ -99,12 +102,31 @@ const AvatarPage: React.FC = () => {
       [photoPreview, templatePreview, audioPreview, backgroundPreview, gsUploadPreview].forEach((u) => {
         if (u) URL.revokeObjectURL(u);
       });
-      if (greenscreen?.kind === 'file' && greenscreen.previewUrl) {
+      if (gsBlobUrlRef.current) URL.revokeObjectURL(gsBlobUrlRef.current);
+      if (greenscreen?.kind === 'file' && greenscreen.previewUrl?.startsWith('blob:')) {
         URL.revokeObjectURL(greenscreen.previewUrl);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /** Pull Duix job video to a local blob URL so摆位 Canvas can decode instantly. */
+  const localizeJobGreenscreen = async (jobId: string): Promise<string> => {
+    setGsLocalizing(true);
+    setGsLocalProgress({ loaded: 0, total: null });
+    try {
+      const blob = await avatarApi.fetchJobVideoBlob(jobId, (loaded, total) => {
+        setGsLocalProgress({ loaded, total });
+      });
+      if (gsBlobUrlRef.current) URL.revokeObjectURL(gsBlobUrlRef.current);
+      const url = URL.createObjectURL(blob);
+      gsBlobUrlRef.current = url;
+      return url;
+    } finally {
+      setGsLocalizing(false);
+      setGsLocalProgress(null);
+    }
+  };
 
   const stopPolling = () => {
     if (pollRef.current) {
@@ -131,9 +153,7 @@ const AvatarPage: React.FC = () => {
           stopPolling();
           setSubmitting(false);
           if (data.status === 'completed') {
-            const url = withToken(`/api/v1/avatar/jobs/${jobId}/video`);
-            setGreenscreen({ kind: 'job', jobId, previewUrl: url });
-            message.success('绿幕数字人已生成，可继续叠到底视频');
+            message.success('绿幕数字人已生成，请点击「用作绿幕继续合成」');
           }
         }
       } catch {
@@ -512,9 +532,15 @@ const AvatarPage: React.FC = () => {
                                   <Button
                                     type="primary"
                                     style={{ marginTop: 8 }}
-                                    onClick={() => {
-                                      setGreenscreen({ kind: 'job', jobId: job.id, previewUrl: resultVideoUrl });
-                                      message.success('已选用该绿幕片');
+                                    loading={gsLocalizing}
+                                    onClick={async () => {
+                                      try {
+                                        const blobUrl = await localizeJobGreenscreen(job.id);
+                                        setGreenscreen({ kind: 'job', jobId: job.id, previewUrl: blobUrl });
+                                        message.success('绿幕已缓存到本地，可进入摆位');
+                                      } catch (e: any) {
+                                        message.error(e?.message || '缓存绿幕失败');
+                                      }
                                     }}
                                   >
                                     用作绿幕继续合成
@@ -580,14 +606,53 @@ const AvatarPage: React.FC = () => {
               type="primary"
               size="large"
               icon={<ArrowRightOutlined />}
-              disabled={!canGoStep2}
-              onClick={() => setStep(1)}
+              disabled={!canGoStep2 || gsLocalizing}
+              loading={gsLocalizing}
+              onClick={async () => {
+                if (greenscreen?.kind === 'job' && greenscreen.previewUrl && !greenscreen.previewUrl.startsWith('blob:')) {
+                  try {
+                    const blobUrl = await localizeJobGreenscreen(greenscreen.jobId);
+                    setGreenscreen({ kind: 'job', jobId: greenscreen.jobId, previewUrl: blobUrl });
+                  } catch (e: any) {
+                    message.error(e?.message || '缓存绿幕失败，无法进入摆位');
+                    return;
+                  }
+                }
+                setStep(1);
+              }}
             >
               下一步：摆位
             </Button>
           </div>
         </>
       )}
+
+      <Modal
+        open={gsLocalizing}
+        footer={null}
+        closable={false}
+        title="正在缓存绿幕到本地…"
+        destroyOnClose
+      >
+        <Paragraph type="secondary" style={{ marginBottom: 12 }}>
+          摆位需要本地解码；大文件首次缓存会稍慢，完成后即可实时抠绿。
+        </Paragraph>
+        <Progress
+          percent={
+            gsLocalProgress?.total
+              ? Math.min(99, Math.round((gsLocalProgress.loaded / gsLocalProgress.total) * 100))
+              : undefined
+          }
+          status="active"
+          format={() => {
+            if (!gsLocalProgress) return '';
+            const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(1)} MB`;
+            return gsLocalProgress.total
+              ? `${mb(gsLocalProgress.loaded)} / ${mb(gsLocalProgress.total)}`
+              : mb(gsLocalProgress.loaded);
+          }}
+        />
+      </Modal>
 
       {step === 1 && greenscreenPreviewUrl && backgroundPreview && (
         <Card

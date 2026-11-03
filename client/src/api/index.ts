@@ -493,6 +493,42 @@ export const avatarApi = {
   },
   getJob: (id: string) => apiClient.get<ApiResponse<any>>(`/avatar/jobs/${id}`),
   getVideoUrl: (id: string) => withToken(`/api/v1/avatar/jobs/${id}/video`),
+  /** Fetch Duix/job video into a Blob for local playback (avoids streaming 4K into canvas). */
+  fetchJobVideoBlob: async (
+    id: string,
+    onProgress?: (loaded: number, total: number | null) => void,
+  ): Promise<Blob> => {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const res = await fetch(`/api/v1/avatar/jobs/${id}/video`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    });
+    if (!res.ok) {
+      let msg = '下载绿幕视频失败';
+      try {
+        const body = await res.json();
+        msg = body?.error?.message || msg;
+      } catch { /* ignore */ }
+      throw new Error(msg);
+    }
+    const totalHeader = res.headers.get('Content-Length');
+    const total = totalHeader ? parseInt(totalHeader, 10) : null;
+    if (!res.body || !onProgress) {
+      const blob = await res.blob();
+      onProgress?.(blob.size, total ?? blob.size);
+      return blob;
+    }
+    const reader = res.body.getReader();
+    const chunks: BlobPart[] = [];
+    let loaded = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      loaded += value.byteLength;
+      onProgress(loaded, Number.isFinite(total as number) ? total : null);
+    }
+    return new Blob(chunks, { type: res.headers.get('Content-Type') || 'video/mp4' });
+  },
 
   /** 绿幕叠底视频：预览 / 导出 */
   createCompose: (opts: {

@@ -44,7 +44,8 @@ export async function prepareDuixVideoTemplate(srcVideo: string, destMp4: string
   const r = await runCmd('ffmpeg', [
     '-y', '-i', srcVideo,
     '-t', String(MAX_TEMPLATE_SECONDS),
-    '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+    // Cap long edge at 1080 to avoid 4K Duix outputs
+    '-vf', "scale='min(1080\\,iw)':'min(1080\\,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
     '-r', '25',
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an',
     tmp,
@@ -67,7 +68,7 @@ export async function prepareDuixPhotoTemplate(photoPath: string, destMp4: strin
   const r = await runCmd('ffmpeg', [
     '-y', '-loop', '1', '-i', photoPath,
     '-t', '4', '-r', '25',
-    '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+    '-vf', "scale='min(1080\\,iw)':'min(1080\\,ih)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2",
     '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an',
     tmp,
   ], 120000);
