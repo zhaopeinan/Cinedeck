@@ -3,7 +3,7 @@ import {
   Button, Card, Checkbox, Empty, Input, List, Popconfirm, Radio, Select, Space, Tag, Typography, Upload, message,
 } from 'antd';
 import {
-  DeleteOutlined, EditOutlined, PlusOutlined, VideoCameraOutlined,
+  DeleteOutlined, DownloadOutlined, EditOutlined, PlusOutlined, VideoCameraOutlined,
 } from '@ant-design/icons';
 import { avatarApi, type AvatarRefVideo } from '../../api';
 import { formatFileSize } from '../../utils/formatFileSize';
@@ -69,6 +69,7 @@ export const AvatarRefLibraryPanel: React.FC<AvatarRefLibraryPanelProps> = ({
   const [uploadAsGreenscreen, setUploadAsGreenscreen] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
 
   const effectiveSelected = mode === 'select' ? (value ?? selectedId) : selectedId;
   const selectedRef = refs.find((r) => r.id === effectiveSelected) || null;
@@ -140,6 +141,19 @@ export const AvatarRefLibraryPanel: React.FC<AvatarRefLibraryPanelProps> = ({
       if (checked) message.info('已标记为绿幕：叠到 PPT 时会抠绿做成透明');
     } catch (err: any) {
       message.error(err.response?.data?.error?.message || '更新失败');
+    }
+  };
+
+  const handleDownload = async (item: AvatarRefVideo) => {
+    if (!item?.id || downloadingId) return;
+    setDownloadingId(item.id);
+    try {
+      await avatarApi.downloadRef(item.id, item.name || item.fileName);
+      message.success('已开始下载原始参考视频');
+    } catch (err: any) {
+      message.error(err?.message || '下载失败');
+    } finally {
+      setDownloadingId(null);
     }
   };
 
@@ -245,24 +259,42 @@ export const AvatarRefLibraryPanel: React.FC<AvatarRefLibraryPanelProps> = ({
             style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}
           >
             {refs.map((r) => (
-              <Radio
+              <div
                 key={r.id}
-                value={r.id}
                 style={{
-                  margin: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 8,
                   padding: '8px 10px',
                   borderRadius: 8,
                   background: effectiveSelected === r.id ? 'rgba(22,119,255,0.06)' : undefined,
                 }}
               >
-                <Space>
-                  {r.name}
-                  {r.isGreenscreen && <Tag color="green">绿幕</Tag>}
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {formatFileSize(r.fileSize)}
-                  </Text>
-                </Space>
-              </Radio>
+                <Radio value={r.id} style={{ margin: 0, flex: 1 }}>
+                  <Space>
+                    {r.name}
+                    {r.isGreenscreen && <Tag color="green">绿幕</Tag>}
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {formatFileSize(r.fileSize)}
+                    </Text>
+                  </Space>
+                </Radio>
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  loading={downloadingId === r.id}
+                  disabled={disabled}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void handleDownload(r);
+                  }}
+                >
+                  下载
+                </Button>
+              </div>
             ))}
           </Radio.Group>
           {previewPlayer}
@@ -290,6 +322,20 @@ export const AvatarRefLibraryPanel: React.FC<AvatarRefLibraryPanelProps> = ({
                 >
                   绿幕
                 </Checkbox>,
+                <Button
+                  key="download"
+                  type="text"
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  loading={downloadingId === item.id}
+                  disabled={disabled}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleDownload(item);
+                  }}
+                >
+                  下载
+                </Button>,
                 <Button
                   key="edit"
                   type="text"

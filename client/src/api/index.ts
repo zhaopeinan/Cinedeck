@@ -423,6 +423,35 @@ export const avatarApi = {
     apiClient.patch<ApiResponse<AvatarRefVideo>>(`/avatar/refs/${id}`, patch),
   deleteRef: (id: string) => apiClient.delete<ApiResponse<any>>(`/avatar/refs/${id}`),
   getRefPreviewUrl: (id: string) => withToken(`/api/v1/avatar/refs/${id}/preview`),
+  getRefDownloadUrl: (id: string) => withToken(`/api/v1/avatar/refs/${id}/download`),
+  /** 下载素材库中的原始参考视频 */
+  downloadRef: async (id: string, filenameHint?: string) => {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const res = await fetch(`/api/v1/avatar/refs/${id}/download`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    });
+    if (!res.ok) {
+      let msg = '下载失败';
+      try {
+        const body = await res.json();
+        msg = body?.error?.message || msg;
+      } catch { /* ignore */ }
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') || '';
+    const matched = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(cd);
+    const fromHeader = matched?.[1] ? decodeURIComponent(matched[1]) : matched?.[2];
+    const filename = fromHeader || `${filenameHint || `ref-${id.slice(0, 8)}`}.mp4`;
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objectUrl);
+  },
 
   createJob: (opts: {
     driveMode: AvatarDriveMode;

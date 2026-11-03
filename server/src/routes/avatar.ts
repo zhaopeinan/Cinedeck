@@ -220,15 +220,36 @@ export function createAvatarRouter(db: Database.Database): Router {
     res.json({ success: true, data: { id: req.params.id }, error: null });
   });
 
-  router.get('/refs/:id/preview', (req: Request, res: Response) => {
+  const streamOwnedRef = (req: Request, res: Response, asDownload: boolean) => {
     const userId = getUserId(req);
     const row = refService.getOwned(String(req.params.id), userId);
     if (!row || !fs.existsSync(row.file_path)) {
       return res.status(404).json({ success: false, data: null, error: { code: '404', message: '参考视频不存在' } });
     }
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', `inline; filename="${row.file_name}"`);
+    const ext = path.extname(row.file_name || row.file_path || '').toLowerCase() || '.mp4';
+    const base = String(row.name || path.parse(row.file_name || 'ref').name || 'ref-video')
+      .replace(/[\\/:*?"<>|]+/g, '_')
+      .trim() || 'ref-video';
+    const displayName = base.toLowerCase().endsWith(ext) ? base : `${base}${ext}`;
+    const asciiName = displayName.replace(/[^\x20-\x7E]+/g, '_') || `ref${ext}`;
+    const contentType =
+      ext === '.webm' ? 'video/webm'
+        : ext === '.mov' ? 'video/quicktime'
+          : 'video/mp4';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader(
+      'Content-Disposition',
+      `${asDownload ? 'attachment' : 'inline'}; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(displayName)}`,
+    );
     fs.createReadStream(row.file_path).pipe(res);
+  };
+
+  router.get('/refs/:id/preview', (req: Request, res: Response) => {
+    streamOwnedRef(req, res, false);
+  });
+
+  router.get('/refs/:id/download', (req: Request, res: Response) => {
+    streamOwnedRef(req, res, true);
   });
 
   // --- Jobs (Duix only) ---
