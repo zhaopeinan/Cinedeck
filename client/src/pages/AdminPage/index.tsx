@@ -2,16 +2,16 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Tabs, Table, Button, Card, Row, Col, Statistic, Spin, Tag, Space,
-  Typography, Modal, Form, Input, Select, Switch, Popconfirm, message,
+  Typography, Modal, Form, Input, Select, Switch, Popconfirm, message, Checkbox,
 } from 'antd';
 import type { TableColumnsType } from 'antd';
 import {
   PlusOutlined, LogoutOutlined, HomeOutlined, UserOutlined,
   TeamOutlined, FileTextOutlined, CheckCircleOutlined, ClockCircleOutlined,
-  DeleteOutlined,
+  DeleteOutlined, KeyOutlined, CopyOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { authApi, projectApi } from '../../api';
+import { authApi, projectApi, openPlatformApi } from '../../api';
 import { useAuthStore } from '../../stores/authStore';
 
 const { Title, Text } = Typography;
@@ -101,6 +101,14 @@ export const AdminPage: React.FC = () => {
   const [projects, setProjects] = useState<any[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
 
+  // Open platform API keys
+  const [apiKeys, setApiKeys] = useState<any[]>([]);
+  const [apiKeysLoading, setApiKeysLoading] = useState(false);
+  const [createKeyOpen, setCreateKeyOpen] = useState(false);
+  const [createKeySubmitting, setCreateKeySubmitting] = useState(false);
+  const [createKeyForm] = Form.useForm();
+  const [createdApiKey, setCreatedApiKey] = useState<string | null>(null);
+
   // Auth: ensure user is loaded; redirect to login if no token
   useEffect(() => {
     if (!token) {
@@ -175,6 +183,18 @@ export const AdminPage: React.FC = () => {
     }
   }, []);
 
+  const loadApiKeys = useCallback(async () => {
+    setApiKeysLoading(true);
+    try {
+      const res = await openPlatformApi.listKeys();
+      setApiKeys(res.data.data || []);
+    } catch {
+      // ignore
+    } finally {
+      setApiKeysLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     if (activeTab === 'overview' && user?.role === 'admin') loadStats();
   }, [activeTab, loadStats, user]);
@@ -190,6 +210,52 @@ export const AdminPage: React.FC = () => {
   useEffect(() => {
     if (activeTab === 'projects' && user?.role === 'admin') loadProjects();
   }, [activeTab, loadProjects, user]);
+
+  useEffect(() => {
+    if (activeTab === 'open-platform' && user?.role === 'admin') loadApiKeys();
+  }, [activeTab, loadApiKeys, user]);
+
+  const handleCreateApiKey = async () => {
+    try {
+      const values = await createKeyForm.validateFields();
+      setCreateKeySubmitting(true);
+      const res = await openPlatformApi.createKey({
+        name: values.name,
+        scopes: values.scopes || [],
+      });
+      const data = res.data.data;
+      setCreatedApiKey(data?.apiKey || null);
+      setCreateKeyOpen(false);
+      createKeyForm.resetFields();
+      message.success('密钥已创建，请立即复制保存');
+      await loadApiKeys();
+    } catch (err: any) {
+      if (err?.errorFields) return;
+      message.error(getErrMsg(err));
+    } finally {
+      setCreateKeySubmitting(false);
+    }
+  };
+
+  const handleToggleApiKey = async (record: any, enabled: boolean) => {
+    try {
+      await openPlatformApi.updateKey(record.id, { status: enabled ? 'active' : 'disabled' });
+      message.success(enabled ? '已启用' : '已禁用');
+      await loadApiKeys();
+    } catch (err: any) {
+      message.error(getErrMsg(err));
+    }
+  };
+
+  const handleDeleteApiKey = async (id: string) => {
+    try {
+      await openPlatformApi.deleteKey(id);
+      message.success('已删除');
+      await loadApiKeys();
+    } catch (err: any) {
+      message.error(getErrMsg(err));
+    }
+  };
 
   const handleLogout = () => {
     logout();
@@ -616,6 +682,112 @@ export const AdminPage: React.FC = () => {
         </Card>
       ),
     },
+    {
+      key: 'open-platform',
+      label: '开放平台',
+      children: (
+        <Card
+          title="API Key 管理"
+          extra={
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={() => {
+                createKeyForm.resetFields();
+                createKeyForm.setFieldsValue({ scopes: ['tts', 'avatar'] });
+                setCreateKeyOpen(true);
+              }}
+            >
+              创建密钥
+            </Button>
+          }
+        >
+          <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
+            外部系统通过 <Text code>Authorization: Bearer sk_...</Text> 调用{' '}
+            <Text code>/api/open/v1/tts</Text> 与 <Text code>/api/open/v1/avatar</Text>。
+            明文密钥仅在创建时显示一次。
+          </Text>
+          <Table
+            rowKey="id"
+            loading={apiKeysLoading}
+            dataSource={apiKeys}
+            pagination={false}
+            columns={[
+              {
+                title: '名称',
+                dataIndex: 'name',
+                key: 'name',
+              },
+              {
+                title: '前缀',
+                dataIndex: 'keyPrefix',
+                key: 'keyPrefix',
+                width: 140,
+                render: (p: string) => <Text code>{p}…</Text>,
+              },
+              {
+                title: '权限',
+                dataIndex: 'scopes',
+                key: 'scopes',
+                width: 160,
+                render: (scopes: string[]) => (
+                  <Space size={4}>
+                    {(scopes || []).map((s) => (
+                      <Tag key={s} color={s === 'tts' ? 'blue' : 'purple'}>{s}</Tag>
+                    ))}
+                  </Space>
+                ),
+              },
+              {
+                title: '状态',
+                dataIndex: 'status',
+                key: 'status',
+                width: 100,
+                render: (status: string, record: any) => (
+                  <Switch
+                    checked={status === 'active'}
+                    checkedChildren="启用"
+                    unCheckedChildren="禁用"
+                    onChange={(checked) => handleToggleApiKey(record, checked)}
+                  />
+                ),
+              },
+              {
+                title: '最近使用',
+                dataIndex: 'lastUsedAt',
+                key: 'lastUsedAt',
+                width: 170,
+                render: (t: string | null) => formatTime(t),
+              },
+              {
+                title: '创建时间',
+                dataIndex: 'createdAt',
+                key: 'createdAt',
+                width: 170,
+                render: (t: string) => formatTime(t),
+              },
+              {
+                title: '操作',
+                key: 'action',
+                width: 80,
+                render: (_: any, record: any) => (
+                  <Popconfirm
+                    title="确认删除该密钥？"
+                    description="删除后使用此 Key 的外部调用将立即失效。"
+                    onConfirm={() => handleDeleteApiKey(record.id)}
+                    okText="删除"
+                    cancelText="取消"
+                    okButtonProps={{ danger: true }}
+                  >
+                    <Button type="text" danger icon={<DeleteOutlined />} size="small" />
+                  </Popconfirm>
+                ),
+              },
+            ]}
+          />
+        </Card>
+      ),
+    },
   ];
 
   if (!user) {
@@ -727,6 +899,68 @@ export const AdminPage: React.FC = () => {
             </Form.Item>
           )}
         </Form>
+      </Modal>
+
+      <Modal
+        title="创建开放平台密钥"
+        open={createKeyOpen}
+        onOk={handleCreateApiKey}
+        onCancel={() => { setCreateKeyOpen(false); createKeyForm.resetFields(); }}
+        confirmLoading={createKeySubmitting}
+        okText="创建"
+        cancelText="取消"
+      >
+        <Form
+          form={createKeyForm}
+          layout="vertical"
+          style={{ marginTop: 16 }}
+          initialValues={{ scopes: ['tts', 'avatar'] }}
+        >
+          <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入名称' }]}>
+            <Input placeholder="例如：外部系统 A" prefix={<KeyOutlined />} />
+          </Form.Item>
+          <Form.Item
+            name="scopes"
+            label="权限范围"
+            rules={[{ required: true, type: 'array', min: 1, message: '至少选择一个权限' }]}
+          >
+            <Checkbox.Group
+              options={[
+                { label: 'TTS（Voicebox）', value: 'tts' },
+                { label: 'Avatar（Duix）', value: 'avatar' },
+              ]}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="请立即复制 API Key"
+        open={!!createdApiKey}
+        onOk={() => setCreatedApiKey(null)}
+        onCancel={() => setCreatedApiKey(null)}
+        okText="已保存"
+        cancelButtonProps={{ style: { display: 'none' } }}
+      >
+        <Text type="danger" style={{ display: 'block', marginBottom: 12 }}>
+          明文密钥仅显示一次，关闭后无法再次查看。
+        </Text>
+        <Input.TextArea value={createdApiKey || ''} readOnly autoSize={{ minRows: 2, maxRows: 4 }} />
+        <Button
+          type="link"
+          icon={<CopyOutlined />}
+          style={{ paddingLeft: 0, marginTop: 8 }}
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(createdApiKey || '');
+              message.success('已复制到剪贴板');
+            } catch {
+              message.error('复制失败，请手动选中复制');
+            }
+          }}
+        >
+          复制
+        </Button>
       </Modal>
     </div>
   );

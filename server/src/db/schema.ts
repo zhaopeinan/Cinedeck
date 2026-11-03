@@ -349,5 +349,23 @@ export function initDatabase(dbPath?: string): Database.Database {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dialogue_jobs_status ON dialogue_jobs(status);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dialogue_jobs_created_at ON dialogue_jobs(created_at DESC);`);
 
+  // Open platform API keys (external access to TTS / Avatar)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS open_api_keys (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      key_prefix TEXT NOT NULL,
+      key_hash TEXT NOT NULL UNIQUE,
+      scopes TEXT NOT NULL DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'active',
+      created_by TEXT,
+      last_used_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_open_api_keys_status ON open_api_keys(status);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_open_api_keys_prefix ON open_api_keys(key_prefix);`);
+
   return db;
 }

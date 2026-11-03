@@ -2,7 +2,13 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
-import { updateAvatarJob, getAvatarJob, type AvatarJob, type AvatarDriveMode } from './avatarProgress';
+import {
+  updateAvatarJob,
+  getAvatarJob,
+  isAvatarJobCancelRequested,
+  type AvatarJob,
+  type AvatarDriveMode,
+} from './avatarProgress';
 
 const DUIX_CONTAINER = process.env.DUIX_CONTAINER || 'duix-avatar-gen-video';
 const OPENTALKING_CONTAINER = process.env.OPENTALKING_CONTAINER || 'opentalking-smoke';
@@ -413,6 +419,9 @@ async function runDuixViaHttp(job: AvatarJob): Promise<void> {
   const deadline = Date.now() + 30 * 60 * 1000;
   let resultRel: string | null = null;
   while (Date.now() < deadline) {
+    if (isAvatarJobCancelRequested(job.id)) {
+      throw new Error('数字人生成已取消');
+    }
     await new Promise((r) => setTimeout(r, 2000));
     const qRes = await fetch(`${DUIX_API_BASE}/easy/query?code=${encodeURIComponent(code)}`, {
       signal: AbortSignal.timeout(15000),
@@ -459,6 +468,16 @@ async function runDuixViaHttp(job: AvatarJob): Promise<void> {
 async function processJob(jobId: string): Promise<void> {
   const job = getAvatarJob(jobId);
   if (!job) return;
+  if (job.status === 'cancelled' || isAvatarJobCancelRequested(jobId)) {
+    updateAvatarJob(jobId, {
+      status: 'cancelled',
+      stage: 'cancelled',
+      message: '已取消',
+      progress: 100,
+      finishedAt: new Date().toISOString(),
+    });
+    return;
+  }
 
   try {
     updateAvatarJob(jobId, {
@@ -472,9 +491,23 @@ async function processJob(jobId: string): Promise<void> {
 
     updateAvatarJob(jobId, { stage: 'gpu_lock', message: '释放 GPU 占用（互斥调度）…', progress: 15 });
     await withDuixGpuExclusive(async () => {
+      if (isAvatarJobCancelRequested(jobId)) {
+        throw new Error('数字人生成已取消');
+      }
       updateAvatarJob(jobId, { stage: 'rendering', message: '开始渲染…', progress: 30 });
       await runDuixViaHttp(job);
     });
+
+    if (isAvatarJobCancelRequested(jobId)) {
+      updateAvatarJob(jobId, {
+        status: 'cancelled',
+        stage: 'cancelled',
+        message: '已取消',
+        progress: 100,
+        finishedAt: new Date().toISOString(),
+      });
+      return;
+    }
 
     updateAvatarJob(jobId, {
       status: 'completed',
@@ -485,12 +518,13 @@ async function processJob(jobId: string): Promise<void> {
     });
   } catch (err: any) {
     const message = err?.message || String(err);
-    log(`job ${jobId} [duix] failed: ${message}`);
+    const cancelled = /已取消/.test(message) || isAvatarJobCancelRequested(jobId);
+    log(`job ${jobId} [duix] ${cancelled ? 'cancelled' : 'failed'}: ${message}`);
     updateAvatarJob(jobId, {
-      status: 'failed',
-      stage: 'failed',
-      message: '生成失败',
-      error: message.slice(0, 1500),
+      status: cancelled ? 'cancelled' : 'failed',
+      stage: cancelled ? 'cancelled' : 'failed',
+      message: cancelled ? '已取消' : '生成失败',
+      error: cancelled ? null : message.slice(0, 1500),
       progress: 100,
       finishedAt: new Date().toISOString(),
     });
@@ -513,6 +547,13 @@ async function pump(): Promise<void> {
 export function enqueueAvatarJob(jobId: string): void {
   queue.push(jobId);
   void pump();
+}
+
+/** Remove a queued job id so it will not start after cancel. */
+export function dequeueAvatarJob(jobId: string): boolean {
+  const before = queue.length;
+  queue = queue.filter((id) => id !== jobId);
+  return queue.length < before;
 }
 
 export function getAvatarJobsDir(): string {

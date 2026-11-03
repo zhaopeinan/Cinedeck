@@ -1,4 +1,4 @@
-export type AvatarJobStatus = 'queued' | 'running' | 'completed' | 'failed';
+export type AvatarJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 /** photo=静照口型；video=参考视频驱动（可保留肢体动作） */
 export type AvatarDriveMode = 'photo' | 'video';
 
@@ -17,6 +17,7 @@ export interface AvatarJob {
   refVideoId: string | null;
   audioPath: string;
   outputPath: string | null;
+  cancelRequested: boolean;
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;
@@ -56,6 +57,7 @@ export function createAvatarJob(input: {
     refVideoId: input.refVideoId,
     audioPath: input.audioPath,
     outputPath: null,
+    cancelRequested: false,
     createdAt: nowIso(),
     updatedAt: nowIso(),
     startedAt: null,
@@ -79,6 +81,30 @@ export function updateAvatarJob(
   Object.assign(job, patch, { updatedAt: nowIso() });
   jobs.set(id, job);
   return job;
+}
+
+export function requestCancelAvatarJob(id: string): AvatarJob | null {
+  const job = jobs.get(id);
+  if (!job) return null;
+  if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+    return job;
+  }
+  job.cancelRequested = true;
+  job.updatedAt = nowIso();
+  if (job.status === 'queued') {
+    job.status = 'cancelled';
+    job.stage = 'cancelled';
+    job.message = '已取消';
+    job.progress = 100;
+    job.finishedAt = nowIso();
+  }
+  jobs.set(id, job);
+  return job;
+}
+
+export function isAvatarJobCancelRequested(id: string): boolean {
+  const job = jobs.get(id);
+  return !!(job && job.cancelRequested);
 }
 
 export function listRunningOrQueued(): AvatarJob[] {

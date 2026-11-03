@@ -349,6 +349,16 @@ export const systemSettingsApi = {
     apiClient.put<ApiResponse<any>>(`/system-settings/${key}`, { value }),
 };
 
+/** 开放平台 API Key 管理（管理员） */
+export const openPlatformApi = {
+  listKeys: () => apiClient.get<ApiResponse<any[]>>('/open-platform/keys'),
+  createKey: (data: { name: string; scopes: string[] }) =>
+    apiClient.post<ApiResponse<any>>('/open-platform/keys', data),
+  updateKey: (id: string, data: { name?: string; scopes?: string[]; status?: 'active' | 'disabled' }) =>
+    apiClient.patch<ApiResponse<any>>(`/open-platform/keys/${id}`, data),
+  deleteKey: (id: string) => apiClient.delete<ApiResponse<any>>(`/open-platform/keys/${id}`),
+};
+
 export interface GpuDeviceStatus {
   index: number;
   name: string;

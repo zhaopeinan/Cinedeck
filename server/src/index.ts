@@ -39,6 +39,10 @@ import { createHyperframeRouter } from './routes/hyperframe';
 import { DialogueJobService } from './services/dialogueJobService';
 import { initDialoguePipeline } from './services/dialogueGenerator';
 import { ensureTestImages } from './utils/generateTestImages';
+import { OpenApiKeyService } from './services/openApiKeyService';
+import { createOpenPlatformAdminRouter } from './routes/openPlatformAdmin';
+import { createOpenTtsRouter } from './routes/open/tts';
+import { createOpenAvatarRouter } from './routes/open/avatar';
 
 const PORT = process.env.PORT || 3001;
 
@@ -80,6 +84,7 @@ async function main() {
   const transcribeJobs = new TranscribeJobService(db);
   const hyperframeJobs = new HyperframeJobService(db);
   const dialogueJobs = new DialogueJobService(db);
+  const openApiKeys = new OpenApiKeyService(db);
 
   // Auth routes (captcha + login are public; users/logs/stats require auth inside the router)
   const authRouter = createAuthRouter(authService, authRequired, adminRequired);
@@ -148,6 +153,16 @@ async function main() {
 
   // System settings — admin only
   app.use('/api/v1/system-settings', authRequired, adminRequired, createSystemSettingsRouter(systemSettings));
+
+  // Open platform: admin manages API keys; external callers use /api/open/v1 with sk_ keys
+  app.use(
+    '/api/v1/open-platform',
+    authRequired,
+    adminRequired,
+    createOpenPlatformAdminRouter(openApiKeys),
+  );
+  app.use('/api/open/v1/tts', createOpenTtsRouter(voicebox, openApiKeys));
+  app.use('/api/open/v1/avatar', createOpenAvatarRouter(openApiKeys));
 
   app.listen(PORT, async () => {
     console.log(`Server running on http://localhost:${PORT}`);
