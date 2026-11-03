@@ -17,6 +17,7 @@ import {
   GreenscreenAlert,
   useAvatarRefs,
 } from '../../components/avatar';
+import { formatFileSize } from '../../utils/formatFileSize';
 
 const { Title, Text, Paragraph } = Typography;
 const { Dragger } = Upload;
@@ -301,7 +302,7 @@ const AvatarPage: React.FC = () => {
               <div style={{ marginTop: 16 }}>
                 <Text strong>{audio.name}</Text>
                 <br />
-                <Text type="secondary">{formatSize(audio.size)}</Text>
+                <Text type="secondary">{formatFileSize(audio.size)}</Text>
                 {audioPreview && (
                   <audio controls src={audioPreview} style={{ width: '100%', marginTop: 8 }} />
                 )}
