@@ -493,6 +493,34 @@ export const avatarApi = {
   },
   getJob: (id: string) => apiClient.get<ApiResponse<any>>(`/avatar/jobs/${id}`),
   getVideoUrl: (id: string) => withToken(`/api/v1/avatar/jobs/${id}/video`),
+
+  /** 绿幕叠底视频：预览 / 导出 */
+  createCompose: (opts: {
+    mode: 'preview' | 'export';
+    background: File;
+    greenscreen?: File | null;
+    greenscreenJobId?: string | null;
+    greenscreenRefId?: string | null;
+    layout: { x: number; y: number; w: number; h: number };
+    chromaSimilarity: number;
+    chromaBlend?: number;
+  }) => {
+    const formData = new FormData();
+    formData.append('mode', opts.mode);
+    formData.append('background', opts.background);
+    if (opts.greenscreen) formData.append('greenscreen', opts.greenscreen);
+    if (opts.greenscreenJobId) formData.append('greenscreenJobId', opts.greenscreenJobId);
+    if (opts.greenscreenRefId) formData.append('greenscreenRefId', opts.greenscreenRefId);
+    formData.append('layout', JSON.stringify(opts.layout));
+    formData.append('chromaSimilarity', String(opts.chromaSimilarity));
+    if (opts.chromaBlend != null) formData.append('chromaBlend', String(opts.chromaBlend));
+    return apiClient.post<ApiResponse<any>>('/avatar/compose', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 180000,
+    });
+  },
+  getCompose: (id: string) => apiClient.get<ApiResponse<any>>(`/avatar/compose/${id}`),
+  getComposeVideoUrl: (id: string) => withToken(`/api/v1/avatar/compose/${id}/video`),
 };
 
 /** 一键 MOOC 异步任务 */

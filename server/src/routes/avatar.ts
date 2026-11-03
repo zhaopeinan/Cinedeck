@@ -11,6 +11,20 @@ import {
 } from '../services/avatarProgress';
 import { enqueueAvatarJob, getAvatarJobsDir } from '../services/avatarWorker';
 import { AvatarRefVideoService } from '../services/avatarRefVideoService';
+import {
+  createComposeJob,
+  getComposeJob,
+  listComposeRunningOrQueued,
+} from '../services/composeProgress';
+import {
+  clampChromaBlend,
+  clampChromaSimilarity,
+  enqueueComposeJob,
+  getComposeJobsDir,
+  parseComposeLayoutJson,
+  parseComposeMode,
+  publicComposeJob,
+} from '../services/avatarComposeService';
 import type Database from 'better-sqlite3';
 
 const MAX_PHOTO_BYTES = 20 * 1024 * 1024;
@@ -434,6 +448,180 @@ export function createAvatarRouter(db: Database.Database): Router {
     }
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `inline; filename="avatar-${job.id}.mp4"`);
+    fs.createReadStream(job.outputPath).pipe(res);
+  });
+
+  // --- Greenscreen compose onto background video (ffmpeg only, no Duix GPU) ---
+
+  const composeDir = getComposeJobsDir();
+  const composeUpload = multer({
+    storage: multer.diskStorage({
+      destination: (req, _file, cb) => {
+        const jobId = (req as any)._composeJobId as string | undefined;
+        if (!jobId) return cb(new Error('missing compose job id'), composeDir);
+        const dir = path.join(composeDir, jobId);
+        fs.mkdirSync(dir, { recursive: true });
+        cb(null, dir);
+      },
+      filename: (_req, file, cb) => {
+        const ext = path.extname(file.originalname).toLowerCase() || '.mp4';
+        if (file.fieldname === 'background') cb(null, `background${ext}`);
+        else if (file.fieldname === 'greenscreen') cb(null, `greenscreen${ext}`);
+        else cb(null, `${randomUUID()}${ext}`);
+      },
+    }),
+    limits: { fileSize: 200 * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => {
+      const name = file.originalname.toLowerCase();
+      if (!/\.(mp4|mov|webm|avi)$/.test(name) && !file.mimetype.startsWith('video/')) {
+        return cb(new Error('仅支持视频文件 MP4/MOV/WEBM'));
+      }
+      cb(null, true);
+    },
+  });
+
+  router.post('/compose', (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    if (!userId) {
+      return res.status(401).json({ success: false, data: null, error: { code: '401', message: '未登录' } });
+    }
+    if (listComposeRunningOrQueued().length >= 4) {
+      return res.status(429).json({
+        success: false,
+        data: null,
+        error: { code: 'COMPOSE_BUSY', message: '合成任务较多，请稍后再试' },
+      });
+    }
+
+    const jobId = randomUUID();
+    (req as any)._composeJobId = jobId;
+
+    composeUpload.fields([
+      { name: 'background', maxCount: 1 },
+      { name: 'greenscreen', maxCount: 1 },
+    ])(req, res, (err: any) => {
+      if (err) {
+        return res.status(400).json({
+          success: false,
+          data: null,
+          error: { code: 'UPLOAD_ERROR', message: err.message || '上传失败' },
+        });
+      }
+
+      const files = req.files as { [field: string]: Express.Multer.File[] } | undefined;
+      const background = files?.background?.[0];
+      let greenscreenPath: string | null = files?.greenscreen?.[0]?.path || null;
+
+      const greenscreenJobId = String(req.body?.greenscreenJobId || req.body?.greenscreen_job_id || '').trim();
+      const greenscreenRefId = String(req.body?.greenscreenRefId || req.body?.greenscreen_ref_id || '').trim();
+
+      if (!background) {
+        return res.status(400).json({
+          success: false,
+          data: null,
+          error: { code: 'MISSING_FILES', message: '请上传底视频（字段名 background）' },
+        });
+      }
+
+      if (!greenscreenPath && greenscreenJobId) {
+        const srcJob = getAvatarJob(greenscreenJobId);
+        if (!srcJob || srcJob.userId !== userId || !srcJob.outputPath || !fs.existsSync(srcJob.outputPath)) {
+          return res.status(404).json({
+            success: false,
+            data: null,
+            error: { code: 'GS_JOB_NOT_FOUND', message: '绿幕生成任务不存在或尚未完成' },
+          });
+        }
+        const dest = path.join(composeDir, jobId, `greenscreen${path.extname(srcJob.outputPath) || '.mp4'}`);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.copyFileSync(srcJob.outputPath, dest);
+        greenscreenPath = dest;
+      }
+
+      if (!greenscreenPath && greenscreenRefId) {
+        const owned = refService.getOwned(greenscreenRefId, userId);
+        if (!owned || !fs.existsSync(owned.file_path)) {
+          return res.status(404).json({
+            success: false,
+            data: null,
+            error: { code: 'GS_REF_NOT_FOUND', message: '绿幕素材不存在或无权访问' },
+          });
+        }
+        const dest = path.join(composeDir, jobId, `greenscreen${path.extname(owned.file_path) || '.mp4'}`);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.copyFileSync(owned.file_path, dest);
+        greenscreenPath = dest;
+      }
+
+      if (!greenscreenPath) {
+        return res.status(400).json({
+          success: false,
+          data: null,
+          error: {
+            code: 'MISSING_FILES',
+            message: '请上传绿幕视频，或指定 greenscreenJobId / greenscreenRefId',
+          },
+        });
+      }
+
+      const mode = parseComposeMode(req.body?.mode);
+      const layout = parseComposeLayoutJson(req.body?.layout);
+      const chromaSimilarity = clampChromaSimilarity(
+        req.body?.chromaSimilarity ?? req.body?.chroma_similarity,
+      );
+      const chromaBlend = clampChromaBlend(req.body?.chromaBlend ?? req.body?.chroma_blend);
+
+      const job = createComposeJob({
+        id: jobId,
+        userId,
+        mode,
+        backgroundPath: background.path,
+        greenscreenPath,
+        layout,
+        chromaSimilarity,
+        chromaBlend,
+      });
+      enqueueComposeJob(jobId);
+
+      res.json({
+        success: true,
+        data: {
+          ...publicComposeJob(job),
+          hint: mode === 'preview' ? '预览约前 8 秒，参数与最终导出一致' : '正在导出全片',
+        },
+        error: null,
+      });
+    });
+  });
+
+  router.get('/compose/:id', (req: Request, res: Response) => {
+    const job = getComposeJob(String(req.params.id));
+    const userId = getUserId(req);
+    const role = (req as any).user?.role;
+    if (!job || (role !== 'admin' && job.userId !== userId)) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        error: { code: '404', message: '合成任务不存在' },
+      });
+    }
+    res.json({ success: true, data: publicComposeJob(job), error: null });
+  });
+
+  router.get('/compose/:id/video', (req: Request, res: Response) => {
+    const job = getComposeJob(String(req.params.id));
+    const userId = getUserId(req);
+    const role = (req as any).user?.role;
+    if (!job || (role !== 'admin' && job.userId !== userId) || !job.outputPath || !fs.existsSync(job.outputPath)) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        error: { code: '404', message: '合成视频不存在' },
+      });
+    }
+    const name = job.mode === 'preview' ? `compose-preview-${job.id}.mp4` : `compose-${job.id}.mp4`;
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `inline; filename="${name}"`);
     fs.createReadStream(job.outputPath).pipe(res);
   });
 

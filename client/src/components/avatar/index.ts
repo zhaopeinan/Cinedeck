@@ -8,3 +8,5 @@ export { GreenscreenAlert } from './GreenscreenAlert';
 export type { GreenscreenAlertProps } from './GreenscreenAlert';
 export { notifyGreenscreenRef } from './notifyGreenscreenRef';
 export { useAvatarRefs } from './useAvatarRefs';
+export { GreenscreenComposeEditor } from './GreenscreenComposeEditor';
+export type { GreenscreenComposeEditorProps } from './GreenscreenComposeEditor';
