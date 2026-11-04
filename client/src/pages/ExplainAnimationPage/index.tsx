@@ -30,7 +30,18 @@ const ExplainAnimationPage: React.FC = () => {
   const [jobs, setJobs] = useState<any[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [detail, setDetail] = useState<any | null>(null);
-  const [llmOk, setLlmOk] = useState<{ configured: boolean; name?: string | null; modelName?: string | null } | null>(null);
+  const [llmOk, setLlmOk] = useState<{
+    configured: boolean;
+    name?: string | null;
+    modelName?: string | null;
+    genSettings?: {
+      maxTokensRecommend: number;
+      maxTokensScript: number;
+      maxTokensSample: number;
+      maxTokensFinal: number;
+      reasoningEffort: string;
+    };
+  } | null>(null);
   const [voiceover, setVoiceover] = useState<'none' | 'zh' | 'en'>('none');
   const [pickingStyleId, setPickingStyleId] = useState<number | null>(null);
   const pollRef = useRef<number | null>(null);
@@ -177,8 +188,11 @@ const ExplainAnimationPage: React.FC = () => {
           showIcon
           style={{ marginBottom: 16 }}
           message={`当前 LLM：${llmOk.name || '未命名'} · ${llmOk.modelName || ''}`}
+          description={llmOk.genSettings
+            ? `Token：推荐 ${llmOk.genSettings.maxTokensRecommend.toLocaleString()} · 分镜 ${llmOk.genSettings.maxTokensScript.toLocaleString()} · 样片 ${llmOk.genSettings.maxTokensSample.toLocaleString()} · 全片 ${llmOk.genSettings.maxTokensFinal.toLocaleString()} · reasoning=${llmOk.genSettings.reasoningEffort}`
+            : undefined}
           action={
-            <Button size="small" onClick={() => navigate('/settings')}>更换</Button>
+            <Button size="small" onClick={() => navigate('/settings')}>调整 Token</Button>
           }
         />
       )}

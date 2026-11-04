@@ -7,10 +7,20 @@ import {
   styleCatalogForPrompt,
 } from './explainStyleCatalog';
 import { extractDocumentText } from './extractDocumentText';
+import {
+  ExplainGenSettingsService,
+  EXPLAIN_GEN_DEFAULTS,
+  type ExplainGenSettings,
+} from './explainGenSettings';
 
 export interface ExplainPipelineDeps {
   jobs: ExplainJobService;
   llm: LlmService;
+  genSettings: ExplainGenSettingsService;
+}
+
+function genSettingsFor(userId: string): ExplainGenSettings {
+  return deps?.genSettings.getForUser(userId) || { ...EXPLAIN_GEN_DEFAULTS };
 }
 
 let deps: ExplainPipelineDeps | null = null;
@@ -142,7 +152,12 @@ ${catalog}
 要求恰好 3 条，recommended 仅一条为 true，且 id 必须来自目录。`,
         },
       ],
-      { ...llmOpts, temperature: 0.6, maxTokens: 4000, reasoningEffort: 'low' },
+      {
+        ...llmOpts,
+        temperature: 0.6,
+        maxTokens: genSettingsFor(job.user_id).maxTokensRecommend,
+        reasoningEffort: genSettingsFor(job.user_id).reasoningEffort,
+      },
     );
     throwIfCancel();
     const rec = extractJsonBlock(recRaw);
@@ -240,7 +255,12 @@ ${(job.topic_text || '').slice(0, 8000)}
 nodes 4–6 个，总时长约 18–40 秒。`,
           },
         ],
-        { ...llmChatOpts(llm, job.user_id), temperature: 0.55, maxTokens: 6000, reasoningEffort: 'low' },
+        {
+          ...llmChatOpts(llm, job.user_id),
+          temperature: 0.55,
+          maxTokens: genSettingsFor(job.user_id).maxTokensScript,
+          reasoningEffort: genSettingsFor(job.user_id).reasoningEffort,
+        },
       );
       script = extractJsonBlock(scriptRaw);
       jobs.updateJob(jobId, { script_json: JSON.stringify(script) });
@@ -261,6 +281,7 @@ nodes 4–6 个，总时长约 18–40 秒。`,
       mode: 'sample',
       voiceover: job.voiceover,
       durationHint: '约 18–22 秒可循环播放',
+      gen: genSettingsFor(job.user_id),
     });
 
     const workDir = job.work_dir || path.join(path.resolve(process.cwd(), '..', 'data', 'explain-jobs'), job.id);
@@ -320,6 +341,7 @@ export async function continueExplainAfterSampleApprove(jobId: string) {
       mode: 'final',
       voiceover: job.voiceover,
       durationHint: '按内容完整展开，通常 40–90 秒，可循环',
+      gen: genSettingsFor(job.user_id),
     });
 
     const workDir = job.work_dir!;
@@ -365,8 +387,9 @@ async function generateHtmlAnimation(opts: {
   mode: 'sample' | 'final';
   voiceover: string;
   durationHint: string;
+  gen: ExplainGenSettings;
 }): Promise<string> {
-  const { llm, llmOpts, topic, style, script, mode, voiceover, durationHint } = opts;
+  const { llm, llmOpts, topic, style, script, mode, voiceover, durationHint, gen } = opts;
   const system = `你是资深 motion graphics 工程师，只输出完整可运行的单文件 HTML（内含全部 CSS+JS），不要 Markdown，不要解释。
 硬性要求：
 - 必须写出完整 <style>…</style> 与 <script>…</script> 实装代码；严禁用 "..." / "…" / 注释占位省略
@@ -393,9 +416,7 @@ ${JSON.stringify(script).slice(0, 6000)}
 
 请直接输出以 <!DOCTYPE html> 开头的完整 HTML。`;
 
-  // Reasoning models need headroom for thinking + final HTML.
-  // sample≈20s page; final longer. Keep below common 32k completion caps.
-  const maxTokens = mode === 'sample' ? 24000 : 32000;
+  const maxTokens = mode === 'sample' ? gen.maxTokensSample : gen.maxTokensFinal;
   let lastErr: Error | null = null;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
@@ -413,8 +434,8 @@ ${JSON.stringify(script).slice(0, 6000)}
           ...llmOpts,
           temperature: attempt === 1 ? 0.4 : 0.25,
           maxTokens,
-          // Prefer light reasoning for planning; budget is large enough for content after thinking
-          reasoningEffort: attempt === 1 ? 'low' : 'none',
+          // First try with user preference; retry skeleton failures with thinking off
+          reasoningEffort: attempt === 1 ? gen.reasoningEffort : 'none',
         },
       );
       const html = extractHtml(raw);

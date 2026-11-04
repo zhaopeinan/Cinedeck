@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Card, Table, Button, Space, Typography, Modal, Form, Input, InputNumber, message, Tag, Popconfirm, Spin, Divider, Select } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined, CheckCircleOutlined, ApiOutlined, ArrowLeftOutlined, SettingOutlined } from '@ant-design/icons';
-import { llmApi, systemSettingsApi } from '../../api';
+import { llmApi, systemSettingsApi, explainApi, type ExplainGenSettings } from '../../api';
 import { useAuthStore } from '../../stores/authStore';
 
 const { Title, Text, Paragraph } = Typography;
@@ -42,6 +42,12 @@ const SettingsPage: React.FC = () => {
   const [defaultConfigId, setDefaultConfigId] = useState<string | null>(null);
   const [bindingsLoading, setBindingsLoading] = useState(false);
   const [savingBindings, setSavingBindings] = useState(false);
+
+  const [explainGen, setExplainGen] = useState<ExplainGenSettings | null>(null);
+  const [explainGenDefaults, setExplainGenDefaults] = useState<ExplainGenSettings | null>(null);
+  const [explainGenFields, setExplainGenFields] = useState<any[]>([]);
+  const [explainGenLoading, setExplainGenLoading] = useState(false);
+  const [savingExplainGen, setSavingExplainGen] = useState(false);
 
   const loadConfigs = async () => {
     setLoading(true);
@@ -93,6 +99,43 @@ const SettingsPage: React.FC = () => {
     }
   };
 
+  const loadExplainGen = async () => {
+    setExplainGenLoading(true);
+    try {
+      const res = await explainApi.getGenSettings();
+      if (res.data?.success && res.data.data) {
+        setExplainGen(res.data.data.settings);
+        setExplainGenDefaults(res.data.data.defaults);
+        setExplainGenFields(res.data.data.fields || []);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setExplainGenLoading(false);
+    }
+  };
+
+  const handleSaveExplainGen = async () => {
+    if (!explainGen) return;
+    setSavingExplainGen(true);
+    try {
+      const res = await explainApi.setGenSettings(explainGen);
+      if (!res.data?.success) throw new Error(res.data?.error?.message || '保存失败');
+      setExplainGen(res.data.data.settings);
+      setExplainGenDefaults(res.data.data.defaults);
+      message.success('讲解动画 Token 配置已保存');
+    } catch (err: any) {
+      message.error('保存失败：' + (err.response?.data?.error?.message || err.message));
+    } finally {
+      setSavingExplainGen(false);
+    }
+  };
+
+  const handleResetExplainGen = () => {
+    if (!explainGenDefaults) return;
+    setExplainGen({ ...explainGenDefaults });
+  };
+
   const handleSaveSetting = async (key: string, value: string) => {
     setSavingKey(key);
     try {
@@ -110,6 +153,7 @@ const SettingsPage: React.FC = () => {
     document.title = 'Cinedeck · 设置';
     loadConfigs();
     loadBindings();
+    loadExplainGen();
     loadSystemSettings();
   }, []);
 
@@ -300,6 +344,59 @@ const SettingsPage: React.FC = () => {
           pagination={false}
           size="middle"
         />
+      </Card>
+
+      <Card
+        title="讲解动画 · Token 预算"
+        style={{ marginTop: 16 }}
+        extra={
+          <Space>
+            <Button onClick={handleResetExplainGen} disabled={!explainGenDefaults || savingExplainGen}>恢复默认</Button>
+            <Button type="primary" loading={savingExplainGen} onClick={() => void handleSaveExplainGen()} disabled={!explainGen}>
+              保存
+            </Button>
+          </Space>
+        }
+      >
+        <Paragraph type="secondary" style={{ marginTop: 0 }}>
+          各阶段发给大模型的 <Text code>max_tokens</Text> 与 Reasoning 强度（按当前登录用户保存）。
+          HTML 阶段若出骨架会自动用 <Text code>reasoning=none</Text> 重试一次。
+        </Paragraph>
+        <Spin spinning={explainGenLoading}>
+          {explainGen && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 16 }}>
+              {explainGenFields.filter((f) => f.type === 'int').map((f) => (
+                <div key={f.key}>
+                  <Text strong style={{ display: 'block', marginBottom: 4 }}>{f.label}</Text>
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>{f.description}</Text>
+                  <InputNumber
+                    style={{ width: '100%' }}
+                    min={f.min}
+                    max={f.max}
+                    step={500}
+                    value={(explainGen as any)[f.key]}
+                    onChange={(v) => setExplainGen((prev) => prev ? { ...prev, [f.key]: Number(v) || f.min || 0 } : prev)}
+                  />
+                  {explainGenDefaults && (
+                    <Text type="secondary" style={{ fontSize: 11 }}>默认 {((explainGenDefaults as any)[f.key])?.toLocaleString?.()}</Text>
+                  )}
+                </div>
+              ))}
+              {explainGenFields.filter((f) => f.type === 'enum').map((f) => (
+                <div key={f.key}>
+                  <Text strong style={{ display: 'block', marginBottom: 4 }}>{f.label}</Text>
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>{f.description}</Text>
+                  <Select
+                    style={{ width: '100%' }}
+                    value={(explainGen as any)[f.key]}
+                    options={(f.options || []).map((o: any) => ({ value: o.value, label: o.label }))}
+                    onChange={(v) => setExplainGen((prev) => prev ? { ...prev, [f.key]: v } : prev)}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </Spin>
       </Card>
 
       <Card

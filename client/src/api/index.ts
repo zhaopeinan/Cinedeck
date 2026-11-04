@@ -697,8 +697,41 @@ export type UnifiedJobKind =
   | 'explain';
 
 /** 讲解动画（风格技能产品化） */
+export type ExplainGenSettings = {
+  maxTokensRecommend: number;
+  maxTokensScript: number;
+  maxTokensSample: number;
+  maxTokensFinal: number;
+  reasoningEffort: 'none' | 'low' | 'medium' | 'high';
+};
+
 export const explainApi = {
-  llmStatus: () => apiClient.get<ApiResponse<{ configured: boolean; name: string | null; modelName: string | null; baseUrl: string | null }>>('/explain/llm-status'),
+  llmStatus: () => apiClient.get<ApiResponse<{
+    configured: boolean;
+    name: string | null;
+    modelName: string | null;
+    baseUrl: string | null;
+    genSettings?: ExplainGenSettings;
+  }>>('/explain/llm-status'),
+  getGenSettings: () => apiClient.get<ApiResponse<{
+    settings: ExplainGenSettings;
+    defaults: ExplainGenSettings;
+    fields: Array<{
+      key: keyof ExplainGenSettings;
+      label: string;
+      description: string;
+      min?: number;
+      max?: number;
+      type: 'int' | 'enum';
+      options?: Array<{ value: string; label: string }>;
+    }>;
+  }>>('/explain/gen-settings'),
+  setGenSettings: (settings: Partial<ExplainGenSettings>) =>
+    apiClient.put<ApiResponse<{
+      settings: ExplainGenSettings;
+      defaults: ExplainGenSettings;
+      fields: any[];
+    }>>('/explain/gen-settings', settings),
   listStyles: () => apiClient.get<ApiResponse<{ styles: any[] }>>('/explain/styles'),
   posterUrl: (id: number, variant?: string) =>
     withToken(`/api/v1/explain/styles/${id}/poster${variant ? `?variant=${encodeURIComponent(variant)}` : ''}`),

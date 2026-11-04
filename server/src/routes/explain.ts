@@ -7,13 +7,18 @@ import { ExplainJobService, EXPLAIN_UPLOAD_DIR } from '../services/explainJobSer
 import { pumpExplainQueue, resumeExplainJob } from '../services/explainWorker';
 import { getExplainPosterPath, getExplainStyle, listExplainStyles } from '../services/explainStyleCatalog';
 import { LlmService } from '../services/llmService';
+import { ExplainGenSettingsService } from '../services/explainGenSettings';
 import { decodeUploadFilename } from '../utils/uploadFilename';
 
 function getUserId(req: Request): string {
   return (req as any).user?.id || '';
 }
 
-export function createExplainRouter(jobs: ExplainJobService, llm: LlmService): Router {
+export function createExplainRouter(
+  jobs: ExplainJobService,
+  llm: LlmService,
+  genSettings: ExplainGenSettingsService,
+): Router {
   const router = Router();
   fs.mkdirSync(EXPLAIN_UPLOAD_DIR, { recursive: true });
 
@@ -57,6 +62,7 @@ export function createExplainRouter(jobs: ExplainJobService, llm: LlmService): R
   router.get('/llm-status', (req: Request, res: Response) => {
     const userId = getUserId(req);
     const cfg = llm.resolveConfig({ userId, module: 'explain' });
+    const gen = genSettings.getForUser(userId);
     res.json({
       success: true,
       data: {
@@ -64,9 +70,38 @@ export function createExplainRouter(jobs: ExplainJobService, llm: LlmService): R
         name: cfg?.name || null,
         modelName: cfg?.model_name || null,
         baseUrl: cfg?.base_url || null,
+        genSettings: gen,
       },
       error: null,
     });
+  });
+
+  router.get('/gen-settings', (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ success: false, data: null, error: { code: '401', message: '未登录' } });
+    res.json({ success: true, data: genSettings.publicPayload(userId), error: null });
+  });
+
+  router.put('/gen-settings', (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ success: false, data: null, error: { code: '401', message: '未登录' } });
+    try {
+      const body = req.body || {};
+      genSettings.setForUser(userId, {
+        maxTokensRecommend: body.maxTokensRecommend ?? body.max_tokens_recommend,
+        maxTokensScript: body.maxTokensScript ?? body.max_tokens_script,
+        maxTokensSample: body.maxTokensSample ?? body.max_tokens_sample,
+        maxTokensFinal: body.maxTokensFinal ?? body.max_tokens_final,
+        reasoningEffort: body.reasoningEffort ?? body.reasoning_effort,
+      });
+      res.json({ success: true, data: genSettings.publicPayload(userId), error: null });
+    } catch (err: any) {
+      res.status(400).json({
+        success: false,
+        data: null,
+        error: { code: '400', message: err?.message || '保存失败' },
+      });
+    }
   });
 
   router.get('/jobs', (req: Request, res: Response) => {
