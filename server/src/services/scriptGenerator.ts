@@ -31,7 +31,7 @@ export class ScriptGeneratorService {
    * 获取循环重试配置（从激活的 LLM 配置读取）
    */
   private getRetryConfig(userId: string): { maxCycles: number; toleranceRate: number } {
-    const config = this.llmService.getActiveConfig(userId);
+    const config = this.llmService.resolveConfig({ userId, module: 'script' });
     return {
       maxCycles: config?.max_retry_cycles ?? 3,
       toleranceRate: config?.tolerance_rate ?? 0.1,
@@ -66,7 +66,7 @@ ${content}`;
 
     const result = await this.llmService.chat(
       [{ role: 'user', content: prompt }],
-      { temperature: 0.5, maxTokens: Math.max(1024, Math.round(targetChars * 2.5)), userId },
+      { temperature: 0.5, maxTokens: Math.max(1024, Math.round(targetChars * 2.5)), userId, module: 'script' },
     );
     return result.replace(/^["'「]|["'」]$/g, '').trim();
   }
@@ -151,6 +151,7 @@ ${content}`;
             temperature: 0.7,
             maxTokens,
             userId,
+            module: 'script',
           });
         } else {
           // 无图片，仅用备注生成
@@ -159,7 +160,7 @@ ${content}`;
             : `请生成一段约 ${targetCharCount} 字的通用课程过渡解说词。`;
           content = await this.llmService.chat(
             [{ role: 'user', content: fallbackPrompt }],
-            { temperature: 0.7, maxTokens, userId },
+            { temperature: 0.7, maxTokens, userId, module: 'script' },
           );
         }
 
@@ -215,7 +216,7 @@ ${draftText}
 
       const response = await this.llmService.chat(
         [{ role: 'user', content: refinePrompt }],
-        { temperature: 0.5, userId },
+        { temperature: 0.5, userId, module: 'script' },
       );
 
       // 解析 JSON
@@ -363,7 +364,7 @@ ${originalContent}
 
         const content = await this.llmService.chat(
           [{ role: 'user', content: prompt }],
-          { temperature: 0.3, userId },
+          { temperature: 0.3, userId, module: 'script' },
         );
 
         finalContent = content.replace(/^["'「]|["'」]$/g, '').trim();
@@ -430,7 +431,7 @@ ${originalContent}
 
         const content = await this.llmService.chat(
           [{ role: 'user', content: prompt }],
-          { temperature: 0.3, userId },
+          { temperature: 0.3, userId, module: 'script' },
         );
 
         finalContent = content.replace(/^["'「]|["'」]$/g, '').trim();
@@ -518,7 +519,7 @@ ${originalContent}
 
         const content = await this.llmService.chat(
           [{ role: 'user', content: prompt }],
-          { temperature: 0.5, userId },
+          { temperature: 0.5, userId, module: 'script' },
         );
 
         let cleaned = content.replace(/^["'「]|["'」]$/g, '').trim();
@@ -608,6 +609,7 @@ ${originalContent}
         temperature: 0.7,
         maxTokens,
         userId,
+        module: 'script',
       });
     } else {
       const fallbackPrompt = noteContent
@@ -615,7 +617,7 @@ ${originalContent}
         : `请生成一段约 ${targetCharCount} 字的通用课程过渡解说词。`;
       content = await this.llmService.chat(
         [{ role: 'user', content: fallbackPrompt }],
-        { temperature: 0.7, maxTokens, userId },
+        { temperature: 0.7, maxTokens, userId, module: 'script' },
       );
     }
 
@@ -685,7 +687,7 @@ ${originalContent}
 
     const content = await this.llmService.chat(
       [{ role: 'user', content: prompt }],
-      { temperature: 0.3, userId },
+      { temperature: 0.3, userId, module: 'script' },
     );
 
     const cleaned = content.replace(/^["'「]|["'」]$/g, '').trim();
@@ -749,7 +751,7 @@ ${originalContent}
     const maxTokens = Math.max(1024, Math.round(targetCharCount * 2.5));
     const content = await this.llmService.chat(
       [{ role: 'user', content: prompt }],
-      { temperature: 0.5, maxTokens, userId },
+      { temperature: 0.5, maxTokens, userId, module: 'script' },
     );
 
     let cleaned = content.replace(/^["'「]|["'」]$/g, '').trim();

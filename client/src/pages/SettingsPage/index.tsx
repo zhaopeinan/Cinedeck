@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Table, Button, Space, Typography, Modal, Form, Input, InputNumber, message, Tag, Popconfirm, Spin, Divider } from 'antd';
+import { Card, Table, Button, Space, Typography, Modal, Form, Input, InputNumber, message, Tag, Popconfirm, Spin, Divider, Select } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined, CheckCircleOutlined, ApiOutlined, ArrowLeftOutlined, SettingOutlined } from '@ant-design/icons';
 import { llmApi, systemSettingsApi } from '../../api';
 import { useAuthStore } from '../../stores/authStore';
@@ -37,6 +37,12 @@ const SettingsPage: React.FC = () => {
   const [systemSettingsLoading, setSystemSettingsLoading] = useState(false);
   const [savingKey, setSavingKey] = useState<string | null>(null);
 
+  const [modules, setModules] = useState<Array<{ id: string; label: string; description: string }>>([]);
+  const [bindings, setBindings] = useState<Record<string, string | null>>({});
+  const [defaultConfigId, setDefaultConfigId] = useState<string | null>(null);
+  const [bindingsLoading, setBindingsLoading] = useState(false);
+  const [savingBindings, setSavingBindings] = useState(false);
+
   const loadConfigs = async () => {
     setLoading(true);
     try {
@@ -46,6 +52,22 @@ const SettingsPage: React.FC = () => {
       // ignore
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadBindings = async () => {
+    setBindingsLoading(true);
+    try {
+      const res = await llmApi.getModuleBindings();
+      if (res.data?.success && res.data.data) {
+        setModules(res.data.data.modules || []);
+        setBindings(res.data.data.bindings || {});
+        setDefaultConfigId(res.data.data.defaultConfigId || null);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setBindingsLoading(false);
     }
   };
 
@@ -87,8 +109,24 @@ const SettingsPage: React.FC = () => {
   useEffect(() => {
     document.title = 'Cinedeck · 设置';
     loadConfigs();
+    loadBindings();
     loadSystemSettings();
   }, []);
+
+  const handleSaveBindings = async () => {
+    setSavingBindings(true);
+    try {
+      const res = await llmApi.setModuleBindings(bindings);
+      if (!res.data?.success) throw new Error(res.data?.error?.message || '保存失败');
+      setBindings(res.data.data?.bindings || bindings);
+      message.success('模块模型绑定已保存');
+      await loadBindings();
+    } catch (e: any) {
+      message.error(e?.response?.data?.error?.message || e?.message || '保存失败');
+    } finally {
+      setSavingBindings(false);
+    }
+  };
 
   const handleAdd = () => {
     setEditingConfig(null);
@@ -142,6 +180,7 @@ const SettingsPage: React.FC = () => {
   const handleActivate = async (id: string) => {
     try {
       await llmApi.activateConfig(id);
+      await loadBindings();
       message.success('已设为默认');
       loadConfigs();
     } catch (err: any) {
@@ -261,6 +300,52 @@ const SettingsPage: React.FC = () => {
           pagination={false}
           size="middle"
         />
+      </Card>
+
+      <Card
+        title="模块使用的模型"
+        style={{ marginTop: 16, marginBottom: isAdmin ? 0 : undefined }}
+        extra={
+          <Button type="primary" loading={savingBindings} onClick={() => void handleSaveBindings()} disabled={configs.length === 0}>
+            保存绑定
+          </Button>
+        }
+      >
+        <Paragraph type="secondary" style={{ marginTop: 0 }}>
+          可为不同功能指定模型；选「使用默认」则走上方标记为默认的配置。例如讲解动画可用更强的多模态模型，解说词用更便宜的文本模型。
+        </Paragraph>
+        <Spin spinning={bindingsLoading}>
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            {modules.map((m) => (
+              <div key={m.id} style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                <div style={{ minWidth: 160 }}>
+                  <Text strong>{m.label}</Text>
+                  <div><Text type="secondary" style={{ fontSize: 12 }}>{m.description}</Text></div>
+                </div>
+                <Select
+                  style={{ minWidth: 280, flex: 1 }}
+                  value={bindings[m.id] || ''}
+                  onChange={(v) => setBindings((prev) => ({ ...prev, [m.id]: v || null }))}
+                  options={[
+                    {
+                      value: '',
+                      label: defaultConfigId
+                        ? `使用默认（${configs.find((c) => c.id === defaultConfigId)?.name || '当前默认'}）`
+                        : '使用默认',
+                    },
+                    ...configs.map((c) => ({
+                      value: c.id,
+                      label: `${c.name}${c.isActive === 1 || c.is_active === 1 ? ' · 默认' : ''}`,
+                    })),
+                  ]}
+                />
+              </div>
+            ))}
+            {modules.length === 0 && (
+              <Text type="secondary">加载模块列表中…</Text>
+            )}
+          </Space>
+        </Spin>
       </Card>
 
       {/* 系统配置（仅管理员可见） */}

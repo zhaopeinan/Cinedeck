@@ -17,6 +17,24 @@ export interface LlmConfig {
   tolerance_rate: number;
 }
 
+/** Product modules that call LLM — can bind different configs */
+export type LlmModule = 'script' | 'hyperframe' | 'explain';
+
+export const LLM_MODULES: Array<{ id: LlmModule; label: string; description: string }> = [
+  { id: 'script', label: 'PPT 解说词', description: '分步向导 / 备注页生成与优化解说词' },
+  { id: 'hyperframe', label: 'HyperFrame 讲义', description: '多模态分析 PPT 并生成讲授讲义' },
+  { id: 'explain', label: '讲解动画', description: '风格推荐、分镜与 HTML 动效生成' },
+];
+
+export type LlmCallOptions = {
+  temperature?: number;
+  maxTokens?: number;
+  userId?: string;
+  configId?: string;
+  /** Prefer module-bound config, then fall back to default/active */
+  module?: LlmModule;
+};
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string | Array<
@@ -140,14 +158,78 @@ export class LlmService {
     this.db.prepare('UPDATE llm_config SET is_active = 1 WHERE id = ?').run(id);
   }
 
+  // ===== Per-module bindings =====
+
+  getModuleBindings(userId: string): Record<LlmModule, string | null> {
+    const rows = this.db.prepare(
+      'SELECT module, config_id FROM llm_module_bindings WHERE user_id = ?',
+    ).all(userId) as Array<{ module: string; config_id: string | null }>;
+    const out: Record<LlmModule, string | null> = {
+      script: null,
+      hyperframe: null,
+      explain: null,
+    };
+    for (const r of rows) {
+      if (r.module === 'script' || r.module === 'hyperframe' || r.module === 'explain') {
+        out[r.module] = r.config_id || null;
+      }
+    }
+    return out;
+  }
+
+  setModuleBindings(userId: string, bindings: Partial<Record<LlmModule, string | null>>) {
+    const now = new Date().toISOString();
+    const upsert = this.db.prepare(`
+      INSERT INTO llm_module_bindings (user_id, module, config_id, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(user_id, module) DO UPDATE SET config_id = excluded.config_id, updated_at = excluded.updated_at
+    `);
+    const del = this.db.prepare(
+      'DELETE FROM llm_module_bindings WHERE user_id = ? AND module = ?',
+    );
+    for (const mod of LLM_MODULES.map((m) => m.id)) {
+      if (!(mod in bindings)) continue;
+      const configId = bindings[mod];
+      if (!configId) {
+        del.run(userId, mod);
+        continue;
+      }
+      const cfg = this.getConfig(configId);
+      if (!cfg) throw new Error(`配置不存在: ${configId}`);
+      // Allow user's own configs, or legacy global (user_id null) configs
+      if (cfg.user_id && cfg.user_id !== userId) {
+        throw new Error('不能绑定其他用户的模型配置');
+      }
+      upsert.run(userId, mod, configId, now);
+    }
+    return this.getModuleBindings(userId);
+  }
+
+  /**
+   * Resolve config: explicit configId → module binding → user active → global active
+   */
+  resolveConfig(options?: { userId?: string; configId?: string; module?: LlmModule }): LlmConfig | null {
+    if (options?.configId) {
+      return this.getConfig(options.configId);
+    }
+    if (options?.module && options?.userId) {
+      const boundId = this.getModuleBindings(options.userId)[options.module];
+      if (boundId) {
+        const bound = this.getConfig(boundId);
+        if (bound) return bound;
+      }
+    }
+    return this.getActiveConfig(options?.userId) || this.getActiveConfig();
+  }
+
   // ===== API 调用 =====
 
   /**
    * 调用 OpenAI 兼容的 chat completions API
-   * options.userId 用于按用户筛选激活配置
+   * options.module 优先使用模块绑定；否则用默认激活配置
    */
-  async chat(messages: ChatMessage[], options?: { temperature?: number; maxTokens?: number; userId?: string; configId?: string }): Promise<string> {
-    const config = options?.configId ? this.getConfig(options.configId) : this.getActiveConfig(options?.userId);
+  async chat(messages: ChatMessage[], options?: LlmCallOptions): Promise<string> {
+    const config = this.resolveConfig(options);
     if (!config) throw new Error('未配置大模型，请先在设置中添加 LLM 配置');
 
     const baseUrl = config.base_url.replace(/\/+$/, '');
@@ -212,7 +294,11 @@ export class LlmService {
   /**
    * 多模态调用：发送图片文件 + 文本
    */
-  async chatWithImage(textPrompt: string, imagePath: string, options?: { temperature?: number; systemPrompt?: string; maxTokens?: number; userId?: string }): Promise<string> {
+  async chatWithImage(
+    textPrompt: string,
+    imagePath: string,
+    options?: LlmCallOptions & { systemPrompt?: string },
+  ): Promise<string> {
     if (!fs.existsSync(imagePath)) throw new Error(`图片不存在: ${imagePath}`);
 
     const ext = path.extname(imagePath).toLowerCase().replace('.', '') || 'png';
@@ -239,7 +325,7 @@ export class LlmService {
   /**
    * 多模态调用：直接发送 data URI 图片 + 文本（用于测试连接）
    */
-  async chatWithImageDataUri(textPrompt: string, imageDataUri: string, options?: { temperature?: number; maxTokens?: number; configId?: string }): Promise<string> {
+  async chatWithImageDataUri(textPrompt: string, imageDataUri: string, options?: LlmCallOptions): Promise<string> {
     const messages: ChatMessage[] = [
       {
         role: 'user',

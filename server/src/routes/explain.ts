@@ -56,7 +56,7 @@ export function createExplainRouter(jobs: ExplainJobService, llm: LlmService): R
 
   router.get('/llm-status', (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const cfg = llm.getActiveConfig(userId) || llm.getActiveConfig();
+    const cfg = llm.resolveConfig({ userId, module: 'explain' });
     res.json({
       success: true,
       data: {
@@ -87,7 +87,7 @@ export function createExplainRouter(jobs: ExplainJobService, llm: LlmService): R
     const userId = getUserId(req);
     if (!userId) return res.status(401).json({ success: false, data: null, error: { code: '401', message: '未登录' } });
 
-    const cfg = llm.getActiveConfig(userId) || llm.getActiveConfig();
+    const cfg = llm.resolveConfig({ userId, module: 'explain' });
     if (!cfg) {
       return res.status(400).json({
         success: false,

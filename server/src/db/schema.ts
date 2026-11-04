@@ -93,6 +93,17 @@ export function initDatabase(dbPath?: string): Database.Database {
     db.exec('CREATE INDEX IF NOT EXISTS idx_llm_config_user_id ON llm_config(user_id);');
   }
 
+  // Per-user: which LLM config each product module should use (null binding = default/active)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS llm_module_bindings (
+      user_id TEXT NOT NULL,
+      module TEXT NOT NULL,
+      config_id TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (user_id, module)
+    );
+  `);
+
   // Migration: add user_id column to projects
   const projCols = db.prepare("PRAGMA table_info(projects)").all() as any[];
   if (!projCols.find(c => c.name === 'user_id')) {

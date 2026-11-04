@@ -298,6 +298,14 @@ export const llmApi = {
   activateConfig: (id: string) => apiClient.post<ApiResponse<any>>(`/llm/configs/${id}/activate`),
   testConfig: (id: string, testImageId?: string) => apiClient.post<ApiResponse<any>>(`/llm/configs/${id}/test`, { test_image_id: testImageId }, { timeout: 60000 }),
   getTestImages: () => apiClient.get<ApiResponse<any>>('/llm/test-images'),
+  getModuleBindings: () =>
+    apiClient.get<ApiResponse<{
+      modules: Array<{ id: string; label: string; description: string }>;
+      bindings: Record<string, string | null>;
+      defaultConfigId: string | null;
+    }>>('/llm/module-bindings'),
+  setModuleBindings: (bindings: Record<string, string | null>) =>
+    apiClient.put<ApiResponse<{ bindings: Record<string, string | null> }>>('/llm/module-bindings', bindings),
   // 解说词生成
   generateScripts: (projectId: string, params: { targetDuration?: number; useExistingNote?: boolean }) =>
     apiClient.post<ApiResponse<any>>(`/llm/projects/${projectId}/script/generate`, params),

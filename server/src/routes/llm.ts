@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { LlmService } from '../services/llmService';
+import { LlmService, LLM_MODULES, type LlmModule } from '../services/llmService';
 import { ScriptGeneratorService } from '../services/scriptGenerator';
 import fs from 'fs';
 import path from 'path';
@@ -105,6 +105,51 @@ export function createLlmRouter(llmService: LlmService, scriptGenerator: ScriptG
       res.json({ success: true, data: null, error: null });
     } catch (error: any) {
       res.status(500).json({ success: false, data: null, error: { code: '8007', message: error.message } });
+    }
+  });
+
+  // ===== 模块 → 模型绑定 =====
+
+  router.get('/module-bindings', (req: Request, res: Response) => {
+    try {
+      const userId = getUserId(req);
+      const bindings = llmService.getModuleBindings(userId);
+      const active = llmService.getActiveConfig(userId) || llmService.getActiveConfig();
+      res.json({
+        success: true,
+        data: {
+          modules: LLM_MODULES,
+          bindings,
+          defaultConfigId: active?.id || null,
+        },
+        error: null,
+      });
+    } catch (error: any) {
+      res.status(500).json({ success: false, data: null, error: { code: '8010', message: error.message } });
+    }
+  });
+
+  router.put('/module-bindings', (req: Request, res: Response) => {
+    try {
+      const userId = getUserId(req);
+      const body = req.body || {};
+      const patch: Partial<Record<LlmModule, string | null>> = {};
+      for (const m of LLM_MODULES) {
+        if (m.id in body) {
+          const v = body[m.id];
+          patch[m.id] = v === '' || v === undefined ? null : (v as string | null);
+        }
+        // also accept camelCase wrappers if middleware didn't flatten
+        const camel = m.id;
+        if (camel in (body.bindings || {})) {
+          const v = body.bindings[camel];
+          patch[m.id] = v === '' || v == null ? null : String(v);
+        }
+      }
+      const bindings = llmService.setModuleBindings(userId, patch);
+      res.json({ success: true, data: { bindings }, error: null });
+    } catch (error: any) {
+      res.status(400).json({ success: false, data: null, error: { code: '8011', message: error.message } });
     }
   });
 

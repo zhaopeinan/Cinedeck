@@ -407,6 +407,7 @@ async function generateLectureScripts(opts: {
         const raw = await opts.llm.chatWithImage(userPrompt, slide.image_path, {
           systemPrompt,
           userId: opts.userId,
+          module: 'hyperframe',
           temperature: 0.55,
           maxTokens: 1200,
         });
@@ -416,7 +417,7 @@ async function generateLectureScripts(opts: {
         const raw = await opts.llm.chat([
           { role: 'system', content: systemPrompt },
           { role: 'user', content: note ? `第 ${pageNo} 页备注：\n${note}\n请写讲授讲义。` : `第 ${pageNo} 页无图像与备注，请写一句过渡讲义。` },
-        ], { userId: opts.userId, temperature: 0.55, maxTokens: 1200 });
+        ], { userId: opts.userId, module: 'hyperframe', temperature: 0.55, maxTokens: 1200 });
         lecture = cleanLecture(raw);
         analysis = note ? '无页面图，基于备注生成' : '无页面图与备注';
       }

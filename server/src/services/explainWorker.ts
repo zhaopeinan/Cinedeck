@@ -340,10 +340,10 @@ export async function continueExplainAfterSampleApprove(jobId: string) {
   }
 }
 
-function llmChatOpts(llm: LlmService, userId: string): { userId?: string; configId?: string } {
-  const cfg = llm.getActiveConfig(userId) || llm.getActiveConfig();
+function llmChatOpts(llm: LlmService, userId: string): { userId?: string; module: 'explain' } {
+  const cfg = llm.resolveConfig({ userId, module: 'explain' });
   if (!cfg) throw new Error('未配置大模型，请先在设置中添加 LLM 配置');
-  return { configId: cfg.id, userId };
+  return { userId, module: 'explain' };
 }
 
 async function generateHtmlAnimation(opts: {
