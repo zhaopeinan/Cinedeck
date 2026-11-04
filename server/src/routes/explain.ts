@@ -21,6 +21,30 @@ function getUserId(req: Request): string {
   return (req as any).user?.id || '';
 }
 
+function parseVoiceBody(body: any): {
+  ok: true;
+  voiceover: 'none' | 'zh' | 'en';
+  voiceId: string | null;
+  modelId: string | null;
+} | { ok: false; message: string } {
+  const voiceoverRaw = String(body?.voiceover || 'none').toLowerCase();
+  const voiceover = voiceoverRaw === 'zh' || voiceoverRaw === 'en' ? voiceoverRaw : 'none';
+  const voiceId = String(body?.voiceId ?? body?.voice_id ?? '').trim() || null;
+  const modelId = String(body?.modelId ?? body?.model_id ?? '').trim() || null;
+  if (voiceover !== 'none' && !voiceId) {
+    return { ok: false, message: '已选择配音语言，请再选择一个音色（可先试听）' };
+  }
+  if (voiceover !== 'none' && !modelId) {
+    return { ok: false, message: '请选择配音模型' };
+  }
+  return {
+    ok: true,
+    voiceover,
+    voiceId: voiceover === 'none' ? null : voiceId,
+    modelId: voiceover === 'none' ? null : modelId,
+  };
+}
+
 export function createExplainRouter(
   jobs: ExplainJobService,
   llm: LlmService,
@@ -179,32 +203,22 @@ export function createExplainRouter(
     if (!style) {
       return res.status(400).json({ success: false, data: null, error: { code: '400', message: '无效风格' } });
     }
-    const voiceoverRaw = String(req.body?.voiceover || 'none').toLowerCase();
-    const voiceover = voiceoverRaw === 'zh' || voiceoverRaw === 'en' ? voiceoverRaw : 'none';
     const variant = req.body?.variant ? String(req.body.variant) : null;
-    const voiceId = String(req.body?.voiceId ?? req.body?.voice_id ?? '').trim() || null;
-    const modelId = String(req.body?.modelId ?? req.body?.model_id ?? '').trim() || null;
-    if (voiceover !== 'none' && !voiceId) {
+    const voice = parseVoiceBody(req.body);
+    if (!voice.ok) {
       return res.status(400).json({
         success: false,
         data: null,
-        error: { code: '400', message: '已选择配音语言，请再选择一个音色（可先试听）' },
-      });
-    }
-    if (voiceover !== 'none' && !modelId) {
-      return res.status(400).json({
-        success: false,
-        data: null,
-        error: { code: '400', message: '请选择配音模型' },
+        error: { code: '400', message: voice.message },
       });
     }
 
     jobs.updateJob(job.id, {
       selected_style_id: styleId,
       selected_variant: variant,
-      voiceover: voiceover as any,
-      selected_voice_id: voiceover === 'none' ? null : voiceId,
-      selected_model_id: voiceover === 'none' ? null : modelId,
+      voiceover: voice.voiceover,
+      selected_voice_id: voice.voiceId,
+      selected_model_id: voice.modelId,
     });
     const updated = jobs.getJob(job.id)!;
     resumeExplainJob(updated, 'sample');
@@ -222,7 +236,38 @@ export function createExplainRouter(
         error: { code: '400', message: '当前不在样片确认阶段' },
       });
     }
-    resumeExplainJob(job, 'final');
+    // Optional: lock in voice for final if client sends it (must match sample unless none→none)
+    if (req.body?.voiceover !== undefined) {
+      const voice = parseVoiceBody(req.body);
+      if (!voice.ok) {
+        return res.status(400).json({
+          success: false,
+          data: null,
+          error: { code: '400', message: voice.message },
+        });
+      }
+      const voiceChanged =
+        voice.voiceover !== job.voiceover
+        || voice.voiceId !== (job.selected_voice_id || null)
+        || voice.modelId !== (job.selected_model_id || null);
+      if (voiceChanged && voice.voiceover !== 'none') {
+        return res.status(400).json({
+          success: false,
+          data: null,
+          error: {
+            code: '400',
+            message: '音色已变更，请先点「应用音色并重做样片」，确认带配音样片后再生成全片',
+          },
+        });
+      }
+      jobs.updateJob(job.id, {
+        voiceover: voice.voiceover,
+        selected_voice_id: voice.voiceId,
+        selected_model_id: voice.modelId,
+      });
+    }
+    const fresh = jobs.getJob(job.id)!;
+    resumeExplainJob(fresh, 'final');
     res.json({ success: true, data: jobs.publicRow(jobs.getJob(job.id)!), error: null });
   });
 
@@ -237,8 +282,24 @@ export function createExplainRouter(
         error: { code: '400', message: '当前不在样片确认阶段' },
       });
     }
-    // regenerate sample with same style
-    resumeExplainJob(job, 'sample');
+    // Allow updating voice before regenerating sample
+    if (req.body?.voiceover !== undefined) {
+      const voice = parseVoiceBody(req.body);
+      if (!voice.ok) {
+        return res.status(400).json({
+          success: false,
+          data: null,
+          error: { code: '400', message: voice.message },
+        });
+      }
+      jobs.updateJob(job.id, {
+        voiceover: voice.voiceover,
+        selected_voice_id: voice.voiceId,
+        selected_model_id: voice.modelId,
+      });
+    }
+    const fresh = jobs.getJob(job.id)!;
+    resumeExplainJob(fresh, 'sample');
     res.json({ success: true, data: jobs.publicRow(jobs.getJob(job.id)!), error: null });
   });
 

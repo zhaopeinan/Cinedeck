@@ -755,8 +755,16 @@ export const explainApi = {
     variant?: string | null;
   }) =>
     apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/select-style`, body),
-  approveSample: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/approve-sample`),
-  rejectSample: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/reject-sample`),
+  approveSample: (id: string, body?: {
+    voiceover?: 'none' | 'zh' | 'en';
+    voiceId?: string | null;
+    modelId?: string | null;
+  }) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/approve-sample`, body || {}),
+  rejectSample: (id: string, body?: {
+    voiceover?: 'none' | 'zh' | 'en';
+    voiceId?: string | null;
+    modelId?: string | null;
+  }) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/reject-sample`, body || {}),
   cancelJob: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/cancel`),
   retryJob: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/retry`),
   deleteJob: (id: string) => apiClient.delete<ApiResponse<any>>(`/explain/jobs/${id}`),

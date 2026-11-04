@@ -47,10 +47,12 @@ const ExplainAnimationPage: React.FC = () => {
       reasoningEffort: string;
     };
   } | null>(null);
-  const [voiceover, setVoiceover] = useState<'none' | 'zh' | 'en'>('none');
+  const [voiceover, setVoiceover] = useState<'none' | 'zh' | 'en'>('zh');
   const [voiceId, setVoiceId] = useState<string | undefined>();
   const [modelId, setModelId] = useState<string | undefined>();
   const [pickingStyleId, setPickingStyleId] = useState<number | null>(null);
+  const [redoingSample, setRedoingSample] = useState(false);
+  const [approvingSample, setApprovingSample] = useState(false);
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
   const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
   const [exportQuality, setExportQuality] = useState<'720p' | '1080p' | '1440p'>('1080p');
@@ -159,6 +161,20 @@ const ExplainAnimationPage: React.FC = () => {
     void loadDetail(activeId);
   }, [activeId, loadDetail]);
 
+  // Sync narration prefs when switching jobs (not on every poll)
+  useEffect(() => {
+    if (!detail?.id) return;
+    const v = detail.voiceover;
+    if (v === 'zh' || v === 'en' || v === 'none') {
+      // 已有样片但未配音时，默认切到中文配音，方便补选
+      setVoiceover(v === 'none' && detail.status === 'await_sample' ? 'zh' : v);
+    } else {
+      setVoiceover('zh');
+    }
+    if (detail.selectedVoiceId) setVoiceId(detail.selectedVoiceId);
+    if (detail.selectedModelId) setModelId(detail.selectedModelId);
+  }, [detail?.id]);
+
   useEffect(() => {
     const exportingVideo = detail?.exportInfo?.status === 'running';
     const busy = exportingVideo || jobs.some((j) =>
@@ -212,27 +228,12 @@ const ExplainAnimationPage: React.FC = () => {
 
   const handleSelectStyle = async (styleId: number) => {
     if (!detail?.id) return;
-    if (voiceover !== 'none') {
-      if (!voiceId) {
-        message.warning('请先选择音色，并可试听确认');
-        return;
-      }
-      if (!modelId) {
-        message.warning('请先选择配音模型');
-        return;
-      }
-      if (voiceboxAvailable === false) {
-        message.warning('Voicebox 暂不可用，请稍后重试或选择「不加配音」');
-        return;
-      }
-    }
+    if (!ensureVoiceReady()) return;
     setPickingStyleId(styleId);
     try {
       const res = await explainApi.selectStyle(detail.id, {
         styleId,
-        voiceover,
-        voiceId: voiceover === 'none' ? null : voiceId,
-        modelId: voiceover === 'none' ? null : modelId,
+        ...voicePayload(),
       });
       if (!res.data?.success) throw new Error(res.data?.error?.message || '选择失败');
       message.success(voiceover === 'none' ? '已选定风格，开始生成样片…' : '已选定风格与音色，开始生成样片…');
@@ -242,6 +243,44 @@ const ExplainAnimationPage: React.FC = () => {
       message.error(e?.response?.data?.error?.message || e?.message || '选择失败');
     } finally {
       setPickingStyleId(null);
+    }
+  };
+
+  const handleRedoSample = async () => {
+    if (!detail?.id) return;
+    if (!ensureVoiceReady()) return;
+    setRedoingSample(true);
+    try {
+      const res = await explainApi.rejectSample(detail.id, voicePayload());
+      if (!res.data?.success) throw new Error(res.data?.error?.message || '重做失败');
+      message.success(voiceover === 'none' ? '正在重做样片…' : '已应用音色，正在重做带配音样片…');
+      setDetail(res.data.data);
+      await loadJobs();
+    } catch (e: any) {
+      message.error(e?.response?.data?.error?.message || e?.message || '重做失败');
+    } finally {
+      setRedoingSample(false);
+    }
+  };
+
+  const handleApproveSample = async () => {
+    if (!detail?.id) return;
+    if (!ensureVoiceReady()) return;
+    if (jobNeedsVoiceRedo) {
+      message.warning('音色尚未应用到样片，请先点「应用音色并重做样片」');
+      return;
+    }
+    setApprovingSample(true);
+    try {
+      const res = await explainApi.approveSample(detail.id, voicePayload());
+      if (!res.data?.success) throw new Error(res.data?.error?.message || '确认失败');
+      message.success('已确认样片，开始生成全片…');
+      setDetail(res.data.data);
+      await loadJobs();
+    } catch (e: any) {
+      message.error(e?.response?.data?.error?.message || e?.message || '确认失败');
+    } finally {
+      setApprovingSample(false);
     }
   };
 
@@ -255,6 +294,114 @@ const ExplainAnimationPage: React.FC = () => {
     const matched = voices.filter((v) => String(v.language || '').toLowerCase().startsWith(pref));
     return matched.length ? matched : voices;
   })();
+
+  const voicePayload = () => ({
+    voiceover,
+    voiceId: voiceover === 'none' ? null : (voiceId || null),
+    modelId: voiceover === 'none' ? null : (modelId || null),
+  });
+
+  const ensureVoiceReady = (): boolean => {
+    if (voiceover === 'none') return true;
+    if (!voiceId) {
+      message.warning('请先选择音色，并可试听确认');
+      return false;
+    }
+    if (!modelId) {
+      message.warning('请先选择配音模型');
+      return false;
+    }
+    if (voiceboxAvailable === false) {
+      message.warning('Voicebox 暂不可用，请稍后重试或选择「不加配音」');
+      return false;
+    }
+    return true;
+  };
+
+  const jobNeedsVoiceRedo = !!(
+    detail
+    && detail.status === 'await_sample'
+    && (
+      (voiceover !== 'none' && detail.voiceover === 'none')
+      || (voiceover !== 'none' && (
+        voiceId !== detail.selectedVoiceId
+        || modelId !== detail.selectedModelId
+        || voiceover !== detail.voiceover
+      ))
+    )
+  );
+
+  const renderVoicePanel = () => (
+    <>
+      <Radio.Group
+        value={voiceover}
+        onChange={(e) => setVoiceover(e.target.value)}
+        style={{ marginBottom: 12 }}
+        optionType="button"
+        options={[
+          { label: '中文配音', value: 'zh' },
+          { label: '英文配音', value: 'en' },
+          { label: '不加配音', value: 'none' },
+        ]}
+      />
+      {voiceover !== 'none' && (
+        <Card size="small" style={{ marginBottom: 12 }} title="旁白音色">
+          {voiceboxAvailable === false && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 8 }}
+              message="Voicebox 暂不可用"
+              action={<Button size="small" onClick={() => void reloadVoicebox()}>重试</Button>}
+            />
+          )}
+          <Space direction="vertical" style={{ width: '100%' }} size={10}>
+            <div>
+              <Text type="secondary">音色</Text>
+              <div style={{ marginTop: 4, display: 'flex', gap: 8, alignItems: 'center' }}>
+                <div style={{ flex: 1 }}>
+                  <VoiceSelectField
+                    value={voiceId}
+                    onChange={(id) => {
+                      setVoiceId(id);
+                      setModelId(undefined);
+                    }}
+                    voices={voicesForLang}
+                    loading={loadingVoices}
+                    onReload={() => void reloadVoicebox()}
+                  />
+                </div>
+                <Button
+                  icon={playingVoiceId === voiceId ? <PauseOutlined /> : <PlayCircleOutlined />}
+                  loading={!!voiceId && previewingVoiceId === voiceId}
+                  disabled={!voiceId}
+                  onClick={() => voiceId && void previewVoice(voiceId)}
+                >
+                  {playingVoiceId === voiceId ? '停止' : previewingVoiceId === voiceId ? '合成中' : '试听'}
+                </Button>
+              </div>
+              <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate('/voice-factory')}>
+                去造声工厂克隆 / 管理音色
+              </Button>
+            </div>
+            <div>
+              <Text type="secondary">配音模型</Text>
+              <div style={{ marginTop: 4 }}>
+                <ModelSelectField
+                  value={modelId}
+                  onChange={setModelId}
+                  models={ttsModels}
+                  loading={loadingModels}
+                  readyOnly={false}
+                  onReload={() => void reloadVoicebox()}
+                />
+              </div>
+            </div>
+          </Space>
+        </Card>
+      )}
+    </>
+  );
 
   return (
     <div style={{ maxWidth: 1180, margin: '0 auto', padding: 24 }}>
@@ -429,74 +576,8 @@ const ExplainAnimationPage: React.FC = () => {
 
                 {detail.status === 'await_style' && (
                   <>
-                    <Paragraph>请选择一种风格，并确认旁白语言与音色（可选试听）：</Paragraph>
-                    <Radio.Group
-                      value={voiceover}
-                      onChange={(e) => setVoiceover(e.target.value)}
-                      style={{ marginBottom: 12 }}
-                      optionType="button"
-                      options={[
-                        { label: '不加配音', value: 'none' },
-                        { label: '中文配音', value: 'zh' },
-                        { label: '英文配音', value: 'en' },
-                      ]}
-                    />
-                    {voiceover !== 'none' && (
-                      <Card size="small" style={{ marginBottom: 12 }} title="旁白音色">
-                        {voiceboxAvailable === false && (
-                          <Alert
-                            type="warning"
-                            showIcon
-                            style={{ marginBottom: 8 }}
-                            message="Voicebox 暂不可用"
-                            action={<Button size="small" onClick={() => void reloadVoicebox()}>重试</Button>}
-                          />
-                        )}
-                        <Space direction="vertical" style={{ width: '100%' }} size={10}>
-                          <div>
-                            <Text type="secondary">音色</Text>
-                            <div style={{ marginTop: 4, display: 'flex', gap: 8, alignItems: 'center' }}>
-                              <div style={{ flex: 1 }}>
-                                <VoiceSelectField
-                                  value={voiceId}
-                                  onChange={(id) => {
-                                    setVoiceId(id);
-                                    setModelId(undefined);
-                                  }}
-                                  voices={voicesForLang}
-                                  loading={loadingVoices}
-                                  onReload={() => void reloadVoicebox()}
-                                />
-                              </div>
-                              <Button
-                                icon={playingVoiceId === voiceId ? <PauseOutlined /> : <PlayCircleOutlined />}
-                                loading={!!voiceId && previewingVoiceId === voiceId}
-                                disabled={!voiceId}
-                                onClick={() => voiceId && void previewVoice(voiceId)}
-                              >
-                                {playingVoiceId === voiceId ? '停止' : previewingVoiceId === voiceId ? '合成中' : '试听'}
-                              </Button>
-                            </div>
-                            <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate('/voice-factory')}>
-                              去造声工厂克隆 / 管理音色
-                            </Button>
-                          </div>
-                          <div>
-                            <Text type="secondary">配音模型</Text>
-                            <div style={{ marginTop: 4 }}>
-                              <ModelSelectField
-                                value={modelId}
-                                onChange={setModelId}
-                                models={ttsModels}
-                                loading={loadingModels}
-                                readyOnly={false}
-                                onReload={() => void reloadVoicebox()}
-                              />
-                            </div>
-                          </div>
-                        </Space>
-                      </Card>
-                    )}
+                    <Paragraph>请先确认旁白语言与音色（可试听），再选择一种视觉风格：</Paragraph>
+                    {renderVoicePanel()}
                     <Row gutter={[12, 12]}>
                       {(Array.isArray(recommendations) ? recommendations : []).map((r: any) => (
                         <Col xs={24} sm={8} key={r.id}>
@@ -558,30 +639,49 @@ const ExplainAnimationPage: React.FC = () => {
                       />
                     </div>
                     {detail.status === 'await_sample' && (
-                      <Space style={{ marginTop: 12 }}>
-                        <Button
-                          type="primary"
-                          icon={<CheckOutlined />}
-                          onClick={async () => {
-                            await explainApi.approveSample(detail.id);
-                            message.success('已确认样片，开始生成全片…');
-                            await loadDetail(detail.id);
-                            await loadJobs();
-                          }}
-                        >
-                          确认样片，生成全片
-                        </Button>
-                        <Button
-                          onClick={async () => {
-                            await explainApi.rejectSample(detail.id);
-                            message.info('正在重做样片…');
-                            await loadDetail(detail.id);
-                            await loadJobs();
-                          }}
-                        >
-                          重做样片
-                        </Button>
-                      </Space>
+                      <div style={{ marginTop: 12 }}>
+                        {(detail.voiceover === 'none' || jobNeedsVoiceRedo) && (
+                          <Alert
+                            type="warning"
+                            showIcon
+                            style={{ marginBottom: 12 }}
+                            message={
+                              detail.voiceover === 'none'
+                                ? '当前样片未加配音。请选择音色后点「应用音色并重做样片」，再确认生成全片。'
+                                : '音色/模型已变更，需重做样片后才会带上新旁白。'
+                            }
+                          />
+                        )}
+                        <Paragraph style={{ marginBottom: 8 }}>旁白设置（可试听后应用到样片）：</Paragraph>
+                        {renderVoicePanel()}
+                        <Space wrap>
+                          {jobNeedsVoiceRedo ? (
+                            <Button
+                              type="primary"
+                              loading={redoingSample}
+                              onClick={() => void handleRedoSample()}
+                            >
+                              应用音色并重做样片
+                            </Button>
+                          ) : (
+                            <Popconfirm
+                              title={voiceover === 'none' ? '确认生成不加配音的全片？' : '确认样片并生成全片？'}
+                              onConfirm={() => void handleApproveSample()}
+                            >
+                              <Button
+                                type="primary"
+                                icon={<CheckOutlined />}
+                                loading={approvingSample}
+                              >
+                                确认样片，生成全片
+                              </Button>
+                            </Popconfirm>
+                          )}
+                          <Button loading={redoingSample} onClick={() => void handleRedoSample()}>
+                            重做样片
+                          </Button>
+                        </Space>
+                      </div>
                     )}
                   </div>
                 )}
