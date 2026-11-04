@@ -11,6 +11,7 @@ import VoiceWorkshopPage from './pages/VoiceWorkshopPage';
 import VoiceFactoryPage from './pages/VoiceFactoryPage';
 import TranscribePage from './pages/TranscribePage';
 import HyperFramePage from './pages/HyperFramePage';
+import ExplainAnimationPage from './pages/ExplainAnimationPage';
 import DubbingPage from './pages/DubbingPage';
 import ProjectAvatarPage from './pages/ProjectAvatarPage';
 import VideoPreviewPage from './pages/VideoPreviewPage';
@@ -94,6 +95,7 @@ const App: React.FC = () => {
             <Route path="/voice-factory" element={<RequireAuth><VoiceFactoryPage /></RequireAuth>} />
             <Route path="/transcribe" element={<RequireAuth><TranscribePage /></RequireAuth>} />
             <Route path="/hyperframe" element={<RequireAuth><HyperFramePage /></RequireAuth>} />
+            <Route path="/explain" element={<RequireAuth><ExplainAnimationPage /></RequireAuth>} />
             <Route path="/project/:id/notes" element={<RequireAuth><NotesCheckPage /></RequireAuth>} />
             <Route path="/project/:id/voice" element={<RequireAuth><VoiceWorkshopPage /></RequireAuth>} />
             <Route path="/project/:id/dubbing" element={<RequireAuth><DubbingPage /></RequireAuth>} />

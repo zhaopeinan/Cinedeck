@@ -349,6 +349,41 @@ export function initDatabase(dbPath?: string): Database.Database {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dialogue_jobs_status ON dialogue_jobs(status);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dialogue_jobs_created_at ON dialogue_jobs(created_at DESC);`);
 
+  // 讲解动画（Opus 风格技能产品化）：选题 → 选风格 → 样片 → 全片
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS explain_jobs (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      source_type TEXT NOT NULL DEFAULT 'text',
+      source_file_name TEXT,
+      source_file_path TEXT,
+      topic_text TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'queued',
+      stage TEXT NOT NULL DEFAULT 'queued',
+      progress INTEGER NOT NULL DEFAULT 0,
+      message TEXT,
+      error TEXT,
+      recommendations_json TEXT,
+      selected_style_id INTEGER,
+      selected_variant TEXT,
+      voiceover TEXT NOT NULL DEFAULT 'none',
+      script_json TEXT,
+      work_dir TEXT,
+      sample_path TEXT,
+      final_path TEXT,
+      config_json TEXT NOT NULL DEFAULT '{}',
+      cancel_requested INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_explain_jobs_user_id ON explain_jobs(user_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_explain_jobs_status ON explain_jobs(status);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_explain_jobs_created_at ON explain_jobs(created_at DESC);`);
+
   // Open platform API keys (external access to TTS / Avatar)
   db.exec(`
     CREATE TABLE IF NOT EXISTS open_api_keys (

@@ -20,6 +20,7 @@ const KIND_LABEL: Record<string, string> = {
   video_compose: '视频合成',
   mooc: '慕课',
   hyperframe: 'HyperFrame',
+  explain: '讲解动画',
 };
 
 const STATUS_META: Record<

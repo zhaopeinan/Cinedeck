@@ -78,6 +78,14 @@ const HubPage: React.FC = () => {
 
   const scriptCards: HubCard[] = [
     {
+      key: 'explain',
+      title: '讲解动画',
+      desc: '输入选题或上传文稿，LLM 推荐风格 → 20 秒样片确认 → 完整 HTML 讲解动画。',
+      path: '/explain',
+      icon: <FormOutlined />,
+      accent: '#531dab',
+    },
+    {
       key: 'hyperframe',
       title: 'HyperFrame 讲授动画',
       desc: '多模态分析 PPT 生成讲义，配音后输出 HyperFrames 动画工程。',

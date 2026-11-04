@@ -29,7 +29,8 @@ export type JobKind =
   | 'project_avatar'
   | 'video_compose'
   | 'mooc'
-  | 'hyperframe';
+  | 'hyperframe'
+  | 'explain';
 
 export type UnifiedJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -105,6 +106,7 @@ export class JobRegistry {
     items.push(...this.fromDialogue(userId));
     items.push(...this.fromAvatar(userId));
     items.push(...this.fromCompose(userId));
+    items.push(...this.fromExplain(userId));
     items.push(...this.fromProjectDubbing(userId));
     items.push(...this.fromProjectAvatar(userId));
     items.push(...this.fromVideoCompose(userId));
@@ -301,6 +303,44 @@ export class JobRegistry {
         updatedAt: r.updated_at,
         href: '/voice-factory',
         cancellable: status === 'queued' || status === 'running',
+      };
+    });
+  }
+
+  private fromExplain(userId: string): UnifiedJob[] {
+    const rows = this.deps.db
+      .prepare(
+        `SELECT id, name, status, progress, message, created_at, updated_at
+         FROM explain_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 40`,
+      )
+      .all(userId) as Array<{
+      id: string;
+      name: string;
+      status: string;
+      progress: number;
+      message: string | null;
+      created_at: string;
+      updated_at: string;
+    }>;
+    const allQueued = this.deps.db
+      .prepare(`SELECT id, status, created_at FROM explain_jobs WHERE status IN ('queued','running')`)
+      .all() as Array<{ id: string; status: string; created_at: string }>;
+
+    return rows.map((r) => {
+      let status = mapDbStatus(r.status);
+      if (r.status === 'await_style' || r.status === 'await_sample') status = 'running';
+      return {
+        id: r.id,
+        kind: 'explain' as const,
+        title: `讲解动画 · ${r.name || r.id.slice(0, 8)}`,
+        status,
+        progress: Number(r.progress) || 0,
+        message: r.message,
+        queuePosition: r.status === 'queued' ? queuePosAmong(allQueued, r.id) : null,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+        href: '/explain',
+        cancellable: ['queued', 'running', 'await_style', 'await_sample'].includes(r.status),
       };
     });
   }

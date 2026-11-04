@@ -45,6 +45,9 @@ import { createOpenTtsRouter } from './routes/open/tts';
 import { createOpenAvatarRouter } from './routes/open/avatar';
 import { JobRegistry } from './services/jobRegistry';
 import { createJobsRouter } from './routes/jobs';
+import { ExplainJobService } from './services/explainJobService';
+import { initExplainPipeline } from './services/explainWorker';
+import { createExplainRouter } from './routes/explain';
 
 const PORT = process.env.PORT || 3001;
 
@@ -86,6 +89,7 @@ async function main() {
   const transcribeJobs = new TranscribeJobService(db);
   const hyperframeJobs = new HyperframeJobService(db);
   const dialogueJobs = new DialogueJobService(db);
+  const explainJobs = new ExplainJobService(db);
   const openApiKeys = new OpenApiKeyService(db);
 
   // Auth routes (captcha + login are public; users/logs/stats require auth inside the router)
@@ -126,6 +130,7 @@ async function main() {
   app.use('/api/v1/mooc', authRequired, createMoocRouter(moocJobs, projectService, pptParser));
   app.use('/api/v1/transcribe', authRequired, createTranscribeRouter(transcribeJobs));
   app.use('/api/v1/hyperframe', authRequired, createHyperframeRouter(hyperframeJobs, projectService));
+  app.use('/api/v1/explain', authRequired, createExplainRouter(explainJobs, llmService));
   app.use('/api/v1/workers', createWorkerRouter()); // workers use their own auth (API key)
 
   initMoocPipeline({
@@ -149,13 +154,14 @@ async function main() {
     systemSettings,
   });
   initDialoguePipeline({ jobs: dialogueJobs, voicebox });
+  initExplainPipeline({ jobs: explainJobs, llm: llmService });
 
   // System status (GPU etc.) — any logged-in user
   app.use('/api/v1/system', authRequired, createSystemRouter());
 
   // Unified job list / task center
   const jobRegistry = new JobRegistry({ db, projectService, videoComposer });
-  app.use('/api/v1/jobs', authRequired, createJobsRouter(jobRegistry, { dialogueJobs, moocJobs }));
+  app.use('/api/v1/jobs', authRequired, createJobsRouter(jobRegistry, { dialogueJobs, moocJobs, explainJobs }));
 
   // System settings — admin only
   app.use('/api/v1/system-settings', authRequired, adminRequired, createSystemSettingsRouter(systemSettings));

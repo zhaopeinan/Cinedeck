@@ -685,7 +685,36 @@ export type UnifiedJobKind =
   | 'project_avatar'
   | 'video_compose'
   | 'mooc'
-  | 'hyperframe';
+  | 'hyperframe'
+  | 'explain';
+
+/** 讲解动画（风格技能产品化） */
+export const explainApi = {
+  llmStatus: () => apiClient.get<ApiResponse<{ configured: boolean; name: string | null; modelName: string | null; baseUrl: string | null }>>('/explain/llm-status'),
+  listStyles: () => apiClient.get<ApiResponse<{ styles: any[] }>>('/explain/styles'),
+  posterUrl: (id: number, variant?: string) =>
+    withToken(`/api/v1/explain/styles/${id}/poster${variant ? `?variant=${encodeURIComponent(variant)}` : ''}`),
+  listJobs: () => apiClient.get<ApiResponse<{ jobs: any[] }>>('/explain/jobs'),
+  getJob: (id: string) => apiClient.get<ApiResponse<any>>(`/explain/jobs/${id}`),
+  createJob: (opts: { topic?: string; name?: string; file?: File | null }) => {
+    const fd = new FormData();
+    if (opts.topic) fd.append('topic', opts.topic);
+    if (opts.name) fd.append('name', opts.name);
+    if (opts.file) fd.append('file', opts.file);
+    return apiClient.post<ApiResponse<any>>('/explain/jobs', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 180000,
+    });
+  },
+  selectStyle: (id: string, body: { styleId: number; voiceover?: 'none' | 'zh' | 'en'; variant?: string | null }) =>
+    apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/select-style`, body),
+  approveSample: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/approve-sample`),
+  rejectSample: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/reject-sample`),
+  cancelJob: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/cancel`),
+  deleteJob: (id: string) => apiClient.delete<ApiResponse<any>>(`/explain/jobs/${id}`),
+  sampleUrl: (id: string) => withToken(`/api/v1/explain/jobs/${id}/sample`),
+  finalUrl: (id: string) => withToken(`/api/v1/explain/jobs/${id}/final`),
+};
 
 export type UnifiedJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 

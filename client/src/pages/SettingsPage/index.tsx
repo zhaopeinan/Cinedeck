@@ -247,7 +247,9 @@ const SettingsPage: React.FC = () => {
 
       <Card title="大模型（LLM）" style={{ marginBottom: isAdmin ? 0 : undefined }}>
         <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-          <Text type="secondary">OpenAI 兼容接口，用于解说词 / HyperFrame 讲义等。配置按用户隔离。</Text>
+          <Text type="secondary">
+            OpenAI 兼容接口，用于解说词、HyperFrame 讲义、讲解动画（风格推荐与 HTML 动效生成）等。配置按用户隔离；未配置个人项时可用全局激活配置。
+          </Text>
           <Button type="primary" icon={<PlusOutlined />} onClick={handleAdd}>添加配置</Button>
         </div>
 

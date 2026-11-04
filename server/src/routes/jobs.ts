@@ -4,6 +4,7 @@ import { getAvatarJob, requestCancelAvatarJob } from '../services/avatarProgress
 import { getComposeJob, requestCancelComposeJob } from '../services/composeProgress';
 import { DialogueJobService } from '../services/dialogueJobService';
 import { MoocJobService } from '../services/moocJobService';
+import { ExplainJobService } from '../services/explainJobService';
 import { requestMoocJobCancel } from '../services/moocPipelineWorker';
 import { requestCancel } from '../services/jobCancel';
 import { markDubbingCancelled } from '../services/dubbingProgress';
@@ -17,6 +18,7 @@ export function createJobsRouter(
   deps: {
     dialogueJobs: DialogueJobService;
     moocJobs: MoocJobService;
+    explainJobs?: ExplainJobService;
   },
 ): Router {
   const router = Router();
@@ -94,6 +96,10 @@ export function createJobsRouter(
         const m = deps.moocJobs.getJob(rawId);
         if (m && m.user_id === userId) kind = 'mooc';
       }
+      if (!kind && deps.explainJobs) {
+        const e = deps.explainJobs.getOwned(rawId, userId);
+        if (e) kind = 'explain';
+      }
     }
 
     if (!kind) {
@@ -161,6 +167,24 @@ export function createJobsRouter(
         case 'project_avatar': {
           requestCancel('avatar', id);
           return res.json({ success: true, data: { id, kind, status: 'cancelled' }, error: null });
+        }
+        case 'explain': {
+          if (!deps.explainJobs) {
+            return res.status(400).json({
+              success: false,
+              data: null,
+              error: { code: 'JOB_NO_CANCEL', message: '讲解动画取消不可用' },
+            });
+          }
+          const updated = deps.explainJobs.requestCancel(id, userId);
+          if (!updated) {
+            return res.status(404).json({
+              success: false,
+              data: null,
+              error: { code: '404', message: '任务不存在' },
+            });
+          }
+          return res.json({ success: true, data: { id, kind, status: updated.status }, error: null });
         }
         default:
           return res.status(400).json({
