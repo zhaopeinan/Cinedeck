@@ -6,6 +6,7 @@ import {
   getExplainStyle,
   styleCatalogForPrompt,
 } from './explainStyleCatalog';
+import { extractDocumentText } from './extractDocumentText';
 
 export interface ExplainPipelineDeps {
   jobs: ExplainJobService;
@@ -37,21 +38,6 @@ export function pumpExplainQueue() {
       pumping = false;
     }
   })();
-}
-
-function extractTextFromFile(filePath: string, fileName: string): string {
-  const ext = path.extname(fileName || filePath).toLowerCase();
-  if (['.txt', '.md', '.markdown', '.csv', '.json', '.html', '.htm'].includes(ext)) {
-    return fs.readFileSync(filePath, 'utf-8').slice(0, 40000);
-  }
-  // binary docs: best-effort UTF-8 strip
-  try {
-    const buf = fs.readFileSync(filePath);
-    const text = buf.toString('utf-8').replace(/\u0000/g, ' ');
-    const cleaned = text.replace(/[^\S\n]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
-    if (cleaned.length > 80) return cleaned.slice(0, 40000);
-  } catch { /* ignore */ }
-  throw new Error(`暂不支持直接解析 ${ext || '该'} 文件，请粘贴文本或上传 .txt / .md`);
 }
 
 function extractJsonBlock(raw: string): any {
@@ -101,12 +87,15 @@ async function runExplainJob(jobId: string) {
     // 1) Extract topic
     jobs.updateJob(jobId, { stage: 'extracting', progress: 8, message: '整理选题…' });
     let topic = (job.topic_text || '').trim();
-    if (!topic && job.source_file_path && fs.existsSync(job.source_file_path)) {
-      topic = extractTextFromFile(job.source_file_path, job.source_file_name || '');
+    // PPTX / binary leftovers from older buggy uploads start with ZIP magic
+    const looksLikeBinaryZip = /^PK[\x03\x04\x05\x06]/.test(topic) || topic.includes('[Content_Types].xml');
+    if ((!topic || looksLikeBinaryZip) && job.source_file_path && fs.existsSync(job.source_file_path)) {
+      jobs.updateJob(jobId, { message: '正在解析 PPT / 文档…', progress: 10 });
+      topic = await extractDocumentText(job.source_file_path, job.source_file_name || '');
       jobs.updateJob(jobId, { topic_text: topic.slice(0, 50000) });
     }
-    if (!topic || topic.length < 4) {
-      throw new Error('请提供选题文本，或上传可读的文本文件');
+    if (!topic || topic.length < 4 || topic.includes('[Content_Types].xml') || /^PK[\x03\x04]/.test(topic)) {
+      throw new Error('请提供选题文本，或上传可读的 PPTX / TXT / MD 文件');
     }
     throwIfCancel();
 

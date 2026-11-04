@@ -203,7 +203,8 @@ const ExplainAnimationPage: React.FC = () => {
                 onRemove={() => setFile(null)}
                 fileList={file ? [{ uid: '1', name: file.name, status: 'done' as const }] : []}
               >
-                <p className="ant-upload-text">也可上传 .txt / .md 等文本文件</p>
+                <p className="ant-upload-text">也可上传 .pptx / .txt / .md</p>
+                <p className="ant-upload-hint">PPT 会自动抽取每页正文与备注作为选题</p>
               </Dragger>
             </div>
             <Button
@@ -295,6 +296,20 @@ const ExplainAnimationPage: React.FC = () => {
                 )}
                 {detail.message && <Paragraph type="secondary">{detail.message}</Paragraph>}
                 {detail.error && <Alert type="error" showIcon message={detail.error} style={{ marginBottom: 12 }} />}
+                {(detail.status === 'failed' || detail.status === 'cancelled') && (
+                  <Button
+                    style={{ marginBottom: 12 }}
+                    icon={<ReloadOutlined />}
+                    onClick={async () => {
+                      await explainApi.retryJob(detail.id);
+                      message.success('已重新排队');
+                      await loadDetail(detail.id);
+                      await loadJobs();
+                    }}
+                  >
+                    重试此任务
+                  </Button>
+                )}
                 {coreQuestion && (
                   <Alert type="info" showIcon style={{ marginBottom: 12 }} message={`核心问题：${coreQuestion}`} />
                 )}

@@ -719,6 +719,7 @@ export const explainApi = {
   approveSample: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/approve-sample`),
   rejectSample: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/reject-sample`),
   cancelJob: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/cancel`),
+  retryJob: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/retry`),
   deleteJob: (id: string) => apiClient.delete<ApiResponse<any>>(`/explain/jobs/${id}`),
   sampleUrl: (id: string) => withToken(`/api/v1/explain/jobs/${id}/sample`),
   finalUrl: (id: string) => withToken(`/api/v1/explain/jobs/${id}/final`),

@@ -182,6 +182,38 @@ export function createExplainRouter(jobs: ExplainJobService, llm: LlmService): R
     res.json({ success: true, data: jobs.publicRow(jobs.getJob(job.id)!), error: null });
   });
 
+  router.post('/jobs/:id/retry', (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    const job = jobs.getOwned(String(req.params.id), userId);
+    if (!job) return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
+    if (job.status !== 'failed' && job.status !== 'cancelled') {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        error: { code: '400', message: '仅失败或已取消的任务可重试' },
+      });
+    }
+    // Clear corrupted binary topic so worker re-extracts from source file
+    const topic = String(job.topic_text || '');
+    const badTopic = topic.includes('[Content_Types].xml') || /^PK[\x03\x04]/.test(topic);
+    jobs.updateJob(job.id, {
+      status: 'queued',
+      stage: 'queued',
+      progress: 0,
+      message: '已重新排队',
+      error: null,
+      cancel_requested: 0,
+      finished_at: null,
+      recommendations_json: null,
+      selected_style_id: null,
+      sample_path: null,
+      final_path: null,
+      ...(badTopic ? { topic_text: '' } : {}),
+    });
+    pumpExplainQueue();
+    res.json({ success: true, data: jobs.publicRow(jobs.getJob(job.id)!), error: null });
+  });
+
   router.post('/jobs/:id/cancel', (req: Request, res: Response) => {
     const userId = getUserId(req);
     const updated = jobs.requestCancel(String(req.params.id), userId);

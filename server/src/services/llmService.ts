@@ -65,6 +65,70 @@ function getAxiosProxy(): false | { host: string; port: number; protocol: string
   }
 }
 
+/** Normalize OpenAI-compatible message content (string | parts | reasoning fallbacks). */
+function pickMessageContent(message: any): string {
+  if (!message) return '';
+  const raw = message.content;
+  if (typeof raw === 'string' && raw.trim()) return raw;
+  if (Array.isArray(raw)) {
+    const text = raw
+      .map((p) => {
+        if (typeof p === 'string') return p;
+        if (p?.type === 'text' && typeof p.text === 'string') return p.text;
+        if (typeof p?.text === 'string') return p.text;
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+    if (text) return text;
+  }
+  // Some Qwen / reasoning endpoints put final answer here when content is empty
+  for (const key of ['reasoning_content', 'reasoning', 'refusal']) {
+    if (typeof message[key] === 'string' && message[key].trim()) return message[key].trim();
+  }
+  return '';
+}
+
+/** Ensure OpenAI-compatible base ends with /v1 when caller omitted it (New API / OneAPI gateways). */
+function normalizeOpenAiBaseUrl(raw: string): string {
+  let base = String(raw || '').trim().replace(/\/+$/, '');
+  if (!base) return base;
+  // Already has a versioned OpenAI path
+  if (/\/v1$/i.test(base) || /\/openai\/v1$/i.test(base)) return base;
+  // Bare host:port of New API / LiteLLM style gateways usually need /v1
+  try {
+    const u = new URL(base);
+    if (!u.pathname || u.pathname === '/') {
+      return `${base}/v1`;
+    }
+  } catch {
+    /* keep as-is */
+  }
+  return base;
+}
+
+function extractChatContent(status: number, data: any, label: string): string {
+  if (typeof data === 'string') {
+    const snip = data.slice(0, 80).replace(/\s+/g, ' ');
+    if (/<!doctype html|<html[\s>]/i.test(data)) {
+      throw new Error(
+        `模型「${label}」返回了网页而不是 API JSON。请把 Base URL 改成带 /v1 的地址（例如 http://host:port/v1）`,
+      );
+    }
+    throw new Error(`模型「${label}」返回非 JSON（HTTP ${status}）：${snip}`);
+  }
+  if (status >= 400) {
+    const msg = data?.error?.message || data?.message || JSON.stringify(data).slice(0, 300);
+    throw new Error(`模型请求失败 (${status}): ${msg}`);
+  }
+  const content = pickMessageContent(data?.choices?.[0]?.message);
+  if (!content) {
+    throw new Error(`模型「${label}」返回内容为空（请确认模型名与 Base URL 正确）`);
+  }
+  return content;
+}
+
 function isTlsInterceptError(err: any): boolean {
   const msg = String(err?.message || err || '');
   const code = String(err?.code || '');
@@ -232,7 +296,7 @@ export class LlmService {
     const config = this.resolveConfig(options);
     if (!config) throw new Error('未配置大模型，请先在设置中添加 LLM 配置');
 
-    const baseUrl = config.base_url.replace(/\/+$/, '');
+    const baseUrl = normalizeOpenAiBaseUrl(config.base_url);
     const url = `${baseUrl}/chat/completions`;
 
     const body: any = {
@@ -249,33 +313,31 @@ export class LlmService {
       headers['Authorization'] = `Bearer ${config.api_key}`;
     }
 
-    try {
+    const postOnce = async (proxy?: ReturnType<typeof getAxiosProxy>) => {
       const res = await axios.post(url, body, {
         headers,
         timeout: 120000,
-        proxy: getAxiosProxy(),
+        proxy: proxy === undefined ? getAxiosProxy() : proxy,
+        // Some gateways return HTML 200 for wrong paths — don't throw on status alone
+        validateStatus: () => true,
       });
-      const content = res.data?.choices?.[0]?.message?.content;
-      if (!content) throw new Error('模型返回内容为空');
-      return content;
+      return extractChatContent(res.status, res.data, config.name || config.model_name);
+    };
+
+    try {
+      return await postOnce();
     } catch (err: any) {
       // 校园网 HTTPS 劫持：直连拿不到正确证书，自动改走宿主机 Clash 反代
       if (isTlsInterceptError(err) && !getAxiosProxy()) {
         let last = err;
         for (const proxy of campusProxyCandidates()) {
           try {
-            const res = await axios.post(url, body, {
-              headers,
-              timeout: 120000,
-              proxy,
-            });
-            const content = res.data?.choices?.[0]?.message?.content;
-            if (!content) throw new Error('模型返回内容为空');
+            const content = await postOnce(proxy);
             console.warn(`[LLM] TLS intercept detected; using campus proxy ${proxy.host}:${proxy.port}`);
             return content;
           } catch (e2: any) {
             last = e2;
-            if (e2.response) break; // reached API (auth/model error) — stop hopping proxies
+            if (!isTlsInterceptError(e2)) break;
           }
         }
         err = last;
