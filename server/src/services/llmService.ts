@@ -33,6 +33,13 @@ export type LlmCallOptions = {
   configId?: string;
   /** Prefer module-bound config, then fall back to default/active */
   module?: LlmModule;
+  /**
+   * DeepSeek-V4 / reasoning models: pass through as `reasoning_effort`.
+   * Use `none` for long HTML/code so tokens aren't eaten by thinking (content stays null).
+   */
+  reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
+  /** Extra OpenAI-compatible body fields (e.g. chat_template_kwargs) */
+  extraBody?: Record<string, unknown>;
 };
 
 export interface ChatMessage {
@@ -83,8 +90,10 @@ function pickMessageContent(message: any): string {
       .trim();
     if (text) return text;
   }
-  // Some Qwen / reasoning endpoints put final answer here when content is empty
-  for (const key of ['reasoning_content', 'reasoning', 'refusal']) {
+  // Do NOT fall back to `reasoning` — DeepSeek-V4 puts chain-of-thought there while
+  // leaving content null when max_tokens is exhausted by thinking.
+  // Some gateways still put the final answer in reasoning_content / refusal.
+  for (const key of ['reasoning_content', 'refusal']) {
     if (typeof message[key] === 'string' && message[key].trim()) return message[key].trim();
   }
   return '';
@@ -122,8 +131,18 @@ function extractChatContent(status: number, data: any, label: string): string {
     const msg = data?.error?.message || data?.message || JSON.stringify(data).slice(0, 300);
     throw new Error(`模型请求失败 (${status}): ${msg}`);
   }
-  const content = pickMessageContent(data?.choices?.[0]?.message);
+  const choice = data?.choices?.[0];
+  const message = choice?.message;
+  const content = pickMessageContent(message);
   if (!content) {
+    const reasoningLen = String(message?.reasoning_content || message?.reasoning || '').length;
+    const finish = choice?.finish_reason || '';
+    const rTokens = data?.usage?.completion_tokens_details?.reasoning_tokens;
+    if (reasoningLen > 0 || rTokens) {
+      throw new Error(
+        `模型「${label}」只返回了思考过程（reasoning≈${reasoningLen || rTokens} tokens，finish=${finish || '?'}），最终 content 为空。请对长输出请求设置 reasoning_effort=none，或增大 max_tokens`,
+      );
+    }
     throw new Error(`模型「${label}」返回内容为空（请确认模型名与 Base URL 正确）`);
   }
   return content;
@@ -307,21 +326,41 @@ export class LlmService {
     if (options?.maxTokens) {
       body.max_tokens = options.maxTokens;
     }
+    if (options?.reasoningEffort) {
+      body.reasoning_effort = options.reasoningEffort;
+    }
+    if (options?.extraBody && typeof options.extraBody === 'object') {
+      Object.assign(body, options.extraBody);
+    }
 
     const headers: any = { 'Content-Type': 'application/json' };
     if (config.api_key) {
       headers['Authorization'] = `Bearer ${config.api_key}`;
     }
 
+    // Long HTML / high max_tokens can take minutes on local gateways
+    const timeoutMs = Math.max(120000, Math.min(600000, (options?.maxTokens || 0) > 2000 ? 360000 : 180000));
+
     const postOnce = async (proxy?: ReturnType<typeof getAxiosProxy>) => {
-      const res = await axios.post(url, body, {
-        headers,
-        timeout: 120000,
-        proxy: proxy === undefined ? getAxiosProxy() : proxy,
-        // Some gateways return HTML 200 for wrong paths — don't throw on status alone
-        validateStatus: () => true,
-      });
-      return extractChatContent(res.status, res.data, config.name || config.model_name);
+      try {
+        const res = await axios.post(url, body, {
+          headers,
+          timeout: timeoutMs,
+          maxContentLength: 64 * 1024 * 1024,
+          maxBodyLength: 64 * 1024 * 1024,
+          proxy: proxy === undefined ? getAxiosProxy() : proxy,
+          // Some gateways return HTML 200 for wrong paths — don't throw on status alone
+          validateStatus: () => true,
+        });
+        return extractChatContent(res.status, res.data, config.name || config.model_name);
+      } catch (e: any) {
+        if (/stream has been aborted|aborted|ECONNRESET|socket hang up/i.test(String(e?.message || ''))) {
+          throw new Error(
+            `模型「${config.name || config.model_name}」响应流被中断（${e.message}）。若网关有响应体上限/缓存截断请检查；本请求超时 ${Math.round(timeoutMs / 1000)}s`,
+          );
+        }
+        throw e;
+      }
     };
 
     try {

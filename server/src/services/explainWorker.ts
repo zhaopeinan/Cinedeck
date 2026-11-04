@@ -73,6 +73,20 @@ function extractHtml(raw: string): string {
   return html;
 }
 
+/** Reject skeleton HTML where the model abbreviated CSS/JS with "..." */
+function assertUsableHtml(html: string, mode: 'sample' | 'final') {
+  const minBytes = mode === 'sample' ? 2500 : 4000;
+  if (!html || html.length < minBytes) {
+    throw new Error(`模型返回的 HTML 过短（${html?.length || 0} 字节），疑似骨架/截断`);
+  }
+  if (/<(style|script)[^>]*>\s*\.{2,}\s*<\/\1>/i.test(html) || />\s*\.\.\.\s*</.test(html)) {
+    throw new Error('模型返回了带省略号的骨架 HTML，缺少真实 CSS/JS');
+  }
+  if (!/<style[\s>]/i.test(html) || !/<script[\s>]/i.test(html)) {
+    throw new Error('模型返回的 HTML 缺少 <style> 或 <script>');
+  }
+}
+
 async function runExplainJob(jobId: string) {
   if (!deps) return;
   const { jobs, llm } = deps;
@@ -190,16 +204,21 @@ export async function continueExplainAfterStyle(jobId: string) {
     const style = getExplainStyle(styleId);
     if (!style) throw new Error('未找到所选风格');
 
-    jobs.updateJob(jobId, { stage: 'scripting', progress: 45, message: '撰写极简分镜…' });
-    const scriptRaw = await llm.chat(
-      [
-        {
-          role: 'system',
-          content: '你是讲解动画编剧。输出 JSON，不要 Markdown。默认中文、面向普通观众。',
-        },
-        {
-          role: 'user',
-          content: `选题：
+    let script: any = null;
+    try {
+      if (job.script_json) script = JSON.parse(job.script_json);
+    } catch { /* regenerate */ }
+    if (!script || !Array.isArray(script.nodes) || script.nodes.length < 2) {
+      jobs.updateJob(jobId, { stage: 'scripting', progress: 45, message: '撰写极简分镜…' });
+      const scriptRaw = await llm.chat(
+        [
+          {
+            role: 'system',
+            content: '你是讲解动画编剧。输出 JSON，不要 Markdown。默认中文、面向普通观众。',
+          },
+          {
+            role: 'user',
+            content: `选题：
 ${(job.topic_text || '').slice(0, 8000)}
 
 选定风格：#${style.id} ${style.nameZh} / ${style.name}
@@ -216,16 +235,18 @@ ${(job.topic_text || '').slice(0, 8000)}
     { "id": 1, "narration": "一句解说", "visual": "一句画面动作", "seconds": 3 }
   ],
   "sampleFocus": "样片对应哪几个节点（如 2-4）",
-  "colorSystem": { "bg": "#...", "fg": "#...", "accent": "#..." }
+  "colorSystem": { "bg": "#0a0f2c", "fg": "#e8f0ff", "accent": "#00e5ff" }
 }
 nodes 4–6 个，总时长约 18–40 秒。`,
-        },
-      ],
-      { ...llmChatOpts(llm, job.user_id), temperature: 0.55, maxTokens: 2000 },
-    );
-    const script = extractJsonBlock(scriptRaw);
+          },
+        ],
+        { ...llmChatOpts(llm, job.user_id), temperature: 0.55, maxTokens: 2000 },
+      );
+      script = extractJsonBlock(scriptRaw);
+      jobs.updateJob(jobId, { script_json: JSON.stringify(script) });
+    }
+
     jobs.updateJob(jobId, {
-      script_json: JSON.stringify(script),
       stage: 'generating_sample',
       progress: 60,
       message: '生成约 20 秒 HTML 样片…',
@@ -346,21 +367,17 @@ async function generateHtmlAnimation(opts: {
   durationHint: string;
 }): Promise<string> {
   const { llm, llmOpts, topic, style, script, mode, voiceover, durationHint } = opts;
-  const raw = await llm.chat(
-    [
-      {
-        role: 'system',
-        content: `你是资深 motion graphics 工程师，输出完整可运行的单文件 HTML（含 CSS+JS），不要 Markdown。
-要求：
+  const system = `你是资深 motion graphics 工程师，只输出完整可运行的单文件 HTML（内含全部 CSS+JS），不要 Markdown，不要解释。
+硬性要求：
+- 必须写出完整 <style>…</style> 与 <script>…</script> 实装代码；严禁用 "..." / "…" / 注释占位省略
 - 16:9，深色或风格匹配背景，中文文案清晰可读
 - 用 requestAnimationFrame 驱动连续动效，解释因果关系（物体变化、传递、转场），禁止仅静态轮播
 - 自带简易播放器（播放/暂停/进度条）
 - 不依赖外网 CDN、不引用外部字体 URL
-- ${durationHint}`,
-      },
-      {
-        role: 'user',
-        content: `模式：${mode === 'sample' ? '约20秒样片' : '完整成片'}
+- ${durationHint}
+- ${mode === 'sample' ? '样片控制在可完整输出的体量：优先 120–220 行，但代码必须可运行' : '全片可更长，仍须一次输出完整可运行文件'}`;
+
+  const user = `模式：${mode === 'sample' ? '约20秒样片' : '完整成片'}
 选题：
 ${topic.slice(0, 6000)}
 
@@ -374,12 +391,41 @@ ${JSON.stringify(script).slice(0, 6000)}
 
 配音偏好：${voiceover}（本次可不嵌入人声音频，可用字幕示意）
 
-请直接输出完整 HTML 文档。`,
-      },
-    ],
-    { ...llmOpts, temperature: 0.45, maxTokens: mode === 'sample' ? 6000 : 10000 },
-  );
-  return extractHtml(raw);
+请直接输出以 <!DOCTYPE html> 开头的完整 HTML。`;
+
+  const maxTokens = mode === 'sample' ? 8000 : 12000;
+  let lastErr: Error | null = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const raw = await llm.chat(
+        [
+          { role: 'system', content: system },
+          {
+            role: 'user',
+            content: attempt === 1
+              ? user
+              : `${user}\n\n上一次你输出了带省略号的骨架或过短文件。本次必须给出完整可运行 CSS/JS，禁止任何 "..." 占位。`,
+          },
+        ],
+        {
+          ...llmOpts,
+          temperature: attempt === 1 ? 0.4 : 0.25,
+          maxTokens,
+          // DeepSeek-V4 等推理模型会把 max_tokens 花光在 thinking 上，content 变 null
+          reasoningEffort: 'none',
+          extraBody: { chat_template_kwargs: { enable_thinking: false } },
+        },
+      );
+      const html = extractHtml(raw);
+      assertUsableHtml(html, mode);
+      return html;
+    } catch (err: any) {
+      lastErr = err instanceof Error ? err : new Error(String(err));
+      if (attempt === 2) break;
+      // Only retry skeleton / short output; network errors bubble after one retry too
+    }
+  }
+  throw lastErr || new Error('HTML 生成失败');
 }
 
 /** Re-queue job into running for next stage */
