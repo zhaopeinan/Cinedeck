@@ -747,7 +747,13 @@ export const explainApi = {
       timeout: 180000,
     });
   },
-  selectStyle: (id: string, body: { styleId: number; voiceover?: 'none' | 'zh' | 'en'; variant?: string | null }) =>
+  selectStyle: (id: string, body: {
+    styleId: number;
+    voiceover?: 'none' | 'zh' | 'en';
+    voiceId?: string | null;
+    modelId?: string | null;
+    variant?: string | null;
+  }) =>
     apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/select-style`, body),
   approveSample: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/approve-sample`),
   rejectSample: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/reject-sample`),

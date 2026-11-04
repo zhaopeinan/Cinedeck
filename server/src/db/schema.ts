@@ -379,6 +379,8 @@ export function initDatabase(dbPath?: string): Database.Database {
       selected_style_id INTEGER,
       selected_variant TEXT,
       voiceover TEXT NOT NULL DEFAULT 'none',
+      selected_voice_id TEXT,
+      selected_model_id TEXT,
       script_json TEXT,
       work_dir TEXT,
       sample_path TEXT,
@@ -394,6 +396,15 @@ export function initDatabase(dbPath?: string): Database.Database {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_explain_jobs_user_id ON explain_jobs(user_id);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_explain_jobs_status ON explain_jobs(status);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_explain_jobs_created_at ON explain_jobs(created_at DESC);`);
+  {
+    const explainCols = db.prepare('PRAGMA table_info(explain_jobs)').all() as Array<{ name: string }>;
+    if (!explainCols.find((c) => c.name === 'selected_voice_id')) {
+      db.exec('ALTER TABLE explain_jobs ADD COLUMN selected_voice_id TEXT');
+    }
+    if (!explainCols.find((c) => c.name === 'selected_model_id')) {
+      db.exec('ALTER TABLE explain_jobs ADD COLUMN selected_model_id TEXT');
+    }
+  }
 
   // Open platform API keys (external access to TTS / Avatar)
   db.exec(`

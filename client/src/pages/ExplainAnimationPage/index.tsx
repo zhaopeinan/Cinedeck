@@ -4,9 +4,14 @@ import {
   Alert, Button, Card, Col, Input, List, Progress, Radio, Row, Space, Tag, Typography, Upload, message, Popconfirm,
 } from 'antd';
 import {
-  ArrowLeftOutlined, CheckOutlined, DeleteOutlined, ReloadOutlined, RocketOutlined, SettingOutlined,
+  ArrowLeftOutlined, CheckOutlined, DeleteOutlined, PauseOutlined, PlayCircleOutlined,
+  ReloadOutlined, RocketOutlined, SettingOutlined,
 } from '@ant-design/icons';
 import { explainApi } from '../../api';
+import {
+  ModelSelectField, VoiceSelectField, fetchVoiceSampleObjectUrl, useVoiceboxCatalog,
+} from '../../components/voicebox';
+import { preferredModelForVoices } from '../../utils/voiceboxModels';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -43,8 +48,22 @@ const ExplainAnimationPage: React.FC = () => {
     };
   } | null>(null);
   const [voiceover, setVoiceover] = useState<'none' | 'zh' | 'en'>('none');
+  const [voiceId, setVoiceId] = useState<string | undefined>();
+  const [modelId, setModelId] = useState<string | undefined>();
   const [pickingStyleId, setPickingStyleId] = useState<number | null>(null);
+  const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
+  const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
+  const sampleAudioRef = useRef<HTMLAudioElement | null>(null);
   const pollRef = useRef<number | null>(null);
+
+  const {
+    voices,
+    ttsModels,
+    loadingVoices,
+    loadingModels,
+    voiceboxAvailable,
+    reloadAll: reloadVoicebox,
+  } = useVoiceboxCatalog();
 
   const loadJobs = useCallback(async () => {
     try {
@@ -75,8 +94,58 @@ const ExplainAnimationPage: React.FC = () => {
     void loadLlm();
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
+      sampleAudioRef.current?.pause();
+      sampleAudioRef.current = null;
     };
   }, [loadJobs, loadLlm]);
+
+  useEffect(() => {
+    if (!voices.length) return;
+    if (!voiceId) setVoiceId(voices[0].id);
+  }, [voices, voiceId]);
+
+  useEffect(() => {
+    if (!ttsModels.length || !voices.length) return;
+    if (modelId) return;
+    const selected = voices.find((v) => v.id === voiceId);
+    const hasPreset = selected?.source === 'preset' || voices.some((v) => v.source === 'preset' && v.id === voiceId);
+    const pick = preferredModelForVoices({ models: ttsModels, hasPresetVoice: !!hasPreset });
+    if (pick) setModelId(pick);
+  }, [ttsModels, voices, voiceId, modelId]);
+
+  const stopVoicePreview = () => {
+    sampleAudioRef.current?.pause();
+    sampleAudioRef.current = null;
+    setPlayingVoiceId(null);
+    setPreviewingVoiceId(null);
+  };
+
+  const previewVoice = async (id: string) => {
+    if (playingVoiceId === id) {
+      stopVoicePreview();
+      return;
+    }
+    stopVoicePreview();
+    setPreviewingVoiceId(id);
+    const hide = message.loading('正在准备试听（预置音色首次可能需合成）…', 0);
+    try {
+      const objectUrl = await fetchVoiceSampleObjectUrl(id);
+      const audio = new Audio(objectUrl);
+      sampleAudioRef.current = audio;
+      setPlayingVoiceId(id);
+      audio.onended = () => {
+        stopVoicePreview();
+        URL.revokeObjectURL(objectUrl);
+      };
+      await audio.play();
+    } catch (err: any) {
+      message.error(err?.message || '试听失败');
+      stopVoicePreview();
+    } finally {
+      hide();
+      setPreviewingVoiceId(null);
+    }
+  };
 
   useEffect(() => {
     if (!activeId) {
@@ -138,11 +207,30 @@ const ExplainAnimationPage: React.FC = () => {
 
   const handleSelectStyle = async (styleId: number) => {
     if (!detail?.id) return;
+    if (voiceover !== 'none') {
+      if (!voiceId) {
+        message.warning('请先选择音色，并可试听确认');
+        return;
+      }
+      if (!modelId) {
+        message.warning('请先选择配音模型');
+        return;
+      }
+      if (voiceboxAvailable === false) {
+        message.warning('Voicebox 暂不可用，请稍后重试或选择「不加配音」');
+        return;
+      }
+    }
     setPickingStyleId(styleId);
     try {
-      const res = await explainApi.selectStyle(detail.id, { styleId, voiceover });
+      const res = await explainApi.selectStyle(detail.id, {
+        styleId,
+        voiceover,
+        voiceId: voiceover === 'none' ? null : voiceId,
+        modelId: voiceover === 'none' ? null : modelId,
+      });
       if (!res.data?.success) throw new Error(res.data?.error?.message || '选择失败');
-      message.success('已选定风格，开始生成样片…');
+      message.success(voiceover === 'none' ? '已选定风格，开始生成样片…' : '已选定风格与音色，开始生成样片…');
       setDetail(res.data.data);
       await loadJobs();
     } catch (e: any) {
@@ -156,6 +244,12 @@ const ExplainAnimationPage: React.FC = () => {
     ? detail.recommendations.recommendations
     : (Array.isArray(detail?.recommendations) ? detail.recommendations : []);
   const coreQuestion = detail?.recommendations?.coreQuestion;
+  const voicesForLang = (() => {
+    if (voiceover === 'none') return voices;
+    const pref = voiceover === 'en' ? 'en' : 'zh';
+    const matched = voices.filter((v) => String(v.language || '').toLowerCase().startsWith(pref));
+    return matched.length ? matched : voices;
+  })();
 
   return (
     <div style={{ maxWidth: 1180, margin: '0 auto', padding: 24 }}>
@@ -330,7 +424,7 @@ const ExplainAnimationPage: React.FC = () => {
 
                 {detail.status === 'await_style' && (
                   <>
-                    <Paragraph>请选择一种风格，并确认是否加旁白（与技能确认点一一致）：</Paragraph>
+                    <Paragraph>请选择一种风格，并确认旁白语言与音色（可选试听）：</Paragraph>
                     <Radio.Group
                       value={voiceover}
                       onChange={(e) => setVoiceover(e.target.value)}
@@ -342,6 +436,62 @@ const ExplainAnimationPage: React.FC = () => {
                         { label: '英文配音', value: 'en' },
                       ]}
                     />
+                    {voiceover !== 'none' && (
+                      <Card size="small" style={{ marginBottom: 12 }} title="旁白音色">
+                        {voiceboxAvailable === false && (
+                          <Alert
+                            type="warning"
+                            showIcon
+                            style={{ marginBottom: 8 }}
+                            message="Voicebox 暂不可用"
+                            action={<Button size="small" onClick={() => void reloadVoicebox()}>重试</Button>}
+                          />
+                        )}
+                        <Space direction="vertical" style={{ width: '100%' }} size={10}>
+                          <div>
+                            <Text type="secondary">音色</Text>
+                            <div style={{ marginTop: 4, display: 'flex', gap: 8, alignItems: 'center' }}>
+                              <div style={{ flex: 1 }}>
+                                <VoiceSelectField
+                                  value={voiceId}
+                                  onChange={(id) => {
+                                    setVoiceId(id);
+                                    setModelId(undefined);
+                                  }}
+                                  voices={voicesForLang}
+                                  loading={loadingVoices}
+                                  onReload={() => void reloadVoicebox()}
+                                />
+                              </div>
+                              <Button
+                                icon={playingVoiceId === voiceId ? <PauseOutlined /> : <PlayCircleOutlined />}
+                                loading={!!voiceId && previewingVoiceId === voiceId}
+                                disabled={!voiceId}
+                                onClick={() => voiceId && void previewVoice(voiceId)}
+                              >
+                                {playingVoiceId === voiceId ? '停止' : previewingVoiceId === voiceId ? '合成中' : '试听'}
+                              </Button>
+                            </div>
+                            <Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate('/voice-factory')}>
+                              去造声工厂克隆 / 管理音色
+                            </Button>
+                          </div>
+                          <div>
+                            <Text type="secondary">配音模型</Text>
+                            <div style={{ marginTop: 4 }}>
+                              <ModelSelectField
+                                value={modelId}
+                                onChange={setModelId}
+                                models={ttsModels}
+                                loading={loadingModels}
+                                readyOnly={false}
+                                onReload={() => void reloadVoicebox()}
+                              />
+                            </div>
+                          </div>
+                        </Space>
+                      </Card>
+                    )}
                     <Row gutter={[12, 12]}>
                       {(Array.isArray(recommendations) ? recommendations : []).map((r: any) => (
                         <Col xs={24} sm={8} key={r.id}>

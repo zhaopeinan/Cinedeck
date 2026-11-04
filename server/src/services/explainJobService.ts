@@ -48,6 +48,8 @@ export interface ExplainJobRow {
   selected_style_id: number | null;
   selected_variant: string | null;
   voiceover: 'none' | 'zh' | 'en';
+  selected_voice_id: string | null;
+  selected_model_id: string | null;
   script_json: string | null;
   work_dir: string | null;
   sample_path: string | null;
@@ -105,6 +107,8 @@ export class ExplainJobService {
       selected_style_id: null,
       selected_variant: null,
       voiceover: 'none',
+      selected_voice_id: null,
+      selected_model_id: null,
       script_json: null,
       work_dir: workDir,
       sample_path: null,
@@ -120,13 +124,15 @@ export class ExplainJobService {
       INSERT INTO explain_jobs (
         id, user_id, name, source_type, source_file_name, source_file_path, topic_text,
         status, stage, progress, message, error, recommendations_json,
-        selected_style_id, selected_variant, voiceover, script_json, work_dir,
+        selected_style_id, selected_variant, voiceover, selected_voice_id, selected_model_id,
+        script_json, work_dir,
         sample_path, final_path, config_json, cancel_requested,
         created_at, updated_at, started_at, finished_at
       ) VALUES (
         @id, @user_id, @name, @source_type, @source_file_name, @source_file_path, @topic_text,
         @status, @stage, @progress, @message, @error, @recommendations_json,
-        @selected_style_id, @selected_variant, @voiceover, @script_json, @work_dir,
+        @selected_style_id, @selected_variant, @voiceover, @selected_voice_id, @selected_model_id,
+        @script_json, @work_dir,
         @sample_path, @final_path, @config_json, @cancel_requested,
         @created_at, @updated_at, @started_at, @finished_at
       )
@@ -154,6 +160,7 @@ export class ExplainJobService {
     const allowed = [
       'name', 'topic_text', 'status', 'stage', 'progress', 'message', 'error',
       'recommendations_json', 'selected_style_id', 'selected_variant', 'voiceover',
+      'selected_voice_id', 'selected_model_id',
       'script_json', 'work_dir', 'sample_path', 'final_path', 'config_json',
       'cancel_requested', 'started_at', 'finished_at',
     ] as const;
@@ -270,6 +277,8 @@ export class ExplainJobService {
       selectedStyleId: job.selected_style_id,
       selectedVariant: job.selected_variant,
       voiceover: job.voiceover,
+      selectedVoiceId: job.selected_voice_id,
+      selectedModelId: job.selected_model_id,
       script,
       hasSample: !!(job.sample_path && fs.existsSync(job.sample_path)),
       hasFinal: !!(job.final_path && fs.existsSync(job.final_path)),

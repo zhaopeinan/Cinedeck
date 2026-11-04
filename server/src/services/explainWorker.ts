@@ -12,11 +12,18 @@ import {
   EXPLAIN_GEN_DEFAULTS,
   type ExplainGenSettings,
 } from './explainGenSettings';
+import { VoiceboxAdapter } from './voiceboxAdapter';
+import {
+  buildNarrationText,
+  injectNarrationAudio,
+  synthesizeExplainNarration,
+} from './explainNarration';
 
 export interface ExplainPipelineDeps {
   jobs: ExplainJobService;
   llm: LlmService;
   genSettings: ExplainGenSettingsService;
+  voicebox: VoiceboxAdapter;
 }
 
 function genSettingsFor(userId: string): ExplainGenSettings {
@@ -240,7 +247,11 @@ ${(job.topic_text || '').slice(0, 8000)}
 视觉：${style.description}
 动效：${style.motionNotes}
 讲解手法：${style.explainerNotes}
-配音：${job.voiceover === 'none' ? '不加旁白（纯动画示意）' : job.voiceover === 'zh' ? '中文旁白（稍后接入）' : '英文旁白（稍后接入）'}
+配音：${job.voiceover === 'none'
+              ? '不加旁白（纯动画示意，用字幕即可）'
+              : job.voiceover === 'zh'
+                ? '中文旁白（稍后用选定音色合成真人旁白，分镜 narration 必须适合口播）'
+                : '英文旁白（稍后用选定音色合成真人旁白，分镜 narration 用英文口播句）'}
 
 输出 JSON：
 {
@@ -272,7 +283,7 @@ nodes 4–6 个，总时长约 18–40 秒。`,
       message: '生成约 20 秒 HTML 样片…',
     });
 
-    const sampleHtml = await generateHtmlAnimation({
+    let sampleHtml = await generateHtmlAnimation({
       llm,
       llmOpts: llmChatOpts(llm, job.user_id),
       topic: job.topic_text,
@@ -286,8 +297,25 @@ nodes 4–6 个，总时长约 18–40 秒。`,
 
     const workDir = job.work_dir || path.join(path.resolve(process.cwd(), '..', 'data', 'explain-jobs'), job.id);
     fs.mkdirSync(workDir, { recursive: true });
-    const samplePath = path.join(workDir, 'sample', 'index.html');
-    fs.mkdirSync(path.dirname(samplePath), { recursive: true });
+    const sampleDir = path.join(workDir, 'sample');
+    fs.mkdirSync(sampleDir, { recursive: true });
+
+    if (job.voiceover !== 'none' && job.selected_voice_id && job.selected_model_id && deps.voicebox) {
+      jobs.updateJob(jobId, { progress: 68, message: '正在用选定音色合成样片旁白…' });
+      const narration = buildNarrationText(script, 'sample');
+      const wavPath = path.join(sampleDir, 'narration.wav');
+      await synthesizeExplainNarration({
+        voicebox: deps.voicebox,
+        text: narration,
+        voiceId: job.selected_voice_id,
+        modelId: job.selected_model_id,
+        language: job.voiceover === 'en' ? 'en' : 'zh',
+        outPath: wavPath,
+      });
+      sampleHtml = injectNarrationAudio(sampleHtml, wavPath);
+    }
+
+    const samplePath = path.join(sampleDir, 'index.html');
     fs.writeFileSync(samplePath, sampleHtml, 'utf-8');
 
     jobs.updateJob(jobId, {
@@ -332,7 +360,7 @@ export async function continueExplainAfterSampleApprove(jobId: string) {
       message: '正在扩展完整 HTML 动画…',
     });
 
-    const finalHtml = await generateHtmlAnimation({
+    let finalHtml = await generateHtmlAnimation({
       llm,
       llmOpts: llmChatOpts(llm, job.user_id),
       topic: job.topic_text,
@@ -345,8 +373,25 @@ export async function continueExplainAfterSampleApprove(jobId: string) {
     });
 
     const workDir = job.work_dir!;
-    const finalPath = path.join(workDir, 'final', 'index.html');
-    fs.mkdirSync(path.dirname(finalPath), { recursive: true });
+    const finalDir = path.join(workDir, 'final');
+    fs.mkdirSync(finalDir, { recursive: true });
+
+    if (job.voiceover !== 'none' && job.selected_voice_id && job.selected_model_id && deps.voicebox) {
+      jobs.updateJob(jobId, { progress: 90, message: '正在用选定音色合成全片旁白…' });
+      const narration = buildNarrationText(script, 'final');
+      const wavPath = path.join(finalDir, 'narration.wav');
+      await synthesizeExplainNarration({
+        voicebox: deps.voicebox,
+        text: narration,
+        voiceId: job.selected_voice_id,
+        modelId: job.selected_model_id,
+        language: job.voiceover === 'en' ? 'en' : 'zh',
+        outPath: wavPath,
+      });
+      finalHtml = injectNarrationAudio(finalHtml, wavPath);
+    }
+
+    const finalPath = path.join(finalDir, 'index.html');
     fs.writeFileSync(finalPath, finalHtml, 'utf-8');
 
     jobs.updateJob(jobId, {
@@ -412,7 +457,9 @@ ${style.description}
 分镜 JSON：
 ${JSON.stringify(script).slice(0, 6000)}
 
-配音偏好：${voiceover}（本次可不嵌入人声音频，可用字幕示意）
+配音偏好：${voiceover === 'none'
+    ? '无旁白，用字幕示意即可'
+    : '真人旁白将在之后用选定音色单独合成并注入；页面需有播放/暂停控件，旁白会挂到页面播放器上'}
 
 请直接输出以 <!DOCTYPE html> 开头的完整 HTML。`;
 

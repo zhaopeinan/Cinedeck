@@ -156,7 +156,12 @@ async function main() {
     systemSettings,
   });
   initDialoguePipeline({ jobs: dialogueJobs, voicebox });
-  initExplainPipeline({ jobs: explainJobs, llm: llmService, genSettings: explainGenSettings });
+  initExplainPipeline({
+    jobs: explainJobs,
+    llm: llmService,
+    genSettings: explainGenSettings,
+    voicebox,
+  });
 
   // System status (GPU etc.) — any logged-in user
   app.use('/api/v1/system', authRequired, createSystemRouter());

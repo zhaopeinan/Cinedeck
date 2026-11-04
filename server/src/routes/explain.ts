@@ -175,11 +175,29 @@ export function createExplainRouter(
     const voiceoverRaw = String(req.body?.voiceover || 'none').toLowerCase();
     const voiceover = voiceoverRaw === 'zh' || voiceoverRaw === 'en' ? voiceoverRaw : 'none';
     const variant = req.body?.variant ? String(req.body.variant) : null;
+    const voiceId = String(req.body?.voiceId ?? req.body?.voice_id ?? '').trim() || null;
+    const modelId = String(req.body?.modelId ?? req.body?.model_id ?? '').trim() || null;
+    if (voiceover !== 'none' && !voiceId) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        error: { code: '400', message: '已选择配音语言，请再选择一个音色（可先试听）' },
+      });
+    }
+    if (voiceover !== 'none' && !modelId) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        error: { code: '400', message: '请选择配音模型' },
+      });
+    }
 
     jobs.updateJob(job.id, {
       selected_style_id: styleId,
       selected_variant: variant,
       voiceover: voiceover as any,
+      selected_voice_id: voiceover === 'none' ? null : voiceId,
+      selected_model_id: voiceover === 'none' ? null : modelId,
     });
     const updated = jobs.getJob(job.id)!;
     resumeExplainJob(updated, 'sample');
