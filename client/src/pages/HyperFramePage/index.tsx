@@ -12,6 +12,7 @@ import { hyperframeApi, voiceboxApi } from '../../api';
 import { confirmGpuIfBusy } from '../../utils/confirmGpu';
 import { ModelSelectField, VoiceSelectField } from '../../components/voicebox';
 import { isTtsModel } from '../../utils/voiceboxModels';
+import { estimateQueuePosition, formatQueueHint } from '../../utils/queueHint';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -330,7 +331,13 @@ const HyperFramePage: React.FC = () => {
                 {(detail.status === 'queued' || detail.status === 'running') && (
                   <>
                     <Progress percent={detail.progress || 0} status="active" />
-                    <Paragraph type="secondary">{detail.message}</Paragraph>
+                    <Paragraph type="secondary">
+                      {formatQueueHint(
+                        detail.status,
+                        estimateQueuePosition(jobs, detail.id),
+                        detail.message,
+                      ) || detail.message}
+                    </Paragraph>
                   </>
                 )}
                 {detail.error && (

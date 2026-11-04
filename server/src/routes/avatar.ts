@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto';
 import {
   createAvatarJob,
   getAvatarJob,
+  getAvatarQueuePosition,
   listRunningOrQueued,
   type AvatarDriveMode,
 } from '../services/avatarProgress';
@@ -56,6 +57,7 @@ function publicJob(job: NonNullable<ReturnType<typeof getAvatarJob>>) {
     message: job.message,
     progress: job.progress,
     error: job.error,
+    queuePosition: job.status === 'queued' ? getAvatarQueuePosition(job.id) : null,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     startedAt: job.startedAt,

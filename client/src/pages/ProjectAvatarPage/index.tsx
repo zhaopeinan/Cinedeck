@@ -5,7 +5,7 @@ import {
 } from 'antd';
 import { PictureOutlined, StopOutlined, PlayCircleOutlined } from '@ant-design/icons';
 import { useProjectStore } from '../../stores/projectStore';
-import { projectApi } from '../../api';
+import { jobsApi, projectApi, type JobsSummary } from '../../api';
 import { PPT_STEP, PPT_WORKFLOW_STEPS } from '../../constants/workflowSteps';
 import type { AvatarDriveMode } from '../../api';
 import { DubbingStatus } from '../../types';
@@ -40,6 +40,7 @@ const ProjectAvatarPage: React.FC = () => {
   const [selected, setSelected] = useState<number[]>([]);
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState<any>(null);
+  const [gpuSummary, setGpuSummary] = useState<JobsSummary | null>(null);
   const [previewPage, setPreviewPage] = useState<number | null>(null);
   const pollRef = useRef<number | null>(null);
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -81,6 +82,26 @@ const ProjectAvatarPage: React.FC = () => {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, generating, progress?.status]);
+
+  useEffect(() => {
+    if (!generating) {
+      setGpuSummary(null);
+      return;
+    }
+    let alive = true;
+    const tick = async () => {
+      try {
+        const res = await jobsApi.summary();
+        if (alive && res.data?.success) setGpuSummary(res.data.data || null);
+      } catch { /* ignore */ }
+    };
+    void tick();
+    const t = window.setInterval(tick, 4000);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, [generating]);
 
   useEffect(() => {
     // default select all dubbed pages that are not skipped
@@ -343,6 +364,21 @@ const ProjectAvatarPage: React.FC = () => {
           style={{ marginBottom: 16 }}
           message="也可完全跳过本步，直接进入视频预览（仅幻灯片+配音，无数字人）。"
         />
+
+        {generating && gpuSummary && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={
+              gpuSummary.gpu.duixBusy
+                ? `数字人 GPU 占用中${gpuSummary.gpu.avatarPending > 1 ? `（另有 ${gpuSummary.gpu.avatarPending - 1} 个排队）` : ''}`
+                : gpuSummary.gpu.voicebox.active
+                  ? `Voicebox 正在运行：${gpuSummary.gpu.voicebox.active}（数字人需等其结束）`
+                  : 'GPU 状态正常'
+            }
+          />
+        )}
 
         <div style={{ marginBottom: 16 }}>
           <Text strong>驱动方式（整份统一）</Text>

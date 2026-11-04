@@ -11,6 +11,7 @@ import {
 } from '@ant-design/icons';
 import { transcribeApi, voiceboxApi } from '../../api';
 import { confirmGpuIfBusy } from '../../utils/confirmGpu';
+import { estimateQueuePosition, formatQueueHint } from '../../utils/queueHint';
 
 const { Title, Text, Paragraph } = Typography;
 const { Dragger } = Upload;
@@ -293,7 +294,13 @@ const TranscribePage: React.FC = () => {
                 {(active.status === 'queued' || active.status === 'running') && (
                   <Progress percent={active.progress || 0} status="active" />
                 )}
-                {active.message && <Paragraph type="secondary">{active.message}</Paragraph>}
+                <Paragraph type="secondary">
+                  {formatQueueHint(
+                    active.status,
+                    estimateQueuePosition(jobs, active.id),
+                    active.message,
+                  ) || active.message}
+                </Paragraph>
                 {active.error && <Paragraph type="danger">{active.error}</Paragraph>}
                 {active.status === 'success' && (
                   <TextArea

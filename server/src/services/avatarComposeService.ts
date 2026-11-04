@@ -6,6 +6,7 @@ import path from 'path';
 import {
   createComposeJob,
   getComposeJob,
+  getComposeQueuePosition,
   updateComposeJob,
   type ComposeJob,
   type ComposeLayout,
@@ -248,6 +249,16 @@ export async function runComposeOverlay(opts: {
 async function processComposeJob(jobId: string): Promise<void> {
   const job = getComposeJob(jobId);
   if (!job) return;
+  if (job.status === 'cancelled' || job.cancelRequested) {
+    updateComposeJob(jobId, {
+      status: 'cancelled',
+      stage: 'cancelled',
+      message: '已取消',
+      progress: 100,
+      finishedAt: new Date().toISOString(),
+    });
+    return;
+  }
 
   try {
     updateComposeJob(jobId, {
@@ -325,6 +336,7 @@ export function publicComposeJob(job: ComposeJob) {
     message: job.message,
     progress: job.progress,
     error: job.error,
+    queuePosition: job.status === 'queued' ? getComposeQueuePosition(job.id) : null,
     layout: job.layout,
     chromaSimilarity: job.chromaSimilarity,
     chromaBlend: job.chromaBlend,

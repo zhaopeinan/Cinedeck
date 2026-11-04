@@ -675,3 +675,57 @@ export const hyperframeApi = {
   downloadUrl: (id: string) => withToken(`/api/v1/hyperframe/jobs/${id}/download`),
   compositionUrl: (id: string) => withToken(`/api/v1/hyperframe/jobs/${id}/composition`),
 };
+
+export type UnifiedJobKind =
+  | 'tts_dubbing'
+  | 'transcribe'
+  | 'dialogue'
+  | 'avatar'
+  | 'compose'
+  | 'project_avatar'
+  | 'video_compose'
+  | 'mooc'
+  | 'hyperframe';
+
+export type UnifiedJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export interface UnifiedJob {
+  id: string;
+  kind: UnifiedJobKind;
+  title: string;
+  status: UnifiedJobStatus;
+  progress: number;
+  message: string | null;
+  queuePosition: number | null;
+  createdAt: string;
+  updatedAt: string;
+  href?: string;
+  cancellable: boolean;
+}
+
+export interface JobsSummary {
+  activeCount: number;
+  queuedCount: number;
+  byKind: Partial<Record<UnifiedJobKind, number>>;
+  gpu: {
+    voicebox: {
+      active: string | null;
+      waitingCount: number;
+      waiting: Array<{ label: string; waitedMs: number }>;
+    };
+    duixBusy: boolean;
+    avatarPending: number;
+    composePending: number;
+  };
+}
+
+/** 全局任务中心 */
+export const jobsApi = {
+  list: (params?: { status?: string; limit?: number }) =>
+    apiClient.get<ApiResponse<{ jobs: UnifiedJob[] }>>('/jobs', { params }),
+  summary: () => apiClient.get<ApiResponse<JobsSummary>>('/jobs/summary'),
+  cancel: (id: string, kind?: UnifiedJobKind) =>
+    apiClient.post<ApiResponse<any>>(`/jobs/${encodeURIComponent(id)}/cancel`, kind ? { kind } : {}, {
+      params: kind ? { kind } : undefined,
+    }),
+};

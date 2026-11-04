@@ -43,6 +43,8 @@ import { OpenApiKeyService } from './services/openApiKeyService';
 import { createOpenPlatformAdminRouter } from './routes/openPlatformAdmin';
 import { createOpenTtsRouter } from './routes/open/tts';
 import { createOpenAvatarRouter } from './routes/open/avatar';
+import { JobRegistry } from './services/jobRegistry';
+import { createJobsRouter } from './routes/jobs';
 
 const PORT = process.env.PORT || 3001;
 
@@ -150,6 +152,10 @@ async function main() {
 
   // System status (GPU etc.) — any logged-in user
   app.use('/api/v1/system', authRequired, createSystemRouter());
+
+  // Unified job list / task center
+  const jobRegistry = new JobRegistry({ db, projectService, videoComposer });
+  app.use('/api/v1/jobs', authRequired, createJobsRouter(jobRegistry, { dialogueJobs, moocJobs }));
 
   // System settings — admin only
   app.use('/api/v1/system-settings', authRequired, adminRequired, createSystemSettingsRouter(systemSettings));

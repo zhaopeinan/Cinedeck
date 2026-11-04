@@ -8,7 +8,7 @@ import { DUBBING_STATUS_LABELS } from '../../constants';
 import { PPT_STEP, PPT_WORKFLOW_STEPS } from '../../constants/workflowSteps';
 import { analytics, AnalyticsEvents } from '../../utils/analytics';
 import { useAutoSave } from '../../hooks/useAutoSave';
-import { projectApi, withToken } from '../../api';
+import { jobsApi, projectApi, withToken, type JobsSummary } from '../../api';
 
 const { Title, Text } = Typography;
 
@@ -38,6 +38,7 @@ const DubbingPage: React.FC = () => {
     loadProject, loadSlides,
   } = useProjectStore();
   const [isGenerating, setIsGenerating] = useState(false);
+  const [gpuSummary, setGpuSummary] = useState<JobsSummary | null>(null);
   const [downloadingAll, setDownloadingAll] = useState(false);
   const [errorLogModal, setErrorLogModal] = useState<{ open: boolean; pageIndex: number | null; content: string }>({ open: false, pageIndex: null, content: '' });
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -112,6 +113,26 @@ const DubbingPage: React.FC = () => {
       logEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   }, [progressInfo?.logs?.length, progressInfo?.message]);
+
+  useEffect(() => {
+    if (!isGenerating) {
+      setGpuSummary(null);
+      return;
+    }
+    let alive = true;
+    const tick = async () => {
+      try {
+        const res = await jobsApi.summary();
+        if (alive && res.data?.success) setGpuSummary(res.data.data || null);
+      } catch { /* ignore */ }
+    };
+    void tick();
+    const t = window.setInterval(tick, 4000);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, [isGenerating]);
 
   const handleGenerateAll = async () => {
     if (!id) return;
@@ -470,6 +491,19 @@ const DubbingPage: React.FC = () => {
             </Button>
           </Space>
         </div>
+
+        {isGenerating && gpuSummary && (gpuSummary.gpu.duixBusy || gpuSummary.gpu.voicebox.waitingCount > 0) && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={
+              gpuSummary.gpu.duixBusy
+                ? '数字人正在占用 GPU，配音可能需排队等待'
+                : `Voicebox GPU 排队中（前方约 ${gpuSummary.gpu.voicebox.waitingCount} 个任务）`
+            }
+          />
+        )}
 
         {/* Progress bar + live status during generation */}
         {showProgressPanel && (

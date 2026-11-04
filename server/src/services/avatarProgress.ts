@@ -110,3 +110,27 @@ export function isAvatarJobCancelRequested(id: string): boolean {
 export function listRunningOrQueued(): AvatarJob[] {
   return Array.from(jobs.values()).filter((j) => j.status === 'queued' || j.status === 'running');
 }
+
+export function listAvatarJobsForUser(userId: string, limit = 50): AvatarJob[] {
+  return Array.from(jobs.values())
+    .filter((j) => j.userId === userId && !j.userId.startsWith('open:'))
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+    .slice(0, limit);
+}
+
+/** 1-based position among queued jobs (FIFO by createdAt); null if not queued. */
+export function getAvatarQueuePosition(jobId: string): number | null {
+  const job = jobs.get(jobId);
+  if (!job || job.status !== 'queued') return null;
+  const queued = Array.from(jobs.values())
+    .filter((j) => j.status === 'queued')
+    .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+  const idx = queued.findIndex((j) => j.id === jobId);
+  return idx >= 0 ? idx + 1 : null;
+}
+
+export function listAllAvatarJobs(limit = 100): AvatarJob[] {
+  return Array.from(jobs.values())
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+    .slice(0, limit);
+}

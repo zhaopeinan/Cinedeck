@@ -11,6 +11,7 @@ import {
 import { voiceboxApi } from '../../api';
 import { VoiceCloneModal, VoiceListPanel, ModelListPanel, fetchVoiceSampleObjectUrl } from '../../components/voicebox';
 import { isTtsModel } from '../../utils/voiceboxModels';
+import { estimateQueuePosition, formatQueueHint } from '../../utils/queueHint';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -834,7 +835,11 @@ const VoiceFactoryPage: React.FC = () => {
                           <Space direction="vertical" size={4} style={{ width: '100%' }}>
                             {busy && <Progress percent={Number(job.progress || 0)} size="small" status="active" />}
                             <Text type="secondary">
-                              {job.message || ''}
+                              {formatQueueHint(
+                                job.status,
+                                estimateQueuePosition(dialogueJobs, job.id),
+                                job.message,
+                              ) || job.message || ''}
                               {job.error ? ` · ${job.error}` : ''}
                             </Text>
                             <Text type="secondary" style={{ fontSize: 12 }}>

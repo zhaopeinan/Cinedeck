@@ -16,6 +16,7 @@ import { DEFAULT_AVATAR_LAYOUT } from '../../constants/avatarDefaults';
 import { countPptxSlides } from '../../utils/pptxSlideCount';
 import { isTtsModel } from '../../utils/voiceboxModels';
 import type { AvatarLayout } from '../../types';
+import { estimateQueuePosition, formatQueueHint } from '../../utils/queueHint';
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -478,7 +479,12 @@ const MoocPage: React.FC = () => {
       dataIndex: 'message',
       ellipsis: true,
       render: (msg: string, r: any) => {
-        const text = r.error || msg || '-';
+        const hint = formatQueueHint(
+          r.status,
+          estimateQueuePosition(jobs, r.id),
+          msg,
+        );
+        const text = r.error || hint || msg || '-';
         const short = truncateText(text.replace(/\n/g, ' '), 56);
         const isFail = r.status === 'failed';
         return (

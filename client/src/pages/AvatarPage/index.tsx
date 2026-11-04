@@ -21,11 +21,12 @@ import {
   useAvatarRefs,
 } from '../../components/avatar';
 import { formatFileSize } from '../../utils/formatFileSize';
+import { formatQueueHint } from '../../utils/queueHint';
 
 const { Title, Text, Paragraph } = Typography;
 const { Dragger } = Upload;
 
-type JobStatus = 'queued' | 'running' | 'completed' | 'failed';
+type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 interface JobState {
   id: string;
@@ -36,6 +37,7 @@ interface JobState {
   message: string;
   progress: number;
   error?: string | null;
+  queuePosition?: number | null;
 }
 
 interface ComposeState {
@@ -47,6 +49,7 @@ interface ComposeState {
   progress: number;
   error?: string | null;
   hasVideo?: boolean;
+  queuePosition?: number | null;
 }
 
 type GreenscreenSource =
@@ -254,7 +257,13 @@ const AvatarPage: React.FC = () => {
       return;
     }
     setComposeSubmitting(true);
-    setComposeJob(null);
+    // 提交成功前不清空 composeJob，避免仍停在预览步时出现「请从摆位页…」空提示
+    if (mode === 'export' && step === 2) {
+      setComposeJob((prev) => (prev ? {
+        ...prev,
+        message: '正在提交导出…',
+      } : prev));
+    }
     try {
       const res = await avatarApi.createCompose({
         mode,
@@ -266,10 +275,10 @@ const AvatarPage: React.FC = () => {
         chromaSimilarity,
       });
       const data = res.data.data as ComposeState;
-      setComposeJob(data);
-      startComposePolling(data.id);
       if (mode === 'preview') setStep(2);
       if (mode === 'export') setStep(3);
+      setComposeJob(data);
+      startComposePolling(data.id);
     } catch (e: any) {
       setComposeSubmitting(false);
       message.error(e?.response?.data?.error?.message || e?.message || '提交合成失败');
@@ -518,7 +527,9 @@ const AvatarPage: React.FC = () => {
                           </div>
                           {job && (
                             <Card size="small" style={{ marginTop: 12 }} title={`Duix · ${driveLabel}`}>
-                              <Paragraph style={{ marginBottom: 8 }}>{job.message || job.stage}</Paragraph>
+                              <Paragraph style={{ marginBottom: 8 }}>
+                                {formatQueueHint(job.status, job.queuePosition, job.message || job.stage)}
+                              </Paragraph>
                               <Progress
                                 percent={Math.min(100, Math.round(job.progress || 0))}
                                 status={job.status === 'failed' ? 'exception' : job.status === 'completed' ? 'success' : 'active'}
@@ -702,7 +713,9 @@ const AvatarPage: React.FC = () => {
         >
           {composeJob && (
             <>
-              <Paragraph>{composeJob.message || composeJob.stage}</Paragraph>
+              <Paragraph>
+                {formatQueueHint(composeJob.status, composeJob.queuePosition, composeJob.message || composeJob.stage)}
+              </Paragraph>
               <Progress
                 percent={Math.min(100, Math.round(composeJob.progress || 0))}
                 status={
@@ -724,8 +737,11 @@ const AvatarPage: React.FC = () => {
               style={{ width: '100%', marginTop: 16, maxHeight: 480, background: '#000' }}
             />
           )}
-          {!composeJob && (
+          {!composeJob && !composeSubmitting && (
             <Alert type="info" showIcon message="请从摆位页点击「确认并生成预览」" />
+          )}
+          {!composeJob && composeSubmitting && (
+            <Alert type="info" showIcon message="正在提交导出…" />
           )}
         </Card>
       )}
@@ -744,7 +760,9 @@ const AvatarPage: React.FC = () => {
           )}
           {composeJob?.mode === 'export' && (
             <>
-              <Paragraph>{composeJob.message || composeJob.stage}</Paragraph>
+              <Paragraph>
+                {formatQueueHint(composeJob.status, composeJob.queuePosition, composeJob.message || composeJob.stage)}
+              </Paragraph>
               <Progress
                 percent={Math.min(100, Math.round(composeJob.progress || 0))}
                 status={
