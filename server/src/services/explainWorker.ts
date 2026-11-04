@@ -142,7 +142,7 @@ ${catalog}
 要求恰好 3 条，recommended 仅一条为 true，且 id 必须来自目录。`,
         },
       ],
-      { ...llmOpts, temperature: 0.6, maxTokens: 1200 },
+      { ...llmOpts, temperature: 0.6, maxTokens: 4000, reasoningEffort: 'low' },
     );
     throwIfCancel();
     const rec = extractJsonBlock(recRaw);
@@ -240,7 +240,7 @@ ${(job.topic_text || '').slice(0, 8000)}
 nodes 4–6 个，总时长约 18–40 秒。`,
           },
         ],
-        { ...llmChatOpts(llm, job.user_id), temperature: 0.55, maxTokens: 2000 },
+        { ...llmChatOpts(llm, job.user_id), temperature: 0.55, maxTokens: 6000, reasoningEffort: 'low' },
       );
       script = extractJsonBlock(scriptRaw);
       jobs.updateJob(jobId, { script_json: JSON.stringify(script) });
@@ -393,7 +393,9 @@ ${JSON.stringify(script).slice(0, 6000)}
 
 请直接输出以 <!DOCTYPE html> 开头的完整 HTML。`;
 
-  const maxTokens = mode === 'sample' ? 8000 : 12000;
+  // Reasoning models need headroom for thinking + final HTML.
+  // sample≈20s page; final longer. Keep below common 32k completion caps.
+  const maxTokens = mode === 'sample' ? 24000 : 32000;
   let lastErr: Error | null = null;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
@@ -411,9 +413,8 @@ ${JSON.stringify(script).slice(0, 6000)}
           ...llmOpts,
           temperature: attempt === 1 ? 0.4 : 0.25,
           maxTokens,
-          // DeepSeek-V4 等推理模型会把 max_tokens 花光在 thinking 上，content 变 null
-          reasoningEffort: 'none',
-          extraBody: { chat_template_kwargs: { enable_thinking: false } },
+          // Prefer light reasoning for planning; budget is large enough for content after thinking
+          reasoningEffort: attempt === 1 ? 'low' : 'none',
         },
       );
       const html = extractHtml(raw);
