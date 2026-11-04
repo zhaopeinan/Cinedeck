@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Alert, Button, Card, Col, Input, List, Progress, Radio, Row, Select, Space, Tag, Typography, Upload, message, Popconfirm,
+  Alert, Button, Card, Col, Input, List, Progress, Radio, Row, Select, Space, Switch, Tag, Typography, Upload, message, Popconfirm,
 } from 'antd';
 import {
   ArrowLeftOutlined, CheckOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined,
@@ -50,6 +50,8 @@ const ExplainAnimationPage: React.FC = () => {
   const [voiceover, setVoiceover] = useState<'none' | 'zh' | 'en'>('zh');
   const [voiceId, setVoiceId] = useState<string | undefined>();
   const [modelId, setModelId] = useState<string | undefined>();
+  // 有配音时默认关字幕，避免遮挡；无配音时默认开
+  const [subtitles, setSubtitles] = useState(false);
   const [pickingStyleId, setPickingStyleId] = useState<number | null>(null);
   const [redoingSample, setRedoingSample] = useState(false);
   const [approvingSample, setApprovingSample] = useState(false);
@@ -173,6 +175,11 @@ const ExplainAnimationPage: React.FC = () => {
     }
     if (detail.selectedVoiceId) setVoiceId(detail.selectedVoiceId);
     if (detail.selectedModelId) setModelId(detail.selectedModelId);
+    if (typeof detail.subtitles === 'boolean') {
+      setSubtitles(detail.subtitles);
+    } else {
+      setSubtitles(v === 'none');
+    }
   }, [detail?.id]);
 
   useEffect(() => {
@@ -253,7 +260,7 @@ const ExplainAnimationPage: React.FC = () => {
     try {
       const res = await explainApi.rejectSample(detail.id, voicePayload());
       if (!res.data?.success) throw new Error(res.data?.error?.message || '重做失败');
-      message.success(voiceover === 'none' ? '正在重做样片…' : '已应用音色，正在重做带配音样片…');
+      message.success('已应用旁白/字幕设置，正在重做样片…');
       setDetail(res.data.data);
       await loadJobs();
     } catch (e: any) {
@@ -266,8 +273,8 @@ const ExplainAnimationPage: React.FC = () => {
   const handleApproveSample = async () => {
     if (!detail?.id) return;
     if (!ensureVoiceReady()) return;
-    if (jobNeedsVoiceRedo) {
-      message.warning('音色尚未应用到样片，请先点「应用音色并重做样片」');
+    if (jobNeedsSettingsRedo) {
+      message.warning('旁白或字幕设置尚未应用到样片，请先点「应用设置并重做样片」');
       return;
     }
     setApprovingSample(true);
@@ -299,6 +306,7 @@ const ExplainAnimationPage: React.FC = () => {
     voiceover,
     voiceId: voiceover === 'none' ? null : (voiceId || null),
     modelId: voiceover === 'none' ? null : (modelId || null),
+    subtitles,
   });
 
   const ensureVoiceReady = (): boolean => {
@@ -318,7 +326,7 @@ const ExplainAnimationPage: React.FC = () => {
     return true;
   };
 
-  const jobNeedsVoiceRedo = !!(
+  const jobNeedsSettingsRedo = !!(
     detail
     && detail.status === 'await_sample'
     && (
@@ -328,6 +336,9 @@ const ExplainAnimationPage: React.FC = () => {
         || modelId !== detail.selectedModelId
         || voiceover !== detail.voiceover
       ))
+      || (typeof detail.subtitles === 'boolean'
+        ? subtitles !== detail.subtitles
+        : subtitles !== (detail.voiceover === 'none'))
     )
   );
 
@@ -335,7 +346,12 @@ const ExplainAnimationPage: React.FC = () => {
     <>
       <Radio.Group
         value={voiceover}
-        onChange={(e) => setVoiceover(e.target.value)}
+        onChange={(e) => {
+          const next = e.target.value as 'none' | 'zh' | 'en';
+          setVoiceover(next);
+          // 切配音时给一个合理默认：有旁白默认关字幕，无旁白默认开
+          setSubtitles(next === 'none');
+        }}
         style={{ marginBottom: 12 }}
         optionType="button"
         options={[
@@ -344,6 +360,18 @@ const ExplainAnimationPage: React.FC = () => {
           { label: '不加配音', value: 'none' },
         ]}
       />
+      <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <Text>画面字幕</Text>
+        <Switch
+          checked={subtitles}
+          onChange={setSubtitles}
+          checkedChildren="开"
+          unCheckedChildren="关"
+        />
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {subtitles ? '底部显示旁白字幕' : '关闭字幕，避免遮挡画面/图表'}
+        </Text>
+      </div>
       {voiceover !== 'none' && (
         <Card size="small" style={{ marginBottom: 12 }} title="旁白音色">
           {voiceboxAvailable === false && (
@@ -640,28 +668,28 @@ const ExplainAnimationPage: React.FC = () => {
                     </div>
                     {detail.status === 'await_sample' && (
                       <div style={{ marginTop: 12 }}>
-                        {(detail.voiceover === 'none' || jobNeedsVoiceRedo) && (
+                        {(detail.voiceover === 'none' || jobNeedsSettingsRedo) && (
                           <Alert
                             type="warning"
                             showIcon
                             style={{ marginBottom: 12 }}
                             message={
                               detail.voiceover === 'none'
-                                ? '当前样片未加配音。请选择音色后点「应用音色并重做样片」，再确认生成全片。'
-                                : '音色/模型已变更，需重做样片后才会带上新旁白。'
+                                ? '当前样片未加配音。请选择音色/字幕后点「应用设置并重做样片」，再确认生成全片。'
+                                : '旁白或字幕设置已变更，需重做样片后才会生效。'
                             }
                           />
                         )}
-                        <Paragraph style={{ marginBottom: 8 }}>旁白设置（可试听后应用到样片）：</Paragraph>
+                        <Paragraph style={{ marginBottom: 8 }}>旁白与字幕（可试听后应用到样片）：</Paragraph>
                         {renderVoicePanel()}
                         <Space wrap>
-                          {jobNeedsVoiceRedo ? (
+                          {jobNeedsSettingsRedo ? (
                             <Button
                               type="primary"
                               loading={redoingSample}
                               onClick={() => void handleRedoSample()}
                             >
-                              应用音色并重做样片
+                              应用设置并重做样片
                             </Button>
                           ) : (
                             <Popconfirm

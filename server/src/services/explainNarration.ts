@@ -59,6 +59,31 @@ async function downloadAudio(url: string, dest: string): Promise<void> {
   fs.writeFileSync(dest, Buffer.from(res.data));
 }
 
+/**
+ * Soft-enforce subtitle preference after LLM generation.
+ * When disabled, hide common caption/subtitle layers so they don't cover the scene.
+ */
+export function applySubtitlePreference(html: string, enabled: boolean): string {
+  if (enabled) return html;
+  const css = `
+<style id="explain-hide-subtitles">
+[class*="subtitle" i], [id*="subtitle" i],
+[class*="caption" i], [id*="caption" i],
+[class*="字幕"], [id*="字幕"],
+.subtitles, #subtitles, .subtitle, #subtitle,
+.caption, #caption, .caption-bar, .subtitle-bar,
+[data-subtitle], [data-captions], [data-caption] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+</style>`;
+  if (/<\/head>/i.test(html)) return html.replace(/<\/head>/i, `${css}</head>`);
+  if (/<body[^>]*>/i.test(html)) return html.replace(/<body([^>]*)>/i, `<body$1>${css}`);
+  return `${css}\n${html}`;
+}
+
 /** Inject a looping/controllable <audio> into the HTML so iframe sample stays self-contained. */
 export function injectNarrationAudio(html: string, audioPath: string): string {
   if (!fs.existsSync(audioPath)) return html;

@@ -177,6 +177,29 @@ export class ExplainJobService {
     return { ...job, sample_path: null };
   }
 
+  parseConfig(job: ExplainJobRow): Record<string, any> {
+    try {
+      const cfg = JSON.parse(job.config_json || '{}');
+      return cfg && typeof cfg === 'object' ? cfg : {};
+    } catch {
+      return {};
+    }
+  }
+
+  /** On-screen captions; default on only when there is no voiceover. */
+  getSubtitles(job: ExplainJobRow): boolean {
+    const cfg = this.parseConfig(job);
+    if (typeof cfg.subtitles === 'boolean') return cfg.subtitles;
+    return job.voiceover === 'none';
+  }
+
+  mergeConfig(id: string, patch: Record<string, any>): ExplainJobRow | null {
+    const job = this.getJob(id);
+    if (!job) return null;
+    const next = { ...this.parseConfig(job), ...patch };
+    return this.updateJob(id, { config_json: JSON.stringify(next) });
+  }
+
   updateJob(id: string, patch: Partial<ExplainJobRow>) {
     const allowed = [
       'name', 'topic_text', 'status', 'stage', 'progress', 'message', 'error',
@@ -300,18 +323,12 @@ export class ExplainJobService {
       voiceover: job.voiceover,
       selectedVoiceId: job.selected_voice_id,
       selectedModelId: job.selected_model_id,
+      subtitles: this.getSubtitles(job),
       script,
       hasSample: !!(job.sample_path && fs.existsSync(job.sample_path)),
       hasFinal: !!(job.final_path && fs.existsSync(job.final_path)),
       hasVideo: !!(job.video_path && fs.existsSync(job.video_path)),
-      exportInfo: (() => {
-        try {
-          const cfg = JSON.parse(job.config_json || '{}');
-          return cfg?.export || null;
-        } catch {
-          return null;
-        }
-      })(),
+      exportInfo: this.parseConfig(job)?.export || null,
       createdAt: job.created_at,
       updatedAt: job.updated_at,
       startedAt: job.started_at,

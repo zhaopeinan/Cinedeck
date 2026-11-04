@@ -14,6 +14,7 @@ import {
 } from './explainGenSettings';
 import { VoiceboxAdapter } from './voiceboxAdapter';
 import {
+  applySubtitlePreference,
   buildNarrationText,
   injectNarrationAudio,
   synthesizeExplainNarration,
@@ -248,10 +249,13 @@ ${(job.topic_text || '').slice(0, 8000)}
 动效：${style.motionNotes}
 讲解手法：${style.explainerNotes}
 配音：${job.voiceover === 'none'
-              ? '不加旁白（纯动画示意，用字幕即可）'
+              ? '不加旁白（纯动画示意）'
               : job.voiceover === 'zh'
                 ? '中文旁白（稍后用选定音色合成真人旁白，分镜 narration 必须适合口播）'
                 : '英文旁白（稍后用选定音色合成真人旁白，分镜 narration 用英文口播句）'}
+画面字幕：${deps.jobs.getSubtitles(job)
+              ? '需要底部字幕条，与口播/解说同步'
+              : '不要画面字幕（避免遮挡主体画面与图表）'}
 
 输出 JSON：
 {
@@ -283,6 +287,7 @@ nodes 4–6 个，总时长约 18–40 秒。`,
       message: '生成约 20 秒 HTML 样片…',
     });
 
+    const sampleSubtitles = jobs.getSubtitles(job);
     let sampleHtml = await generateHtmlAnimation({
       llm,
       llmOpts: llmChatOpts(llm, job.user_id),
@@ -291,9 +296,11 @@ nodes 4–6 个，总时长约 18–40 秒。`,
       script,
       mode: 'sample',
       voiceover: job.voiceover,
+      subtitles: sampleSubtitles,
       durationHint: '约 18–22 秒可循环播放',
       gen: genSettingsFor(job.user_id),
     });
+    sampleHtml = applySubtitlePreference(sampleHtml, sampleSubtitles);
 
     const workDir = job.work_dir || path.join(path.resolve(process.cwd(), '..', 'data', 'explain-jobs'), job.id);
     fs.mkdirSync(workDir, { recursive: true });
@@ -360,6 +367,7 @@ export async function continueExplainAfterSampleApprove(jobId: string) {
       message: '正在扩展完整 HTML 动画…',
     });
 
+    const finalSubtitles = jobs.getSubtitles(job);
     let finalHtml = await generateHtmlAnimation({
       llm,
       llmOpts: llmChatOpts(llm, job.user_id),
@@ -368,9 +376,11 @@ export async function continueExplainAfterSampleApprove(jobId: string) {
       script,
       mode: 'final',
       voiceover: job.voiceover,
+      subtitles: finalSubtitles,
       durationHint: '按内容完整展开，通常 40–90 秒，可循环',
       gen: genSettingsFor(job.user_id),
     });
+    finalHtml = applySubtitlePreference(finalHtml, finalSubtitles);
 
     const workDir = job.work_dir!;
     const finalDir = path.join(workDir, 'final');
@@ -438,10 +448,11 @@ async function generateHtmlAnimation(opts: {
   script: any;
   mode: 'sample' | 'final';
   voiceover: string;
+  subtitles: boolean;
   durationHint: string;
   gen: ExplainGenSettings;
 }): Promise<string> {
-  const { llm, llmOpts, topic, style, script, mode, voiceover, durationHint, gen } = opts;
+  const { llm, llmOpts, topic, style, script, mode, voiceover, subtitles, durationHint, gen } = opts;
   const system = `你是资深 motion graphics 工程师，只输出完整可运行的单文件 HTML（内含全部 CSS+JS），不要 Markdown，不要解释。
 硬性要求：
 - 必须写出完整 <style>…</style> 与 <script>…</script> 实装代码；严禁用 "..." / "…" / 注释占位省略
@@ -450,7 +461,10 @@ async function generateHtmlAnimation(opts: {
 - 自带简易播放器（播放/暂停/进度条）
 - 不依赖外网 CDN、不引用外部字体 URL
 - ${durationHint}
-- ${mode === 'sample' ? '样片控制在可完整输出的体量：优先 120–220 行，但代码必须可运行' : '全片可更长，仍须一次输出完整可运行文件'}`;
+- ${mode === 'sample' ? '样片控制在可完整输出的体量：优先 120–220 行，但代码必须可运行' : '全片可更长，仍须一次输出完整可运行文件'}
+- ${subtitles
+    ? '需要底部字幕条（class 或 id 含 subtitle/caption），与分镜 narration 同步，勿遮挡关键图表'
+    : '严禁底部字幕条/口播字幕/caption 叠加层；标题与图内标签可以保留，但不要大段旁白字幕遮画面'}`;
 
   const user = `模式：${mode === 'sample' ? '约20秒样片' : '完整成片'}
 选题：
@@ -465,8 +479,9 @@ ${style.description}
 ${JSON.stringify(script).slice(0, 6000)}
 
 配音偏好：${voiceover === 'none'
-    ? '无旁白，用字幕示意即可'
+    ? '无旁白'
     : '真人旁白将在之后用选定音色单独合成并注入；页面需有播放/暂停控件，旁白会挂到页面播放器上'}
+画面字幕：${subtitles ? '加入底部字幕' : '不要画面字幕（避免遮挡）'}
 
 请直接输出以 <!DOCTYPE html> 开头的完整 HTML。`;
 

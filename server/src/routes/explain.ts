@@ -45,6 +45,15 @@ function parseVoiceBody(body: any): {
   };
 }
 
+function parseSubtitlesBody(body: any): boolean | undefined {
+  if (body?.subtitles === undefined && body?.showSubtitles === undefined) return undefined;
+  const raw = body?.subtitles ?? body?.showSubtitles;
+  if (typeof raw === 'boolean') return raw;
+  if (raw === 1 || raw === '1' || String(raw).toLowerCase() === 'true') return true;
+  if (raw === 0 || raw === '0' || String(raw).toLowerCase() === 'false') return false;
+  return undefined;
+}
+
 export function createExplainRouter(
   jobs: ExplainJobService,
   llm: LlmService,
@@ -220,6 +229,10 @@ export function createExplainRouter(
       selected_voice_id: voice.voiceId,
       selected_model_id: voice.modelId,
     });
+    const subtitles = parseSubtitlesBody(req.body);
+    jobs.mergeConfig(job.id, {
+      subtitles: subtitles ?? (voice.voiceover === 'none'),
+    });
     const updated = jobs.getJob(job.id)!;
     resumeExplainJob(updated, 'sample');
     res.json({ success: true, data: jobs.publicRow(jobs.getJob(job.id)!), error: null });
@@ -236,6 +249,7 @@ export function createExplainRouter(
         error: { code: '400', message: '当前不在样片确认阶段' },
       });
     }
+    const wantSubtitles = parseSubtitlesBody(req.body);
     // Optional: lock in voice for final if client sends it (must match sample unless none→none)
     if (req.body?.voiceover !== undefined) {
       const voice = parseVoiceBody(req.body);
@@ -250,13 +264,14 @@ export function createExplainRouter(
         voice.voiceover !== job.voiceover
         || voice.voiceId !== (job.selected_voice_id || null)
         || voice.modelId !== (job.selected_model_id || null);
-      if (voiceChanged && voice.voiceover !== 'none') {
+      const subtitlesChanged = wantSubtitles !== undefined && wantSubtitles !== jobs.getSubtitles(job);
+      if ((voiceChanged && voice.voiceover !== 'none') || subtitlesChanged) {
         return res.status(400).json({
           success: false,
           data: null,
           error: {
             code: '400',
-            message: '音色已变更，请先点「应用音色并重做样片」，确认带配音样片后再生成全片',
+            message: '旁白或字幕设置已变更，请先点「应用设置并重做样片」，确认后再生成全片',
           },
         });
       }
@@ -265,6 +280,9 @@ export function createExplainRouter(
         selected_voice_id: voice.voiceId,
         selected_model_id: voice.modelId,
       });
+    }
+    if (wantSubtitles !== undefined) {
+      jobs.mergeConfig(job.id, { subtitles: wantSubtitles });
     }
     const fresh = jobs.getJob(job.id)!;
     resumeExplainJob(fresh, 'final');
@@ -282,7 +300,7 @@ export function createExplainRouter(
         error: { code: '400', message: '当前不在样片确认阶段' },
       });
     }
-    // Allow updating voice before regenerating sample
+    // Allow updating voice / subtitles before regenerating sample
     if (req.body?.voiceover !== undefined) {
       const voice = parseVoiceBody(req.body);
       if (!voice.ok) {
@@ -297,6 +315,10 @@ export function createExplainRouter(
         selected_voice_id: voice.voiceId,
         selected_model_id: voice.modelId,
       });
+    }
+    const wantSubtitles = parseSubtitlesBody(req.body);
+    if (wantSubtitles !== undefined) {
+      jobs.mergeConfig(job.id, { subtitles: wantSubtitles });
     }
     const fresh = jobs.getJob(job.id)!;
     resumeExplainJob(fresh, 'sample');
