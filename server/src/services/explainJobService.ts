@@ -54,6 +54,7 @@ export interface ExplainJobRow {
   work_dir: string | null;
   sample_path: string | null;
   final_path: string | null;
+  video_path: string | null;
   config_json: string;
   cancel_requested: number;
   created_at: string;
@@ -113,6 +114,7 @@ export class ExplainJobService {
       work_dir: workDir,
       sample_path: null,
       final_path: null,
+      video_path: null,
       config_json: '{}',
       cancel_requested: 0,
       created_at: now,
@@ -124,16 +126,16 @@ export class ExplainJobService {
       INSERT INTO explain_jobs (
         id, user_id, name, source_type, source_file_name, source_file_path, topic_text,
         status, stage, progress, message, error, recommendations_json,
-        selected_style_id, selected_variant, voiceover, selected_voice_id, selected_model_id,
+        selected_style_id, selected_variant, voiceover,         selected_voice_id, selected_model_id,
         script_json, work_dir,
-        sample_path, final_path, config_json, cancel_requested,
+        sample_path, final_path, video_path, config_json, cancel_requested,
         created_at, updated_at, started_at, finished_at
       ) VALUES (
         @id, @user_id, @name, @source_type, @source_file_name, @source_file_path, @topic_text,
         @status, @stage, @progress, @message, @error, @recommendations_json,
         @selected_style_id, @selected_variant, @voiceover, @selected_voice_id, @selected_model_id,
         @script_json, @work_dir,
-        @sample_path, @final_path, @config_json, @cancel_requested,
+        @sample_path, @final_path, @video_path, @config_json, @cancel_requested,
         @created_at, @updated_at, @started_at, @finished_at
       )
     `).run(row);
@@ -141,7 +143,8 @@ export class ExplainJobService {
   }
 
   getJob(id: string): ExplainJobRow | null {
-    return (this.db.prepare('SELECT * FROM explain_jobs WHERE id = ?').get(id) as ExplainJobRow | undefined) || null;
+    const row = (this.db.prepare('SELECT * FROM explain_jobs WHERE id = ?').get(id) as ExplainJobRow | undefined) || null;
+    return row ? this.cleanupSampleIfCompleted(row) : null;
   }
 
   getOwned(id: string, userId: string): ExplainJobRow | null {
@@ -151,9 +154,27 @@ export class ExplainJobService {
   }
 
   listJobs(userId: string, limit = 50): ExplainJobRow[] {
-    return this.db.prepare(
+    const rows = this.db.prepare(
       'SELECT * FROM explain_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
     ).all(userId, limit) as ExplainJobRow[];
+    return rows.map((r) => this.cleanupSampleIfCompleted(r));
+  }
+
+  /** After full animation is done, sample is redundant — delete on read. */
+  private cleanupSampleIfCompleted(job: ExplainJobRow): ExplainJobRow {
+    if (job.status !== 'completed' || !job.sample_path) return job;
+    try {
+      const sampleDir = path.dirname(job.sample_path);
+      if (sampleDir.endsWith(`${path.sep}sample`) || sampleDir.endsWith('/sample')) {
+        fs.rmSync(sampleDir, { recursive: true, force: true });
+      } else if (fs.existsSync(job.sample_path)) {
+        fs.unlinkSync(job.sample_path);
+      }
+    } catch { /* ignore */ }
+    this.db.prepare(
+      `UPDATE explain_jobs SET sample_path = NULL, updated_at = ? WHERE id = ? AND status = 'completed'`,
+    ).run(new Date().toISOString(), job.id);
+    return { ...job, sample_path: null };
   }
 
   updateJob(id: string, patch: Partial<ExplainJobRow>) {
@@ -161,7 +182,7 @@ export class ExplainJobService {
       'name', 'topic_text', 'status', 'stage', 'progress', 'message', 'error',
       'recommendations_json', 'selected_style_id', 'selected_variant', 'voiceover',
       'selected_voice_id', 'selected_model_id',
-      'script_json', 'work_dir', 'sample_path', 'final_path', 'config_json',
+      'script_json', 'work_dir', 'sample_path', 'final_path', 'video_path', 'config_json',
       'cancel_requested', 'started_at', 'finished_at',
     ] as const;
     const sets: string[] = [];
@@ -282,6 +303,15 @@ export class ExplainJobService {
       script,
       hasSample: !!(job.sample_path && fs.existsSync(job.sample_path)),
       hasFinal: !!(job.final_path && fs.existsSync(job.final_path)),
+      hasVideo: !!(job.video_path && fs.existsSync(job.video_path)),
+      exportInfo: (() => {
+        try {
+          const cfg = JSON.parse(job.config_json || '{}');
+          return cfg?.export || null;
+        } catch {
+          return null;
+        }
+      })(),
       createdAt: job.created_at,
       updatedAt: job.updated_at,
       startedAt: job.started_at,

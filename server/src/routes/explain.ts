@@ -8,6 +8,13 @@ import { pumpExplainQueue, resumeExplainJob } from '../services/explainWorker';
 import { getExplainPosterPath, getExplainStyle, listExplainStyles } from '../services/explainStyleCatalog';
 import { LlmService } from '../services/llmService';
 import { ExplainGenSettingsService } from '../services/explainGenSettings';
+import {
+  EXPLAIN_EXPORT_QUALITIES,
+  estimateExplainDurationSec,
+  exportExplainHtmlToMp4,
+  probeAudioDurationSec,
+  type ExplainExportQuality,
+} from '../services/explainExport';
 import { decodeUploadFilename } from '../utils/uploadFilename';
 
 function getUserId(req: Request): string {
@@ -261,9 +268,93 @@ export function createExplainRouter(
       selected_style_id: null,
       sample_path: null,
       final_path: null,
+      video_path: null,
       ...(badTopic ? { topic_text: '' } : {}),
     });
     pumpExplainQueue();
+    res.json({ success: true, data: jobs.publicRow(jobs.getJob(job.id)!), error: null });
+  });
+
+  router.get('/export-qualities', (_req: Request, res: Response) => {
+    res.json({ success: true, data: { qualities: EXPLAIN_EXPORT_QUALITIES }, error: null });
+  });
+
+  router.post('/jobs/:id/export', async (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    const job = jobs.getOwned(String(req.params.id), userId);
+    if (!job) return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
+    if (!job.final_path || !fs.existsSync(job.final_path)) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        error: { code: '400', message: '请先完成全片 HTML 后再导出 MP4' },
+      });
+    }
+
+    const qualityRaw = String(req.body?.quality || '1080p').toLowerCase();
+    const quality = (['720p', '1080p', '1440p'].includes(qualityRaw) ? qualityRaw : '1080p') as ExplainExportQuality;
+
+    let cfg: any = {};
+    try { cfg = JSON.parse(job.config_json || '{}'); } catch { cfg = {}; }
+    if (cfg?.export?.status === 'running') {
+      return res.status(409).json({
+        success: false,
+        data: jobs.publicRow(job),
+        error: { code: '409', message: '正在导出中，请稍候' },
+      });
+    }
+
+    const finalDir = path.dirname(job.final_path);
+    const audioPath = path.join(finalDir, 'narration.wav');
+    const outPath = path.join(finalDir, `export_${quality}.mp4`);
+    const audioDur = await probeAudioDurationSec(audioPath);
+    const durationSec = audioDur || estimateExplainDurationSec(job.script_json, audioPath);
+
+    cfg.export = { status: 'running', quality, startedAt: new Date().toISOString(), error: null };
+    jobs.updateJob(job.id, {
+      config_json: JSON.stringify(cfg),
+      message: `正在导出 ${quality} MP4（约 ${Math.ceil(durationSec)} 秒动画）…`,
+    });
+
+    // Run async so HTTP can return quickly; client polls job
+    void (async () => {
+      try {
+        await exportExplainHtmlToMp4({
+          htmlPath: job.final_path!,
+          outPath,
+          quality,
+          audioPath: fs.existsSync(audioPath) ? audioPath : null,
+          durationSec,
+        });
+        let latestCfg: any = {};
+        try { latestCfg = JSON.parse(jobs.getJob(job.id)?.config_json || '{}'); } catch { latestCfg = {}; }
+        latestCfg.export = {
+          status: 'done',
+          quality,
+          finishedAt: new Date().toISOString(),
+          error: null,
+        };
+        jobs.updateJob(job.id, {
+          video_path: outPath,
+          config_json: JSON.stringify(latestCfg),
+          message: `MP4 已导出（${quality}）`,
+        });
+      } catch (err: any) {
+        let latestCfg: any = {};
+        try { latestCfg = JSON.parse(jobs.getJob(job.id)?.config_json || '{}'); } catch { latestCfg = {}; }
+        latestCfg.export = {
+          status: 'failed',
+          quality,
+          finishedAt: new Date().toISOString(),
+          error: String(err?.message || err).slice(0, 500),
+        };
+        jobs.updateJob(job.id, {
+          config_json: JSON.stringify(latestCfg),
+          message: `MP4 导出失败：${String(err?.message || err).slice(0, 120)}`,
+        });
+      }
+    })();
+
     res.json({ success: true, data: jobs.publicRow(jobs.getJob(job.id)!), error: null });
   });
 
@@ -299,6 +390,15 @@ export function createExplainRouter(
 
   router.get('/jobs/:id/sample', (req, res) => sendHtml(req, res, 'sample'));
   router.get('/jobs/:id/final', (req, res) => sendHtml(req, res, 'final'));
+
+  router.get('/jobs/:id/video', (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    const job = jobs.getOwned(String(req.params.id), userId);
+    if (!job?.video_path || !fs.existsSync(job.video_path)) return res.status(404).end();
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="explain-${job.id.slice(0, 8)}.mp4"`);
+    res.sendFile(path.resolve(job.video_path));
+  });
 
   return router;
 }

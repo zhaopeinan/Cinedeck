@@ -1,11 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Alert, Button, Card, Col, Input, List, Progress, Radio, Row, Space, Tag, Typography, Upload, message, Popconfirm,
+  Alert, Button, Card, Col, Input, List, Progress, Radio, Row, Select, Space, Tag, Typography, Upload, message, Popconfirm,
 } from 'antd';
 import {
-  ArrowLeftOutlined, CheckOutlined, DeleteOutlined, PauseOutlined, PlayCircleOutlined,
-  ReloadOutlined, RocketOutlined, SettingOutlined,
+  ArrowLeftOutlined, CheckOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined,
+  PauseOutlined, PlayCircleOutlined, ReloadOutlined, RocketOutlined, SettingOutlined,
 } from '@ant-design/icons';
 import { explainApi } from '../../api';
 import {
@@ -53,7 +53,11 @@ const ExplainAnimationPage: React.FC = () => {
   const [pickingStyleId, setPickingStyleId] = useState<number | null>(null);
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
   const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
+  const [exportQuality, setExportQuality] = useState<'720p' | '1080p' | '1440p'>('1080p');
+  const [exporting, setExporting] = useState(false);
   const sampleAudioRef = useRef<HTMLAudioElement | null>(null);
+  const finalPreviewRef = useRef<HTMLDivElement | null>(null);
+  const samplePreviewRef = useRef<HTMLDivElement | null>(null);
   const pollRef = useRef<number | null>(null);
 
   const {
@@ -156,7 +160,8 @@ const ExplainAnimationPage: React.FC = () => {
   }, [activeId, loadDetail]);
 
   useEffect(() => {
-    const busy = jobs.some((j) =>
+    const exportingVideo = detail?.exportInfo?.status === 'running';
+    const busy = exportingVideo || jobs.some((j) =>
       ['queued', 'running', 'await_style', 'await_sample'].includes(j.status),
     ) || (detail && ['queued', 'running'].includes(detail.status));
     if (!busy) {
@@ -177,7 +182,7 @@ const ExplainAnimationPage: React.FC = () => {
         pollRef.current = null;
       }
     };
-  }, [jobs, detail?.status, activeId, loadJobs, loadDetail]);
+  }, [jobs, detail?.status, detail?.exportInfo?.status, activeId, loadJobs, loadDetail]);
 
   const handleCreate = async () => {
     if (!llmOk?.configured) {
@@ -527,16 +532,31 @@ const ExplainAnimationPage: React.FC = () => {
                   </>
                 )}
 
-                {(detail.hasSample || detail.status === 'await_sample' || detail.status === 'completed') && (
+                {detail.hasSample && detail.status !== 'completed' && (
                   <div style={{ marginTop: 16 }}>
-                    <Title level={5}>样片预览</Title>
-                    {detail.hasSample && (
+                    <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 8 }}>
+                      <Title level={5} style={{ margin: 0 }}>样片预览</Title>
+                      <Button
+                        size="small"
+                        icon={<ExpandOutlined />}
+                        onClick={() => {
+                          const el = samplePreviewRef.current;
+                          if (!el) return;
+                          if (document.fullscreenElement) void document.exitFullscreen();
+                          else void el.requestFullscreen?.();
+                        }}
+                      >
+                        全屏
+                      </Button>
+                    </Space>
+                    <div ref={samplePreviewRef} style={{ background: '#000', borderRadius: 8, overflow: 'hidden' }}>
                       <iframe
                         title="sample"
                         src={explainApi.sampleUrl(detail.id)}
-                        style={{ width: '100%', height: 360, border: '1px solid #f0f0f0', borderRadius: 8, background: '#000' }}
+                        style={{ width: '100%', height: 360, border: '1px solid #f0f0f0', display: 'block', background: '#000' }}
+                        allow="fullscreen; autoplay"
                       />
-                    )}
+                    </div>
                     {detail.status === 'await_sample' && (
                       <Space style={{ marginTop: 12 }}>
                         <Button
@@ -568,19 +588,75 @@ const ExplainAnimationPage: React.FC = () => {
 
                 {detail.hasFinal && (
                   <div style={{ marginTop: 16 }}>
-                    <Title level={5}>完整动画</Title>
-                    <iframe
-                      title="final"
-                      src={explainApi.finalUrl(detail.id)}
-                      style={{ width: '100%', height: 420, border: '1px solid #f0f0f0', borderRadius: 8, background: '#000' }}
-                    />
-                    <Button
-                      style={{ marginTop: 8 }}
-                      href={explainApi.finalUrl(detail.id)}
-                      target="_blank"
-                    >
-                      新窗口打开
-                    </Button>
+                    <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 8 }}>
+                      <Title level={5} style={{ margin: 0 }}>完整动画</Title>
+                      <Button
+                        size="small"
+                        icon={<ExpandOutlined />}
+                        onClick={() => {
+                          const el = finalPreviewRef.current;
+                          if (!el) return;
+                          if (document.fullscreenElement) void document.exitFullscreen();
+                          else void el.requestFullscreen?.();
+                        }}
+                      >
+                        全屏
+                      </Button>
+                    </Space>
+                    <div ref={finalPreviewRef} style={{ background: '#000', borderRadius: 8, overflow: 'hidden' }}>
+                      <iframe
+                        title="final"
+                        src={explainApi.finalUrl(detail.id)}
+                        style={{ width: '100%', height: 420, border: '1px solid #f0f0f0', display: 'block', background: '#000' }}
+                        allow="fullscreen; autoplay"
+                      />
+                    </div>
+                    <Space wrap style={{ marginTop: 12 }}>
+                      <Button href={explainApi.finalUrl(detail.id)} target="_blank">
+                        新窗口打开
+                      </Button>
+                      <Select
+                        value={exportQuality}
+                        style={{ width: 180 }}
+                        onChange={(v) => setExportQuality(v)}
+                        options={[
+                          { value: '720p', label: '720p（1280×720）' },
+                          { value: '1080p', label: '1080p（1920×1080）' },
+                          { value: '1440p', label: '1440p（2560×1440）' },
+                        ]}
+                      />
+                      <Button
+                        type="primary"
+                        icon={<DownloadOutlined />}
+                        loading={exporting || detail.exportInfo?.status === 'running'}
+                        onClick={async () => {
+                          setExporting(true);
+                          try {
+                            const res = await explainApi.exportVideo(detail.id, exportQuality);
+                            if (!res.data?.success) throw new Error(res.data?.error?.message || '导出失败');
+                            message.success('已开始导出 MP4，完成后可下载');
+                            await loadDetail(detail.id);
+                          } catch (e: any) {
+                            message.error(e?.response?.data?.error?.message || e?.message || '导出失败');
+                          } finally {
+                            setExporting(false);
+                          }
+                        }}
+                      >
+                        {detail.exportInfo?.status === 'running' ? '导出中…' : '导出 MP4'}
+                      </Button>
+                      {detail.hasVideo && (
+                        <Button href={explainApi.videoUrl(detail.id)} target="_blank" icon={<DownloadOutlined />}>
+                          下载 MP4
+                        </Button>
+                      )}
+                    </Space>
+                    {detail.exportInfo?.status === 'failed' && detail.exportInfo?.error && (
+                      <Alert type="error" showIcon style={{ marginTop: 8 }} message={detail.exportInfo.error} />
+                    )}
+                    {detail.exportInfo?.status === 'done' && detail.hasVideo && (
+                      <Alert type="success" showIcon style={{ marginTop: 8 }} message="MP4 已就绪，可点击下载" />
+                    )}
                   </div>
                 )}
               </>

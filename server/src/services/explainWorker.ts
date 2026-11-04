@@ -394,12 +394,19 @@ export async function continueExplainAfterSampleApprove(jobId: string) {
     const finalPath = path.join(finalDir, 'index.html');
     fs.writeFileSync(finalPath, finalHtml, 'utf-8');
 
+    // Full piece is ready — drop sample assets to save space / avoid confusion
+    try {
+      const sampleDir = path.join(workDir, 'sample');
+      if (fs.existsSync(sampleDir)) fs.rmSync(sampleDir, { recursive: true, force: true });
+    } catch { /* ignore */ }
+
     jobs.updateJob(jobId, {
       status: 'completed',
       stage: 'done',
       progress: 100,
       message: '讲解动画已完成',
       final_path: finalPath,
+      sample_path: null,
       finished_at: new Date().toISOString(),
     });
   } catch (err: any) {

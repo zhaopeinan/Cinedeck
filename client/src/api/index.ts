@@ -762,6 +762,13 @@ export const explainApi = {
   deleteJob: (id: string) => apiClient.delete<ApiResponse<any>>(`/explain/jobs/${id}`),
   sampleUrl: (id: string) => withToken(`/api/v1/explain/jobs/${id}/sample`),
   finalUrl: (id: string) => withToken(`/api/v1/explain/jobs/${id}/final`),
+  videoUrl: (id: string) => withToken(`/api/v1/explain/jobs/${id}/video`),
+  listExportQualities: () =>
+    apiClient.get<ApiResponse<{ qualities: Array<{ id: string; label: string; width: number; height: number }> }>>(
+      '/explain/export-qualities',
+    ),
+  exportVideo: (id: string, quality: '720p' | '1080p' | '1440p' = '1080p') =>
+    apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/export`, { quality }, { timeout: 30000 }),
 };
 
 export type UnifiedJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';

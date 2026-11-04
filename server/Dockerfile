@@ -40,6 +40,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/assets ./assets
 COPY scripts/fix_pptx_omml.py ./scripts/fix_pptx_omml.py
+COPY scripts/record_html_mp4.mjs ./scripts/record_html_mp4.mjs
 
 EXPOSE 3001
 CMD ["node", "dist/index.js"]

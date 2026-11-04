@@ -385,6 +385,7 @@ export function initDatabase(dbPath?: string): Database.Database {
       work_dir TEXT,
       sample_path TEXT,
       final_path TEXT,
+      video_path TEXT,
       config_json TEXT NOT NULL DEFAULT '{}',
       cancel_requested INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
@@ -403,6 +404,9 @@ export function initDatabase(dbPath?: string): Database.Database {
     }
     if (!explainCols.find((c) => c.name === 'selected_model_id')) {
       db.exec('ALTER TABLE explain_jobs ADD COLUMN selected_model_id TEXT');
+    }
+    if (!explainCols.find((c) => c.name === 'video_path')) {
+      db.exec('ALTER TABLE explain_jobs ADD COLUMN video_path TEXT');
     }
   }
 
