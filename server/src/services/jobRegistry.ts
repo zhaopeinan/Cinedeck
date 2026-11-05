@@ -19,6 +19,10 @@ import { isDuixGpuBusy } from './avatarWorker';
 import { getVoiceboxGpuQueueStatus } from './voiceboxGpuQueue';
 import type { VideoComposerService } from './videoComposer';
 import type { ProjectService } from './projectService';
+import {
+  getExplainExportQueuePosition,
+  listExplainExportJobsForUser,
+} from './explainExportQueue';
 
 export type JobKind =
   | 'tts_dubbing'
@@ -30,7 +34,8 @@ export type JobKind =
   | 'video_compose'
   | 'mooc'
   | 'hyperframe'
-  | 'explain';
+  | 'explain'
+  | 'explain_export';
 
 export type UnifiedJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -107,6 +112,7 @@ export class JobRegistry {
     items.push(...this.fromAvatar(userId));
     items.push(...this.fromCompose(userId));
     items.push(...this.fromExplain(userId));
+    items.push(...this.fromExplainExport(userId));
     items.push(...this.fromProjectDubbing(userId));
     items.push(...this.fromProjectAvatar(userId));
     items.push(...this.fromVideoCompose(userId));
@@ -341,6 +347,25 @@ export class JobRegistry {
         updatedAt: r.updated_at,
         href: '/explain',
         cancellable: ['queued', 'running', 'await_style', 'await_sample'].includes(r.status),
+      };
+    });
+  }
+
+  private fromExplainExport(userId: string): UnifiedJob[] {
+    return listExplainExportJobsForUser(userId, 40).map((j) => {
+      const status = mapDbStatus(j.status);
+      return {
+        id: j.id,
+        kind: 'explain_export' as const,
+        title: `讲解导出 · ${j.title} · ${j.quality}`,
+        status,
+        progress: Number(j.progress) || 0,
+        message: j.message,
+        queuePosition: status === 'queued' ? getExplainExportQueuePosition(j.id) : null,
+        createdAt: j.createdAt,
+        updatedAt: j.updatedAt,
+        href: '/explain',
+        cancellable: status === 'queued' || status === 'running',
       };
     });
   }

@@ -49,6 +49,7 @@ import { ExplainJobService } from './services/explainJobService';
 import { ExplainGenSettingsService } from './services/explainGenSettings';
 import { initExplainPipeline } from './services/explainWorker';
 import { createExplainRouter } from './routes/explain';
+import { initExplainExportQueue } from './services/explainExportQueue';
 
 const PORT = process.env.PORT || 3001;
 
@@ -162,6 +163,7 @@ async function main() {
     genSettings: explainGenSettings,
     voicebox,
   });
+  initExplainExportQueue(explainJobs);
 
   // System status (GPU etc.) — any logged-in user
   app.use('/api/v1/system', authRequired, createSystemRouter());

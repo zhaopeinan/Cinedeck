@@ -10,11 +10,9 @@ import { LlmService } from '../services/llmService';
 import { ExplainGenSettingsService } from '../services/explainGenSettings';
 import {
   EXPLAIN_EXPORT_QUALITIES,
-  estimateExplainDurationSec,
-  exportExplainHtmlToMp4,
-  probeAudioDurationSec,
   type ExplainExportQuality,
 } from '../services/explainExport';
+import { prepareAndEnqueueExplainExport } from '../services/explainExportQueue';
 import { decodeUploadFilename } from '../utils/uploadFilename';
 
 function getUserId(req: Request): string {
@@ -364,81 +362,42 @@ export function createExplainRouter(
 
   router.post('/jobs/:id/export', async (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const job = jobs.getOwned(String(req.params.id), userId);
-    if (!job) return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
-    if (!job.final_path || !fs.existsSync(job.final_path)) {
-      return res.status(400).json({
-        success: false,
-        data: null,
-        error: { code: '400', message: '请先完成全片 HTML 后再导出 MP4' },
-      });
-    }
-
     const qualityRaw = String(req.body?.quality || '1080p').toLowerCase();
     const quality = (['720p', '1080p', '1440p'].includes(qualityRaw) ? qualityRaw : '1080p') as ExplainExportQuality;
 
-    let cfg: any = {};
-    try { cfg = JSON.parse(job.config_json || '{}'); } catch { cfg = {}; }
-    if (cfg?.export?.status === 'running') {
-      return res.status(409).json({
+    try {
+      const exportJob = await prepareAndEnqueueExplainExport({
+        explainJobs: jobs,
+        explainJobId: String(req.params.id),
+        userId,
+        quality,
+      });
+      const parent = jobs.getJob(exportJob.explainJobId)!;
+      res.json({
+        success: true,
+        data: {
+          ...jobs.publicRow(parent),
+          exportJob: {
+            id: exportJob.id,
+            status: exportJob.status,
+            progress: exportJob.progress,
+            message: exportJob.message,
+            quality: exportJob.quality,
+            queuePosition: null,
+          },
+        },
+        error: null,
+      });
+    } catch (err: any) {
+      const code = err?.code === '409' || err?.code === '404' || err?.code === '400' ? err.code : '500';
+      const status = code === '404' ? 404 : code === '409' ? 409 : code === '400' ? 400 : 500;
+      const parent = jobs.getOwned(String(req.params.id), userId);
+      return res.status(status).json({
         success: false,
-        data: jobs.publicRow(job),
-        error: { code: '409', message: '正在导出中，请稍候' },
+        data: parent ? jobs.publicRow(parent) : (err?.job ? { exportJobId: err.job.id } : null),
+        error: { code: String(code), message: err?.message || '导出入队失败' },
       });
     }
-
-    const finalDir = path.dirname(job.final_path);
-    const audioPath = path.join(finalDir, 'narration.wav');
-    const outPath = path.join(finalDir, `export_${quality}.mp4`);
-    const audioDur = await probeAudioDurationSec(audioPath);
-    const durationSec = audioDur || estimateExplainDurationSec(job.script_json, audioPath);
-
-    cfg.export = { status: 'running', quality, startedAt: new Date().toISOString(), error: null };
-    jobs.updateJob(job.id, {
-      config_json: JSON.stringify(cfg),
-      message: `正在导出 ${quality} MP4（约 ${Math.ceil(durationSec)} 秒动画）…`,
-    });
-
-    // Run async so HTTP can return quickly; client polls job
-    void (async () => {
-      try {
-        await exportExplainHtmlToMp4({
-          htmlPath: job.final_path!,
-          outPath,
-          quality,
-          audioPath: fs.existsSync(audioPath) ? audioPath : null,
-          durationSec,
-        });
-        let latestCfg: any = {};
-        try { latestCfg = JSON.parse(jobs.getJob(job.id)?.config_json || '{}'); } catch { latestCfg = {}; }
-        latestCfg.export = {
-          status: 'done',
-          quality,
-          finishedAt: new Date().toISOString(),
-          error: null,
-        };
-        jobs.updateJob(job.id, {
-          video_path: outPath,
-          config_json: JSON.stringify(latestCfg),
-          message: `MP4 已导出（${quality}）`,
-        });
-      } catch (err: any) {
-        let latestCfg: any = {};
-        try { latestCfg = JSON.parse(jobs.getJob(job.id)?.config_json || '{}'); } catch { latestCfg = {}; }
-        latestCfg.export = {
-          status: 'failed',
-          quality,
-          finishedAt: new Date().toISOString(),
-          error: String(err?.message || err).slice(0, 500),
-        };
-        jobs.updateJob(job.id, {
-          config_json: JSON.stringify(latestCfg),
-          message: `MP4 导出失败：${String(err?.message || err).slice(0, 120)}`,
-        });
-      }
-    })();
-
-    res.json({ success: true, data: jobs.publicRow(jobs.getJob(job.id)!), error: null });
   });
 
   router.post('/jobs/:id/cancel', (req: Request, res: Response) => {

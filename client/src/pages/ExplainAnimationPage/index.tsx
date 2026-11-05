@@ -183,7 +183,7 @@ const ExplainAnimationPage: React.FC = () => {
   }, [detail?.id]);
 
   useEffect(() => {
-    const exportingVideo = detail?.exportInfo?.status === 'running';
+    const exportingVideo = ['queued', 'running'].includes(String(detail?.exportInfo?.status || ''));
     const busy = exportingVideo || jobs.some((j) =>
       ['queued', 'running', 'await_style', 'await_sample'].includes(j.status),
     ) || (detail && ['queued', 'running'].includes(detail.status));
@@ -756,13 +756,13 @@ const ExplainAnimationPage: React.FC = () => {
                       <Button
                         type="primary"
                         icon={<DownloadOutlined />}
-                        loading={exporting || detail.exportInfo?.status === 'running'}
+                        loading={exporting || ['queued', 'running'].includes(String(detail.exportInfo?.status || ''))}
                         onClick={async () => {
                           setExporting(true);
                           try {
                             const res = await explainApi.exportVideo(detail.id, exportQuality);
                             if (!res.data?.success) throw new Error(res.data?.error?.message || '导出失败');
-                            message.success('已开始导出 MP4，完成后可下载');
+                            message.success('已加入任务中心导出队列，可离开本页，完成后回来下载');
                             await loadDetail(detail.id);
                           } catch (e: any) {
                             message.error(e?.response?.data?.error?.message || e?.message || '导出失败');
@@ -771,7 +771,13 @@ const ExplainAnimationPage: React.FC = () => {
                           }
                         }}
                       >
-                        {detail.exportInfo?.status === 'running' ? '导出中…' : '导出 MP4'}
+                        {detail.exportInfo?.status === 'queued'
+                          ? '排队中…'
+                          : detail.exportInfo?.status === 'running'
+                            ? (detail.exportInfo?.progress != null
+                              ? `导出中 ${detail.exportInfo.progress}%`
+                              : '导出中…')
+                            : '导出 MP4'}
                       </Button>
                       {detail.hasVideo && (
                         <Button href={explainApi.videoUrl(detail.id)} target="_blank" icon={<DownloadOutlined />}>

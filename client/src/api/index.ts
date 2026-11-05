@@ -694,7 +694,8 @@ export type UnifiedJobKind =
   | 'video_compose'
   | 'mooc'
   | 'hyperframe'
-  | 'explain';
+  | 'explain'
+  | 'explain_export';
 
 /** 讲解动画（风格技能产品化） */
 export type ExplainGenSettings = {

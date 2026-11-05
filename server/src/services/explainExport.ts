@@ -16,18 +16,48 @@ export const EXPLAIN_EXPORT_QUALITIES: Array<{
   { id: '1440p', label: '1440p（2560×1440）', width: 2560, height: 1440 },
 ];
 
-function run(command: string, args: string[], opts?: { timeoutMs?: number }): Promise<{ code: number; stdout: string; stderr: string }> {
+function run(
+  command: string,
+  args: string[],
+  opts?: {
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    onStdout?: (chunk: string) => void;
+  },
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
     let stdout = '';
     let stderr = '';
-    const timer = setTimeout(() => child.kill('SIGKILL'), opts?.timeoutMs ?? 30 * 60 * 1000);
-    child.stdout.on('data', (d) => { stdout += d.toString(); });
-    child.stderr.on('data', (d) => { stderr += d.toString(); });
-    child.on('close', (code) => {
+    let settled = false;
+    const finish = (code: number) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      resolve({ code: code ?? 1, stdout, stderr });
+      opts?.signal?.removeEventListener('abort', onAbort);
+      resolve({ code, stdout, stderr });
+    };
+    const onAbort = () => {
+      try { child.kill('SIGKILL'); } catch { /* ignore */ }
+    };
+    if (opts?.signal) {
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener('abort', onAbort, { once: true });
+    }
+    const timer = setTimeout(() => child.kill('SIGKILL'), opts?.timeoutMs ?? 30 * 60 * 1000);
+    child.stdout.on('data', (d) => {
+      const s = d.toString();
+      stdout += s;
+      opts?.onStdout?.(s);
     });
+    child.stderr.on('data', (d) => {
+      const s = d.toString();
+      stderr += s;
+      // ffmpeg writes progress to stderr; recorder may too
+      opts?.onStdout?.(s);
+    });
+    child.on('close', (code) => finish(code ?? 1));
+    child.on('error', () => finish(1));
   });
 }
 
@@ -102,6 +132,7 @@ export async function exportExplainHtmlToMp4(opts: {
   audioPath?: string | null;
   durationSec: number;
   onLog?: (line: string) => void;
+  signal?: AbortSignal;
 }): Promise<void> {
   const q = EXPLAIN_EXPORT_QUALITIES.find((x) => x.id === opts.quality) || EXPLAIN_EXPORT_QUALITIES[1];
   const htmlPath = path.resolve(opts.htmlPath);
@@ -172,8 +203,24 @@ export async function exportExplainHtmlToMp4(opts: {
     args.push('--audio', `/work/${audioName}`);
   }
 
+  if (opts.signal?.aborted) throw new Error('导出已取消');
   opts.onLog?.(`docker ${args.join(' ')}`);
-  const r = await run('docker', args, { timeoutMs: Math.max(10 * 60 * 1000, (seconds + 120) * 1000) });
+  let lineBuf = '';
+  const r = await run('docker', args, {
+    timeoutMs: Math.max(10 * 60 * 1000, (seconds + 120) * 1000),
+    signal: opts.signal,
+    onStdout: (chunk) => {
+      if (!opts.onLog) return;
+      lineBuf += chunk;
+      const parts = lineBuf.split(/\r?\n/);
+      lineBuf = parts.pop() || '';
+      for (const line of parts) {
+        const t = line.trim();
+        if (t) opts.onLog(t);
+      }
+    },
+  });
+  if (opts.signal?.aborted) throw new Error('导出已取消');
   if (r.code !== 0) {
     throw new Error(`导出 MP4 失败：${(r.stderr || r.stdout).slice(-1000)}`);
   }

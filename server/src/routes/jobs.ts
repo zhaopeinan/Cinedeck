@@ -8,6 +8,10 @@ import { ExplainJobService } from '../services/explainJobService';
 import { requestMoocJobCancel } from '../services/moocPipelineWorker';
 import { requestCancel } from '../services/jobCancel';
 import { markDubbingCancelled } from '../services/dubbingProgress';
+import {
+  getExplainExportJob,
+  requestCancelExplainExportJob,
+} from '../services/explainExportQueue';
 
 function getUserId(req: Request): string {
   return (req as any).user?.id || '';
@@ -100,6 +104,10 @@ export function createJobsRouter(
         const e = deps.explainJobs.getOwned(rawId, userId);
         if (e) kind = 'explain';
       }
+      if (!kind) {
+        const ex = getExplainExportJob(rawId);
+        if (ex && ex.userId === userId) kind = 'explain_export';
+      }
     }
 
     if (!kind) {
@@ -177,6 +185,17 @@ export function createJobsRouter(
             });
           }
           const updated = deps.explainJobs.requestCancel(id, userId);
+          if (!updated) {
+            return res.status(404).json({
+              success: false,
+              data: null,
+              error: { code: '404', message: '任务不存在' },
+            });
+          }
+          return res.json({ success: true, data: { id, kind, status: updated.status }, error: null });
+        }
+        case 'explain_export': {
+          const updated = requestCancelExplainExportJob(id, userId);
           if (!updated) {
             return res.status(404).json({
               success: false,

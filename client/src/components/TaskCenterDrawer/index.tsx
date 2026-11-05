@@ -21,6 +21,7 @@ const KIND_LABEL: Record<string, string> = {
   mooc: '慕课',
   hyperframe: 'HyperFrame',
   explain: '讲解动画',
+  explain_export: '讲解导出',
 };
 
 const STATUS_META: Record<
