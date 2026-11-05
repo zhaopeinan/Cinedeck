@@ -5,7 +5,7 @@
  *
  * Usage:
  *   node record_html_mp4.mjs --html /work/index.html --out /work/export.mp4 \
- *     --width 1920 --height 1080 --fps 30 --seconds 20 [--audio /work/narration.wav]
+ *     --width 1920 --height 1080 --fps 24 --seconds 20 [--audio /work/narration.wav]
  */
 import fs from 'fs';
 import path from 'path';
@@ -43,7 +43,8 @@ async function main() {
   const audioPath = arg('audio');
   const width = Math.max(640, Number(arg('width', '1920')) || 1920);
   const height = Math.max(360, Number(arg('height', '1080')) || 1080);
-  const fps = Math.max(12, Math.min(60, Number(arg('fps', '30')) || 30));
+  // 24fps is enough for explainer motion; fewer frames = much faster capture
+  const fps = Math.max(12, Math.min(60, Number(arg('fps', '24')) || 24));
   const seconds = Math.max(3, Math.min(300, Number(arg('seconds', '20')) || 20));
 
   if (!fs.existsSync(htmlPath)) throw new Error(`HTML not found: ${htmlPath}`);
@@ -73,10 +74,15 @@ async function main() {
       '--no-sandbox',
       '--disable-dev-shm-usage',
       '--autoplay-policy=no-user-gesture-required',
+      '--disable-gpu',
       `--window-size=${width},${height}`,
     ],
     defaultViewport: { width, height, deviceScaleFactor: 1 },
   });
+
+  const total = Math.ceil(seconds * fps);
+  const interval = 1000 / fps;
+  let captured = 0;
 
   try {
     const page = await browser.newPage();
@@ -114,24 +120,28 @@ async function main() {
       }
     }).catch(() => {});
 
-    const total = Math.ceil(seconds * fps);
-    const interval = 1000 / fps;
     const t0 = Date.now();
     for (let i = 0; i < total; i++) {
       const target = t0 + i * interval;
       const wait = target - Date.now();
       if (wait > 0) await sleep(wait);
-      const file = path.join(frameDir, `f${String(i).padStart(6, '0')}.png`);
-      await page.screenshot({ path: file, type: 'png' });
-      if (i % Math.max(1, Math.floor(fps)) === 0) {
-        process.stdout.write(`frame ${i + 1}/${total}\n`);
+      const file = path.join(frameDir, `f${String(i).padStart(6, '0')}.jpg`);
+      // JPEG is much faster to encode/write than PNG at 1080p
+      await page.screenshot({ path: file, type: 'jpeg', quality: 82 });
+      captured = i + 1;
+      if (i % Math.max(1, Math.floor(fps)) === 0 || i === total - 1) {
+        process.stdout.write(`frame ${captured}/${total}\n`);
       }
     }
   } finally {
     await browser.close().catch(() => {});
   }
 
-  const pattern = path.join(frameDir, 'f%06d.png');
+  if (captured < total) {
+    throw new Error(`screenshot incomplete: ${captured}/${total}`);
+  }
+
+  const pattern = path.join(frameDir, 'f%06d.jpg');
   const ffArgs = [
     '-y',
     '-framerate', String(fps),
@@ -150,7 +160,7 @@ async function main() {
     '-movflags', '+faststart',
     outPath,
   );
-  process.stdout.write(`ffmpeg ${ffArgs.join(' ')}\n`);
+  process.stdout.write(`ffmpeg encoding ${captured} frames…\n`);
   await run('ffmpeg', ffArgs);
 
   // cleanup frames

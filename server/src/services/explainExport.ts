@@ -24,18 +24,19 @@ function run(
     signal?: AbortSignal;
     onStdout?: (chunk: string) => void;
   },
-): Promise<{ code: number; stdout: string; stderr: string }> {
+): Promise<{ code: number; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve) => {
     const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], env: process.env });
     let stdout = '';
     let stderr = '';
     let settled = false;
+    let timedOut = false;
     const finish = (code: number) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       opts?.signal?.removeEventListener('abort', onAbort);
-      resolve({ code, stdout, stderr });
+      resolve({ code, stdout, stderr, timedOut });
     };
     const onAbort = () => {
       try { child.kill('SIGKILL'); } catch { /* ignore */ }
@@ -44,7 +45,10 @@ function run(
       if (opts.signal.aborted) onAbort();
       else opts.signal.addEventListener('abort', onAbort, { once: true });
     }
-    const timer = setTimeout(() => child.kill('SIGKILL'), opts?.timeoutMs ?? 30 * 60 * 1000);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill('SIGKILL'); } catch { /* ignore */ }
+    }, opts?.timeoutMs ?? 30 * 60 * 1000);
     child.stdout.on('data', (d) => {
       const s = d.toString();
       stdout += s;
@@ -59,6 +63,38 @@ function run(
     child.on('close', (code) => finish(code ?? 1));
     child.on('error', () => finish(1));
   });
+}
+
+function summarizeExportFailure(stdout: string, stderr: string, timedOut: boolean): string {
+  if (timedOut) {
+    return '导出超时：截帧墙钟远超片长，请重试（已提高超时与截帧速度）';
+  }
+  const lines = `${stderr}\n${stdout}`
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !/^frame\s+\d+\/\d+/i.test(l) && !/^ffmpeg /i.test(l));
+  const tail = lines.slice(-12).join(' | ').slice(0, 600);
+  return tail || '导出进程异常退出';
+}
+
+async function isUsableMp4(filePath: string, minDurationSec = 2): Promise<boolean> {
+  if (!fs.existsSync(filePath)) return false;
+  if (fs.statSync(filePath).size < 5000) return false;
+  const r = await run('ffprobe', [
+    '-v', 'error',
+    '-show_entries', 'format=duration:stream=codec_type',
+    '-of', 'json',
+    filePath,
+  ], { timeoutMs: 30000 });
+  if (r.code !== 0) return false;
+  try {
+    const j = JSON.parse(r.stdout || '{}');
+    const dur = Number(j?.format?.duration);
+    const hasVideo = Array.isArray(j?.streams) && j.streams.some((s: any) => s.codec_type === 'video');
+    return hasVideo && Number.isFinite(dur) && dur >= minDurationSec;
+  } catch {
+    return false;
+  }
 }
 
 async function resolveHostPath(containerPath: string): Promise<string> {
@@ -182,9 +218,16 @@ export async function exportExplainHtmlToMp4(opts: {
   }
 
   const seconds = Math.max(3, Math.min(300, Math.ceil(opts.durationSec)));
+  const fps = 24;
+  // Screenshot wall-clock is often 1.5–3× realtime at 1080p; budget generously.
+  const timeoutMs = Math.max(
+    25 * 60 * 1000,
+    Math.ceil(seconds * fps * 2500) + 5 * 60 * 1000,
+  );
   const args = [
     'run', '--rm',
     '--network', 'none',
+    '--shm-size', '1g',
     '-v', `${hostWork}:/work:rw`,
     '-w', '/work',
     '-e', 'PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium',
@@ -196,7 +239,7 @@ export async function exportExplainHtmlToMp4(opts: {
     '--out', `/work/${outName}`,
     '--width', String(q.width),
     '--height', String(q.height),
-    '--fps', '30',
+    '--fps', String(fps),
     '--seconds', String(seconds),
   ];
   if (audioName) {
@@ -204,10 +247,10 @@ export async function exportExplainHtmlToMp4(opts: {
   }
 
   if (opts.signal?.aborted) throw new Error('导出已取消');
-  opts.onLog?.(`docker ${args.join(' ')}`);
+  opts.onLog?.(`docker timeout=${Math.round(timeoutMs / 1000)}s fps=${fps} ${args.join(' ')}`);
   let lineBuf = '';
   const r = await run('docker', args, {
-    timeoutMs: Math.max(10 * 60 * 1000, (seconds + 120) * 1000),
+    timeoutMs,
     signal: opts.signal,
     onStdout: (chunk) => {
       if (!opts.onLog) return;
@@ -221,15 +264,21 @@ export async function exportExplainHtmlToMp4(opts: {
     },
   });
   if (opts.signal?.aborted) throw new Error('导出已取消');
-  if (r.code !== 0) {
-    throw new Error(`导出 MP4 失败：${(r.stderr || r.stdout).slice(-1000)}`);
-  }
+
   const produced = path.join(workDir, outName);
   if (produced !== outPath && fs.existsSync(produced)) {
     fs.renameSync(produced, outPath);
   }
-  if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1000) {
-    throw new Error('导出完成但未找到有效 MP4');
+
+  // Even if docker was SIGKILL'd at the end, accept a usable MP4 (false-negative timeout).
+  const ok = await isUsableMp4(outPath, Math.min(3, Math.max(2, seconds * 0.5)));
+  if (ok) {
+    if (r.code !== 0) {
+      opts.onLog?.(`docker exited ${r.code} but MP4 is usable → treat as success`);
+    }
+    opts.onLog?.(`export ok → ${outPath}`);
+    return;
   }
-  opts.onLog?.(`export ok → ${outPath}`);
+
+  throw new Error(`导出 MP4 失败：${summarizeExportFailure(r.stdout, r.stderr, r.timedOut)}`);
 }
