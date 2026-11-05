@@ -44,6 +44,47 @@ function statusHint(job: UnifiedJob): string {
   return STATUS_META[job.status]?.label || job.status;
 }
 
+function pad2(n: number) {
+  return String(n).padStart(2, '0');
+}
+
+function formatClock(iso?: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+function formatDuration(ms?: number | null): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  const totalSec = Math.round(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h}小时${m}分${s}秒`;
+  if (m > 0) return `${m}分${s}秒`;
+  return `${s}秒`;
+}
+
+function timingLine(job: UnifiedJob): string | null {
+  const active = job.status === 'queued' || job.status === 'running';
+  const start = formatClock(job.startedAt || job.createdAt);
+  const end = formatClock(job.finishedAt);
+  const dur = formatDuration(job.durationMs);
+  const parts: string[] = [];
+  if (active) {
+    if (job.status === 'queued' && start) parts.push(`入队 ${start}`);
+    if (job.status === 'running' && start) parts.push(`开始 ${start}`);
+    if (job.status === 'running' && dur) parts.push(`已用时 ${dur}`);
+  } else {
+    if (start && end) parts.push(`${start} → ${end}`);
+    else if (start) parts.push(`开始 ${start}`);
+    else if (end) parts.push(`完成 ${end}`);
+    if (dur) parts.push(`耗时 ${dur}`);
+  }
+  return parts.length ? parts.join(' · ') : null;
+}
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -136,6 +177,7 @@ export const TaskCenterDrawer: React.FC<Props> = ({ open, onClose }) => {
         {jobs.map((job) => {
           const meta = STATUS_META[job.status] || STATUS_META.failed;
           const active = job.status === 'queued' || job.status === 'running';
+          const timing = timingLine(job);
           return (
             <div
               key={`${job.kind}:${job.id}`}
@@ -155,9 +197,14 @@ export const TaskCenterDrawer: React.FC<Props> = ({ open, onClose }) => {
                     </Tag>
                   </Space>
                   <div style={{ fontWeight: 500, marginTop: 4 }}>{job.title}</div>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
                     {statusHint(job)}
                   </Typography.Text>
+                  {timing && (
+                    <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }}>
+                      {timing}
+                    </Typography.Text>
+                  )}
                 </div>
               </div>
               {active && (

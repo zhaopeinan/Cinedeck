@@ -177,6 +177,38 @@ export class ExplainJobService {
     return { ...job, sample_path: null };
   }
 
+  /**
+   * Clear export.status queued/running left behind after process restart
+   * (in-memory export queue does not survive).
+   */
+  recoverStaleExports(isAlive: (explainJobId: string) => boolean): number {
+    const rows = this.db.prepare(
+      `SELECT id, config_json FROM explain_jobs
+       WHERE config_json LIKE '%"export"%'`,
+    ).all() as Array<{ id: string; config_json: string }>;
+    let n = 0;
+    const now = new Date().toISOString();
+    for (const row of rows) {
+      let cfg: any = {};
+      try { cfg = JSON.parse(row.config_json || '{}'); } catch { continue; }
+      const st = cfg?.export?.status;
+      if (st !== 'running' && st !== 'queued') continue;
+      if (isAlive(row.id)) continue;
+      cfg.export = {
+        ...cfg.export,
+        status: 'failed',
+        finishedAt: now,
+        error: '服务重启，导出中断，请重新导出',
+      };
+      this.updateJob(row.id, {
+        config_json: JSON.stringify(cfg),
+        message: '讲解动画已完成（上次 MP4 导出因重启中断，可重新导出）',
+      });
+      n += 1;
+    }
+    return n;
+  }
+
   parseConfig(job: ExplainJobRow): Record<string, any> {
     try {
       const cfg = JSON.parse(job.config_json || '{}');

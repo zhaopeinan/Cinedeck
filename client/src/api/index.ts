@@ -795,6 +795,9 @@ export interface UnifiedJob {
   queuePosition: number | null;
   createdAt: string;
   updatedAt: string;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  durationMs?: number | null;
   href?: string;
   cancellable: boolean;
 }

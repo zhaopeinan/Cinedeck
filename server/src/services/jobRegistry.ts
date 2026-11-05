@@ -49,8 +49,32 @@ export interface UnifiedJob {
   queuePosition: number | null;
   createdAt: string;
   updatedAt: string;
+  /** When the worker actually started (falls back to createdAt when unknown). */
+  startedAt?: string | null;
+  /** When the job reached a terminal state. */
+  finishedAt?: string | null;
+  /** Elapsed ms: finishedAt-startedAt, or now-startedAt while active. */
+  durationMs?: number | null;
   href?: string;
   cancellable: boolean;
+}
+
+function withTiming(job: Omit<UnifiedJob, 'durationMs'> & { durationMs?: number | null }): UnifiedJob {
+  const startedAt = job.startedAt || job.createdAt || null;
+  const finishedAt = job.finishedAt || (
+    job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled'
+      ? job.updatedAt
+      : null
+  );
+  let durationMs = job.durationMs ?? null;
+  if (durationMs == null && startedAt) {
+    const start = Date.parse(startedAt);
+    const end = finishedAt ? Date.parse(finishedAt) : Date.now();
+    if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+      durationMs = end - start;
+    }
+  }
+  return { ...job, startedAt, finishedAt, durationMs };
 }
 
 export interface JobsSummary {
@@ -139,7 +163,7 @@ export class JobRegistry {
       return a.updatedAt < b.updatedAt ? 1 : -1;
     });
 
-    return filtered.slice(0, limit);
+    return filtered.slice(0, limit).map((j) => withTiming(j));
   }
 
   summaryForUser(userId: string): JobsSummary {
@@ -316,7 +340,7 @@ export class JobRegistry {
   private fromExplain(userId: string): UnifiedJob[] {
     const rows = this.deps.db
       .prepare(
-        `SELECT id, name, status, progress, message, created_at, updated_at
+        `SELECT id, name, status, progress, message, created_at, updated_at, started_at, finished_at, config_json
          FROM explain_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 40`,
       )
       .all(userId) as Array<{
@@ -327,6 +351,9 @@ export class JobRegistry {
       message: string | null;
       created_at: string;
       updated_at: string;
+      started_at: string | null;
+      finished_at: string | null;
+      config_json: string;
     }>;
     const allQueued = this.deps.db
       .prepare(`SELECT id, status, created_at FROM explain_jobs WHERE status IN ('queued','running')`)
@@ -335,16 +362,23 @@ export class JobRegistry {
     return rows.map((r) => {
       let status = mapDbStatus(r.status);
       if (r.status === 'await_style' || r.status === 'await_sample') status = 'running';
+      // Export progress belongs to explain_export cards — don't duplicate on parent
+      let message = r.message;
+      if (status === 'completed' && message && /导出|MP4/i.test(message)) {
+        message = '讲解动画已完成';
+      }
       return {
         id: r.id,
         kind: 'explain' as const,
         title: `讲解动画 · ${r.name || r.id.slice(0, 8)}`,
         status,
         progress: Number(r.progress) || 0,
-        message: r.message,
+        message,
         queuePosition: r.status === 'queued' ? queuePosAmong(allQueued, r.id) : null,
         createdAt: r.created_at,
         updatedAt: r.updated_at,
+        startedAt: r.started_at,
+        finishedAt: r.finished_at,
         href: '/explain',
         cancellable: ['queued', 'running', 'await_style', 'await_sample'].includes(r.status),
       };
@@ -352,7 +386,7 @@ export class JobRegistry {
   }
 
   private fromExplainExport(userId: string): UnifiedJob[] {
-    return listExplainExportJobsForUser(userId, 40).map((j) => {
+    const fromMem = listExplainExportJobsForUser(userId, 40).map((j) => {
       const status = mapDbStatus(j.status);
       return {
         id: j.id,
@@ -364,10 +398,69 @@ export class JobRegistry {
         queuePosition: status === 'queued' ? getExplainExportQueuePosition(j.id) : null,
         createdAt: j.createdAt,
         updatedAt: j.updatedAt,
+        startedAt: j.startedAt,
+        finishedAt: j.finishedAt,
         href: '/explain',
         cancellable: status === 'queued' || status === 'running',
       };
     });
+    const memExplainIds = new Set(
+      listExplainExportJobsForUser(userId, 200).map((j) => j.explainJobId),
+    );
+
+    // Persist recent exports from explain_jobs.config_json (survives restarts)
+    const rows = this.deps.db
+      .prepare(
+        `SELECT id, name, config_json, created_at, updated_at
+         FROM explain_jobs WHERE user_id = ? ORDER BY updated_at DESC LIMIT 40`,
+      )
+      .all(userId) as Array<{
+      id: string;
+      name: string;
+      config_json: string;
+      created_at: string;
+      updated_at: string;
+    }>;
+
+    const fromDb: UnifiedJob[] = [];
+    for (const r of rows) {
+      if (memExplainIds.has(r.id)) continue;
+      let exp: any = null;
+      try { exp = JSON.parse(r.config_json || '{}')?.export; } catch { /* ignore */ }
+      if (!exp || !exp.status) continue;
+      const raw = String(exp.status);
+      const status: UnifiedJobStatus =
+        raw === 'done' || raw === 'completed' ? 'completed'
+          : raw === 'queued' ? 'queued'
+            : raw === 'running' ? 'running'
+              : raw === 'cancelled' ? 'cancelled'
+                : 'failed';
+      // Skip ancient completed/failed if no timestamps (noise)
+      if (!isActiveStatus(status) && !exp.finishedAt && !exp.startedAt) continue;
+      const quality = exp.quality || '1080p';
+      fromDb.push({
+        id: exp.exportJobId || `explain-export:${r.id}`,
+        kind: 'explain_export',
+        title: `讲解导出 · ${r.name || r.id.slice(0, 8)} · ${quality}`,
+        status,
+        progress: Number(exp.progress) || (status === 'completed' ? 100 : status === 'running' ? 5 : 0),
+        message:
+          status === 'queued' ? `MP4 导出排队中（${quality}）`
+            : status === 'running' ? (exp.message || `正在导出 ${quality} MP4…`)
+              : status === 'completed' ? `MP4 已导出（${quality}）`
+                : status === 'cancelled' ? 'MP4 导出已取消'
+                  : (exp.error || 'MP4 导出失败'),
+        queuePosition: null,
+        createdAt: exp.startedAt || r.updated_at || r.created_at,
+        updatedAt: exp.finishedAt || r.updated_at,
+        startedAt: exp.startedAt || null,
+        finishedAt: exp.finishedAt || null,
+        href: '/explain',
+        cancellable: false,
+      });
+    }
+
+    return [...fromMem, ...fromDb];
   }
 
   private fromAvatar(userId: string): UnifiedJob[] {

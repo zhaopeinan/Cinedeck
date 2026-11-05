@@ -46,6 +46,15 @@ function nowIso() {
 
 export function initExplainExportQueue(explainJobs: ExplainJobService) {
   explainJobsRef = explainJobs;
+  try {
+    explainJobs.recoverStaleExports((explainJobId) =>
+      Array.from(jobs.values()).some(
+        (j) => j.explainJobId === explainJobId && (j.status === 'queued' || j.status === 'running'),
+      ),
+    );
+  } catch {
+    /* ignore */
+  }
 }
 
 export function getExplainExportJob(id: string): ExplainExportJob | null {
