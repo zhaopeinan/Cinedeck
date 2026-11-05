@@ -80,23 +80,37 @@ async function main() {
 
   try {
     const page = await browser.newPage();
-    await page.goto(pathToFileURL(htmlPath).href, { waitUntil: 'networkidle0', timeout: 120000 });
-    await sleep(500);
-    // Try to start page animation + narration
+    // Prefer setContent over file:// goto: avoids networkidle hangs on huge
+    // data: URIs / lingering timers, and is more reliable offline.
+    const html = fs.readFileSync(htmlPath, 'utf-8');
+    const baseHref = pathToFileURL(path.dirname(htmlPath) + path.sep).href;
+    const withBase = /<base\s/i.test(html)
+      ? html
+      : html.replace(/<head([^>]*)>/i, `<head$1><base href="${baseHref}">`);
+    await page.setContent(withBase, {
+      waitUntil: 'domcontentloaded',
+      timeout: 180000,
+    });
+    // Give rAF / fonts a brief settle; do not wait for networkidle
+    await sleep(800);
+    // Try to start page animation (audio is muxed by ffmpeg separately)
     await page.evaluate(() => {
       const a = document.getElementById('explain-narration');
       if (a) {
-        a.currentTime = 0;
-        a.muted = false;
-        a.play?.().catch(() => {});
+        try { a.remove(); } catch { /* ignore */ }
       }
       const candidates = [
         '[data-play]', '.play', '#btn-play', 'button.play',
         'button[aria-label*="播放"]', 'button[title*="播放"]',
+        'button',
       ];
       for (const sel of candidates) {
         const el = document.querySelector(sel);
-        if (el) { el.click(); break; }
+        if (!el) continue;
+        const label = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`;
+        if (sel === 'button' && !/播放|play|▶|start/i.test(label)) continue;
+        el.click();
+        break;
       }
     }).catch(() => {});
 

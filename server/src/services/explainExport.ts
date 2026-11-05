@@ -75,6 +75,24 @@ export async function probeAudioDurationSec(audioPath: string): Promise<number |
 }
 
 /**
+ * Strip embedded base64 narration from HTML — audio is muxed by ffmpeg from a
+ * separate wav. Huge data: URIs commonly stall Puppeteer navigation.
+ */
+export function prepareExplainHtmlForRecording(html: string): string {
+  let out = html;
+  // Remove injected explain-narration <audio>…</audio>
+  out = out.replace(/<audio\b[^>]*\bid\s*=\s*["']explain-narration["'][^>]*>[\s\S]*?<\/audio>/gi, '');
+  // Remove any remaining giant data:audio URIs (safety)
+  out = out.replace(/\s*src\s*=\s*["']data:audio\/[^"']+["']/gi, ' src=""');
+  // Drop the autoplay hook script block that only targets explain-narration
+  out = out.replace(
+    /<script>\s*\(function\(\)\{\s*var a=document\.getElementById\(['"]explain-narration['"]\);[\s\S]*?<\/script>/gi,
+    '',
+  );
+  return out;
+}
+
+/**
  * Record final/index.html to MP4 via Chromium in hyperframes image.
  */
 export async function exportExplainHtmlToMp4(opts: {
@@ -109,8 +127,17 @@ export async function exportExplainHtmlToMp4(opts: {
   const scriptDest = path.join(workDir, 'record_html_mp4.mjs');
   fs.copyFileSync(scriptSrc, scriptDest);
 
+  // Write a slim recording HTML (no embedded wav) so Chromium loads quickly
+  const rawHtml = fs.readFileSync(htmlPath, 'utf-8');
+  const slimHtml = prepareExplainHtmlForRecording(rawHtml);
+  const recordHtmlName = 'index.record.html';
+  const recordHtmlPath = path.join(workDir, recordHtmlName);
+  fs.writeFileSync(recordHtmlPath, slimHtml, 'utf-8');
+  opts.onLog?.(
+    `record html ${Buffer.byteLength(rawHtml)} → ${Buffer.byteLength(slimHtml)} bytes`,
+  );
+
   const hostWork = await resolveHostPath(workDir);
-  const htmlName = path.basename(htmlPath);
   const outName = path.basename(outPath);
   const audioName = opts.audioPath && fs.existsSync(opts.audioPath)
     ? path.basename(opts.audioPath)
@@ -134,7 +161,7 @@ export async function exportExplainHtmlToMp4(opts: {
     '--entrypoint', 'node',
     image,
     '/work/record_html_mp4.mjs',
-    '--html', `/work/${htmlName}`,
+    '--html', `/work/${recordHtmlName}`,
     '--out', `/work/${outName}`,
     '--width', String(q.width),
     '--height', String(q.height),
