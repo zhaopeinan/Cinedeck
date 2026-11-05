@@ -26,6 +26,14 @@ function getUserId(req: Request): string {
   return (req as any).user?.id || '';
 }
 
+/** HTTP Content-Disposition must be ASCII; put UTF-8 name in filename*. */
+function contentDisposition(download: boolean, filename: string): string {
+  const safe = String(filename || 'download').replace(/[\r\n"]/g, '');
+  const ascii = safe.replace(/[^\x20-\x7E]/g, '_').replace(/_+/g, '_') || 'download';
+  const utf8 = encodeURIComponent(safe);
+  return `${download ? 'attachment' : 'inline'}; filename="${ascii}"; filename*=UTF-8''${utf8}`;
+}
+
 export function createVoiceboxRouter(
   voicebox: VoiceboxAdapter,
   dialogueJobs?: DialogueJobService,
@@ -265,7 +273,7 @@ export function createVoiceboxRouter(
           const voice = (meta.profileName || '').replace(/[\\/:*?"<>|]+/g, '_').trim();
           if (voice) base = `${voice}-${req.params.id.slice(0, 8)}`;
         } catch { /* keep default */ }
-        res.setHeader('Content-Disposition', `attachment; filename="${base}.${ext}"`);
+        res.setHeader('Content-Disposition', contentDisposition(true, `${base}.${ext}`));
       }
       res.send(body);
     } catch (error: any) {
@@ -306,7 +314,7 @@ export function createVoiceboxRouter(
       res.setHeader('Cache-Control', 'private, max-age=3600');
       res.setHeader('X-Lrc-Method', built.method);
       if (download) {
-        res.setHeader('Content-Disposition', `attachment; filename="${base}.lrc"`);
+        res.setHeader('Content-Disposition', contentDisposition(true, `${base}.lrc`));
       }
       res.send(built.lrc);
     } catch (error: any) {
