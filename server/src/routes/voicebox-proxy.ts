@@ -241,22 +241,79 @@ export function createVoiceboxRouter(
   });
 
   // 播放 / 下载生成音频（代理 Voicebox，避免容器内网地址）
+  // ?download=1&format=mp3|wav  — mp3 便于与 .lrc 配套下载
   router.get('/tasks/:id/audio', async (req: Request<P>, res: Response) => {
     try {
       const { data, contentType } = await voicebox.getTaskAudioBuffer(req.params.id);
       const download = String(req.query.download || '') === '1';
-      res.setHeader('Content-Type', contentType);
+      const format = String(req.query.format || '').toLowerCase();
+      let body = data;
+      let type = contentType || 'audio/wav';
+      let ext = 'wav';
+      if (format === 'mp3' || (download && format !== 'wav')) {
+        const { wavBufferToMp3 } = await import('../utils/lrcSync');
+        body = await wavBufferToMp3(data);
+        type = 'audio/mpeg';
+        ext = 'mp3';
+      }
+      res.setHeader('Content-Type', type);
       res.setHeader('Cache-Control', 'private, max-age=3600');
       if (download) {
-        const name = `voice-factory-${req.params.id}.wav`;
-        res.setHeader('Content-Disposition', `attachment; filename="${name}"`);
+        let base = `voice-factory-${req.params.id}`;
+        try {
+          const meta = await voicebox.getTaskResult(req.params.id);
+          const voice = (meta.profileName || '').replace(/[\\/:*?"<>|]+/g, '_').trim();
+          if (voice) base = `${voice}-${req.params.id.slice(0, 8)}`;
+        } catch { /* keep default */ }
+        res.setHeader('Content-Disposition', `attachment; filename="${base}.${ext}"`);
       }
-      res.send(data);
+      res.send(body);
     } catch (error: any) {
       res.status(503).json({
         success: false,
         data: null,
         error: { code: '5002', message: error.message || '音频不可用' },
+      });
+    }
+  });
+
+  // 与音频同步的 LRC 歌词（静音检测对齐分句，失败则按字重分配）
+  router.get('/tasks/:id/lrc', async (req: Request<P>, res: Response) => {
+    try {
+      const meta = await voicebox.getTaskResult(req.params.id);
+      const { data } = await voicebox.getTaskAudioBuffer(req.params.id);
+      const { buildLrcForAudio, withTempAudioFile } = await import('../utils/lrcSync');
+      let built = await buildLrcForAudio({
+        text: meta.text,
+        durationSec: meta.duration,
+        title: meta.profileName || undefined,
+        artist: meta.profileName || undefined,
+      });
+      // Refine with silence detection when possible
+      await withTempAudioFile(data, '.wav', async (audioPath) => {
+        built = await buildLrcForAudio({
+          text: meta.text,
+          durationSec: meta.duration,
+          audioPath,
+          title: meta.profileName || undefined,
+          artist: meta.profileName || undefined,
+        });
+      });
+      const voice = (meta.profileName || '').replace(/[\\/:*?"<>|]+/g, '_').trim();
+      const base = voice ? `${voice}-${req.params.id.slice(0, 8)}` : `voice-factory-${req.params.id}`;
+      const download = String(req.query.download || '') === '1';
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('Cache-Control', 'private, max-age=3600');
+      res.setHeader('X-Lrc-Method', built.method);
+      if (download) {
+        res.setHeader('Content-Disposition', `attachment; filename="${base}.lrc"`);
+      }
+      res.send(built.lrc);
+    } catch (error: any) {
+      res.status(503).json({
+        success: false,
+        data: null,
+        error: { code: '5002', message: error.message || '生成歌词失败' },
       });
     }
   });

@@ -173,26 +173,39 @@ export const voiceboxApi = {
   getTaskStatus: (id: string) => apiClient.get<ApiResponse<any>>(`/voicebox/tasks/${id}`),
   getTaskResult: (id: string) => apiClient.get<ApiResponse<any>>(`/voicebox/tasks/${id}/result`),
   getTaskAudioUrl: (id: string) => withToken(`/api/v1/voicebox/tasks/${id}/audio`),
-  getTaskDownloadUrl: (id: string) => withToken(`/api/v1/voicebox/tasks/${id}/audio?download=1`),
+  getTaskDownloadUrl: (id: string) => withToken(`/api/v1/voicebox/tasks/${id}/audio?download=1&format=mp3`),
+  getTaskLrcUrl: (id: string) => withToken(`/api/v1/voicebox/tasks/${id}/lrc?download=1`),
+  /** 下载 MP3，并同步下载与之对齐的 .lrc */
   downloadTaskAudio: async (id: string, filenameHint?: string) => {
     const token = localStorage.getItem(TOKEN_KEY);
-    const url = `/api/v1/voicebox/tasks/${id}/audio?download=1`;
-    const res = await fetch(url, {
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-    });
-    if (!res.ok) throw new Error(`下载失败（HTTP ${res.status}）`);
-    const blob = await res.blob();
-    const cd = res.headers.get('Content-Disposition') || '';
-    const matched = /filename="?([^";]+)"?/i.exec(cd);
-    const filename = matched?.[1] || `${filenameHint || 'voice-factory'}.wav`;
-    const objectUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = objectUrl;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(objectUrl);
+    const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
+    const saveBlob = async (url: string, fallbackName: string) => {
+      const res = await fetch(url, { headers });
+      if (!res.ok) throw new Error(`下载失败（HTTP ${res.status}）`);
+      const blob = await res.blob();
+      const cd = res.headers.get('Content-Disposition') || '';
+      const matched = /filename="?([^";]+)"?/i.exec(cd);
+      const filename = matched?.[1] || fallbackName;
+      const objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(objectUrl);
+      return filename;
+    };
+    const mp3Name = await saveBlob(
+      `/api/v1/voicebox/tasks/${id}/audio?download=1&format=mp3`,
+      `${filenameHint || 'voice-factory'}.mp3`,
+    );
+    const base = mp3Name.replace(/\.mp3$/i, '') || filenameHint || 'voice-factory';
+    try {
+      await saveBlob(`/api/v1/voicebox/tasks/${id}/lrc?download=1`, `${base}.lrc`);
+    } catch {
+      // LRC 失败不阻断音频下载
+    }
   },
   cancelTask: (id: string) => apiClient.post<ApiResponse<any>>(`/voicebox/tasks/${id}/cancel`),
 

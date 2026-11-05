@@ -360,10 +360,16 @@ const VoiceFactoryPage: React.FC = () => {
   };
 
   const handleDownload = async (taskId: string) => {
+    const item = history.find((h) => h.id === taskId);
+    const hint = (item?.voiceName || '造声工厂').replace(/[\\/:*?"<>|]+/g, '_');
+    const hide = message.loading('正在打包 MP3 + LRC…', 0);
     try {
-      await voiceboxApi.downloadTaskAudio(taskId, `造声工厂-${taskId.slice(0, 8)}`);
+      await voiceboxApi.downloadTaskAudio(taskId, `${hint}-${taskId.slice(0, 8)}`);
+      message.success('已下载 MP3 与同步 LRC 歌词');
     } catch (err: any) {
       message.error(err.message || '下载失败');
+    } finally {
+      hide();
     }
   };
 
@@ -612,7 +618,7 @@ const VoiceFactoryPage: React.FC = () => {
                         icon={<DownloadOutlined />}
                         onClick={() => void handleDownload(item.id)}
                       >
-                        下载
+                        下载 MP3+LRC
                       </Button>,
                     ]}
                   >

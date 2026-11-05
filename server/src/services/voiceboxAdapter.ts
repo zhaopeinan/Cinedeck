@@ -490,12 +490,21 @@ export class VoiceboxAdapter {
    * Get the result of a completed generation.
    * Uses Voicebox /history/{id} for metadata and /audio/{id} for audio URL.
    */
-  async getTaskResult(taskId: string): Promise<{ audioPath: string; duration: number }> {
+  async getTaskResult(taskId: string): Promise<{
+    audioPath: string;
+    duration: number;
+    text: string;
+    profileName: string;
+    language: string;
+  }> {
     const res = await axios.get(`${this.baseUrl}/history/${taskId}`, { timeout: 10000 });
     const gen = res.data;
     return {
       audioPath: `${this.baseUrl}/audio/${taskId}`,
-      duration: gen.duration || 0,
+      duration: Number(gen.duration || 0),
+      text: String(gen.text || ''),
+      profileName: String(gen.profile_name || gen.profileName || ''),
+      language: String(gen.language || 'zh'),
     };
   }
 
