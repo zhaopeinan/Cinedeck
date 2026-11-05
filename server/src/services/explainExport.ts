@@ -155,6 +155,39 @@ export function prepareExplainHtmlForRecording(html: string): string {
     /<script>\s*\(function\(\)\{\s*var a=document\.getElementById\(['"]explain-narration['"]\);[\s\S]*?<\/script>/gi,
     '',
   );
+
+  // Expose timeline controls for headless capture. Screenshotting is slower than
+  // realtime, so rAF-driven clocks freeze; the recorder seeks each frame instead.
+  const bridge = `
+window.__explainRec = {
+  seek: function(sec){
+    try {
+      if (typeof t === 'number') t = Math.max(0, sec);
+      if (typeof playing !== 'undefined') playing = false;
+      if (typeof lastTs !== 'undefined') lastTs = 0;
+      if (typeof updateUI === 'function') updateUI();
+      if (typeof render === 'function' && typeof t === 'number') render(t);
+    } catch (e) {}
+  },
+  pause: function(){
+    try { if (typeof playing !== 'undefined') playing = false; } catch (e) {}
+  },
+  total: function(){
+    try {
+      if (typeof TOTAL === 'number' && TOTAL > 0) return TOTAL;
+    } catch (e) {}
+    return 0;
+  }
+};
+`;
+  // Prefer inject inside the main IIFE after timeline vars so it closes over t/playing.
+  if (/\bvar\s+t\s*=\s*0\s*;/.test(out) && !out.includes('window.__explainRec')) {
+    out = out.replace(/\bvar\s+t\s*=\s*0\s*;/, (m) => `${m}\n${bridge}`);
+  } else if (!out.includes('window.__explainRec')) {
+    const snip = `<script>${bridge}</script>`;
+    if (/<\/body>/i.test(out)) out = out.replace(/<\/body>/i, `${snip}</body>`);
+    else out = `${out}\n${snip}`;
+  }
   return out;
 }
 

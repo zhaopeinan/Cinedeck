@@ -37,13 +37,46 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Force animation timeline to `timeSec`. Prefer __explainRec bridge; fall back to scrubber.
+ * Must NOT click play toggles — many explain HTMLs start with playing=true and click pauses them.
+ */
+async function seekTo(page, timeSec, fallbackTotal) {
+  await page.evaluate((sec, fallback) => {
+    const rec = window.__explainRec;
+    if (rec && typeof rec.seek === 'function') {
+      try { rec.pause && rec.pause(); } catch (e) { /* ignore */ }
+      rec.seek(sec);
+      return;
+    }
+    // Fallback: scrub the progress track (common explain player pattern)
+    const track = document.getElementById('track');
+    const timeEl = document.getElementById('time');
+    let total = fallback;
+    if (timeEl && timeEl.textContent) {
+      const m = String(timeEl.textContent).match(/\/\s*(\d+):(\d+)/);
+      if (m) total = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+    }
+    if (!track || !(total > 0)) return;
+    const ratio = Math.max(0, Math.min(1, sec / total));
+    const rect = track.getBoundingClientRect();
+    if (!rect.width) return;
+    const x = rect.left + ratio * rect.width;
+    const y = rect.top + rect.height / 2;
+    track.dispatchEvent(new MouseEvent('mousedown', { clientX: x, clientY: y, bubbles: true }));
+    window.dispatchEvent(new MouseEvent('mouseup', { clientX: x, clientY: y, bubbles: true }));
+  }, timeSec, fallbackTotal);
+
+  // Let one paint happen at the seeked time
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+}
+
 async function main() {
   const htmlPath = path.resolve(arg('html', '/work/index.html'));
   const outPath = path.resolve(arg('out', '/work/export.mp4'));
   const audioPath = arg('audio');
   const width = Math.max(640, Number(arg('width', '1920')) || 1920);
   const height = Math.max(360, Number(arg('height', '1080')) || 1080);
-  // 24fps is enough for explainer motion; fewer frames = much faster capture
   const fps = Math.max(12, Math.min(60, Number(arg('fps', '24')) || 24));
   const seconds = Math.max(3, Math.min(300, Number(arg('seconds', '20')) || 20));
 
@@ -81,13 +114,11 @@ async function main() {
   });
 
   const total = Math.ceil(seconds * fps);
-  const interval = 1000 / fps;
   let captured = 0;
+  let animTotal = seconds;
 
   try {
     const page = await browser.newPage();
-    // Prefer setContent over file:// goto: avoids networkidle hangs on huge
-    // data: URIs / lingering timers, and is more reliable offline.
     const html = fs.readFileSync(htmlPath, 'utf-8');
     const baseHref = pathToFileURL(path.dirname(htmlPath) + path.sep).href;
     const withBase = /<base\s/i.test(html)
@@ -97,36 +128,39 @@ async function main() {
       waitUntil: 'domcontentloaded',
       timeout: 180000,
     });
-    // Give rAF / fonts a brief settle; do not wait for networkidle
-    await sleep(800);
-    // Try to start page animation (audio is muxed by ffmpeg separately)
-    await page.evaluate(() => {
-      const a = document.getElementById('explain-narration');
-      if (a) {
-        try { a.remove(); } catch { /* ignore */ }
-      }
-      const candidates = [
-        '[data-play]', '.play', '#btn-play', 'button.play',
-        'button[aria-label*="播放"]', 'button[title*="播放"]',
-        'button',
-      ];
-      for (const sel of candidates) {
-        const el = document.querySelector(sel);
-        if (!el) continue;
-        const label = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''}`;
-        if (sel === 'button' && !/播放|play|▶|start/i.test(label)) continue;
-        el.click();
-        break;
-      }
-    }).catch(() => {});
+    await sleep(600);
 
-    const t0 = Date.now();
+    // Discover animation length; pause clock — we drive time per frame.
+    animTotal = await page.evaluate((fallback) => {
+      try {
+        if (window.__explainRec && typeof window.__explainRec.total === 'function') {
+          const n = Number(window.__explainRec.total());
+          if (n > 1) return n;
+        }
+      } catch (e) { /* ignore */ }
+      const timeEl = document.getElementById('time');
+      if (timeEl && timeEl.textContent) {
+        const m = String(timeEl.textContent).match(/\/\s*(\d+):(\d+)/);
+        if (m) return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+      }
+      return fallback;
+    }, seconds);
+    if (!(animTotal > 1)) animTotal = seconds;
+
+    await page.evaluate(() => {
+      try { window.__explainRec && window.__explainRec.pause && window.__explainRec.pause(); } catch (e) { /* ignore */ }
+      // Remove hidden narration audio if any remnant
+      const a = document.getElementById('explain-narration');
+      if (a) try { a.remove(); } catch (e) { /* ignore */ }
+    });
+
+    process.stdout.write(`record seek-mode animTotal=${animTotal}s frames=${total} fps=${fps}\n`);
+
     for (let i = 0; i < total; i++) {
-      const target = t0 + i * interval;
-      const wait = target - Date.now();
-      if (wait > 0) await sleep(wait);
+      // Map export timeline onto animation timeline (clamp to end)
+      const timeSec = Math.min(animTotal - 0.001, (i / Math.max(1, total - 1)) * animTotal);
+      await seekTo(page, timeSec, animTotal);
       const file = path.join(frameDir, `f${String(i).padStart(6, '0')}.jpg`);
-      // JPEG is much faster to encode/write than PNG at 1080p
       await page.screenshot({ path: file, type: 'jpeg', quality: 82 });
       captured = i + 1;
       if (i % Math.max(1, Math.floor(fps)) === 0 || i === total - 1) {
@@ -163,7 +197,6 @@ async function main() {
   process.stdout.write(`ffmpeg encoding ${captured} frames…\n`);
   await run('ffmpeg', ffArgs);
 
-  // cleanup frames
   try {
     for (const f of fs.readdirSync(frameDir)) fs.unlinkSync(path.join(frameDir, f));
     fs.rmdirSync(frameDir);
