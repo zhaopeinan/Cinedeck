@@ -410,6 +410,29 @@ export function initDatabase(dbPath?: string): Database.Database {
     }
   }
 
+  // 造声工厂单人 TTS 生成记录（刷新可回看 + 任务中心）
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS voice_tts_jobs (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      text TEXT NOT NULL DEFAULT '',
+      voice_id TEXT,
+      voice_name TEXT,
+      model_id TEXT,
+      model_name TEXT,
+      language TEXT,
+      duration REAL,
+      status TEXT NOT NULL DEFAULT 'running',
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      finished_at TEXT
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_voice_tts_jobs_user ON voice_tts_jobs(user_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_voice_tts_jobs_status ON voice_tts_jobs(status);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_voice_tts_jobs_created ON voice_tts_jobs(created_at DESC);`);
+
   // Open platform API keys (external access to TTS / Avatar)
   db.exec(`
     CREATE TABLE IF NOT EXISTS open_api_keys (

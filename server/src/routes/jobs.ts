@@ -12,6 +12,7 @@ import {
   getExplainExportJob,
   requestCancelExplainExportJob,
 } from '../services/explainExportQueue';
+import { VoiceTtsJobService } from '../services/voiceTtsJobService';
 
 function getUserId(req: Request): string {
   return (req as any).user?.id || '';
@@ -23,6 +24,7 @@ export function createJobsRouter(
     dialogueJobs: DialogueJobService;
     moocJobs: MoocJobService;
     explainJobs?: ExplainJobService;
+    voiceTtsJobs?: VoiceTtsJobService;
   },
 ): Router {
   const router = Router();
@@ -107,6 +109,10 @@ export function createJobsRouter(
       if (!kind) {
         const ex = getExplainExportJob(rawId);
         if (ex && ex.userId === userId) kind = 'explain_export';
+      }
+      if (!kind && deps.voiceTtsJobs) {
+        const t = deps.voiceTtsJobs.getOwned(rawId, userId);
+        if (t) kind = 'voice_tts';
       }
     }
 
@@ -204,6 +210,25 @@ export function createJobsRouter(
             });
           }
           return res.json({ success: true, data: { id, kind, status: updated.status }, error: null });
+        }
+        case 'voice_tts': {
+          if (!deps.voiceTtsJobs) {
+            return res.status(400).json({
+              success: false,
+              data: null,
+              error: { code: 'JOB_NO_CANCEL', message: '造声任务取消不可用' },
+            });
+          }
+          const job = deps.voiceTtsJobs.getOwned(id, userId);
+          if (!job) {
+            return res.status(404).json({
+              success: false,
+              data: null,
+              error: { code: '404', message: '任务不存在' },
+            });
+          }
+          const updated = deps.voiceTtsJobs.updateStatus(id, { status: 'cancelled' });
+          return res.json({ success: true, data: { id, kind, status: updated?.status }, error: null });
         }
         default:
           return res.status(400).json({

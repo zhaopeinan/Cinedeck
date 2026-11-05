@@ -14,6 +14,7 @@ const KIND_LABEL: Record<string, string> = {
   tts_dubbing: '配音',
   transcribe: '转写',
   dialogue: '对话',
+  voice_tts: '造声',
   avatar: '数字人',
   compose: '绿幕叠底',
   project_avatar: '项目数字人',

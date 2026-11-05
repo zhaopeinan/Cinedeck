@@ -169,7 +169,11 @@ export const voiceboxApi = {
     language: string;
     instruct?: string;
     maxChunkChars?: number;
+    voiceName?: string;
+    modelName?: string;
   }) => apiClient.post<ApiResponse<any>>('/voicebox/generate', data, { timeout: 300000 }),
+  listTtsJobs: (limit = 40) =>
+    apiClient.get<ApiResponse<{ jobs: any[] }>>('/voicebox/tts-jobs', { params: { limit } }),
   getTaskStatus: (id: string) => apiClient.get<ApiResponse<any>>(`/voicebox/tasks/${id}`),
   getTaskResult: (id: string) => apiClient.get<ApiResponse<any>>(`/voicebox/tasks/${id}/result`),
   getTaskAudioUrl: (id: string) => withToken(`/api/v1/voicebox/tasks/${id}/audio`),
@@ -701,6 +705,7 @@ export type UnifiedJobKind =
   | 'tts_dubbing'
   | 'transcribe'
   | 'dialogue'
+  | 'voice_tts'
   | 'avatar'
   | 'compose'
   | 'project_avatar'

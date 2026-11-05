@@ -23,6 +23,7 @@ import {
   getExplainExportQueuePosition,
   listExplainExportJobsForUser,
 } from './explainExportQueue';
+import type { VoiceTtsJobService } from './voiceTtsJobService';
 
 export type JobKind =
   | 'tts_dubbing'
@@ -35,7 +36,8 @@ export type JobKind =
   | 'mooc'
   | 'hyperframe'
   | 'explain'
-  | 'explain_export';
+  | 'explain_export'
+  | 'voice_tts';
 
 export type UnifiedJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -116,6 +118,7 @@ export interface JobRegistryDeps {
   db: Database;
   projectService: ProjectService;
   videoComposer: VideoComposerService;
+  voiceTtsJobs?: VoiceTtsJobService;
 }
 
 export class JobRegistry {
@@ -133,6 +136,7 @@ export class JobRegistry {
     items.push(...this.fromMooc(userId));
     items.push(...this.fromHyperframe(userId));
     items.push(...this.fromDialogue(userId));
+    items.push(...this.fromVoiceTts(userId));
     items.push(...this.fromAvatar(userId));
     items.push(...this.fromCompose(userId));
     items.push(...this.fromExplain(userId));
@@ -331,6 +335,54 @@ export class JobRegistry {
         queuePosition: status === 'queued' ? queuePosAmong(allQueued, r.id) : null,
         createdAt: r.created_at,
         updatedAt: r.updated_at,
+        href: '/voice-factory',
+        cancellable: status === 'queued' || status === 'running',
+      };
+    });
+  }
+
+  private fromVoiceTts(userId: string): UnifiedJob[] {
+    const rows = this.deps.voiceTtsJobs?.listForUser(userId, 40)
+      || (this.deps.db.prepare(
+        `SELECT * FROM voice_tts_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 40`,
+      ).all(userId) as Array<{
+        id: string;
+        text: string;
+        voice_name: string | null;
+        model_name: string | null;
+        duration: number | null;
+        status: string;
+        error: string | null;
+        created_at: string;
+        updated_at: string;
+        finished_at: string | null;
+      }>);
+
+    const allQueued = this.deps.db
+      .prepare(`SELECT id, status, created_at FROM voice_tts_jobs WHERE status IN ('queued','running')`)
+      .all() as Array<{ id: string; status: string; created_at: string }>;
+
+    return rows.map((r: any) => {
+      const status = mapDbStatus(r.status);
+      const voice = r.voice_name || r.voiceName || '音色';
+      const preview = String(r.text || '').replace(/\s+/g, ' ').slice(0, 24);
+      const dur = r.duration != null ? `${Number(r.duration).toFixed(1)}s` : null;
+      return {
+        id: r.id,
+        kind: 'voice_tts' as const,
+        title: `造声 · ${voice}${preview ? ` · ${preview}${preview.length >= 24 ? '…' : ''}` : ''}`,
+        status,
+        progress: status === 'completed' ? 100 : status === 'running' ? 50 : status === 'queued' ? 5 : 100,
+        message: status === 'completed'
+          ? (dur ? `已完成 · ${dur}` : '已完成')
+          : status === 'failed' ? (r.error || '生成失败')
+            : status === 'running' ? 'Voicebox 合成中…'
+              : '排队中',
+        queuePosition: status === 'queued' ? queuePosAmong(allQueued, r.id) : null,
+        createdAt: r.created_at || r.createdAt,
+        updatedAt: r.updated_at || r.updatedAt,
+        startedAt: r.created_at || r.createdAt,
+        finishedAt: r.finished_at || r.finishedAt || null,
         href: '/voice-factory',
         cancellable: status === 'queued' || status === 'running',
       };

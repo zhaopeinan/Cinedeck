@@ -7,6 +7,7 @@ import { ensureVoiceboxRunningForAudio } from '../services/avatarWorker';
 import { DialogueJobService } from '../services/dialogueJobService';
 import { parseDialogueScript, validateCast } from '../services/dialogueScript';
 import { pumpDialogueQueue } from '../services/dialogueGenerator';
+import { VoiceTtsJobService } from '../services/voiceTtsJobService';
 
 type P = { id: string };
 
@@ -37,8 +38,16 @@ function contentDisposition(download: boolean, filename: string): string {
 export function createVoiceboxRouter(
   voicebox: VoiceboxAdapter,
   dialogueJobs?: DialogueJobService,
+  voiceTtsJobs?: VoiceTtsJobService,
 ): Router {
   const router = Router();
+
+  const mapVbStatus = (s: string): 'running' | 'completed' | 'failed' | 'cancelled' => {
+    if (s === 'succeeded' || s === 'completed' || s === 'success') return 'completed';
+    if (s === 'failed' || s === 'error') return 'failed';
+    if (s === 'cancelled' || s === 'canceled') return 'cancelled';
+    return 'running';
+  };
 
   // Voicebox 不可用时：用 503 + success:false，避免前端把空列表当成“真的没有音色”
   const unavailableResponse = (res: Response, message: string) => {
@@ -201,18 +210,71 @@ export function createVoiceboxRouter(
     }
   });
 
+  // 造声工厂：当前用户的 TTS 生成历史（刷新后仍在）
+  router.get('/tts-jobs', async (req: Request, res: Response) => {
+    if (!voiceTtsJobs) {
+      return res.json({ success: true, data: { jobs: [] }, error: null });
+    }
+    const userId = getUserId(req);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 40));
+    // 首次升级后本地为空时，从 Voicebox 历史回填近期完成项，避免刷新后「消失」
+    if (voiceTtsJobs.listForUser(userId, 1).length === 0) {
+      try {
+        const hist = await voicebox.listHistory({ limit: 30 });
+        for (const item of hist.items) {
+          if (String(item.status) !== 'completed' && String(item.status) !== 'succeeded') continue;
+          if (voiceTtsJobs.get(item.id)) continue;
+          voiceTtsJobs.create({
+            id: item.id,
+            userId,
+            text: item.text,
+            voiceId: item.profileId,
+            voiceName: item.profileName,
+            modelId: item.modelSize ? `qwen-tts-${item.modelSize}` : null,
+            modelName: item.engine && item.modelSize ? `${item.engine} ${item.modelSize}` : item.engine,
+            language: item.language,
+          });
+          voiceTtsJobs.updateStatus(item.id, {
+            status: 'completed',
+            duration: item.duration,
+            voice_name: item.profileName,
+            error: null,
+          });
+          if (item.createdAt) voiceTtsJobs.setTimestamps(item.id, item.createdAt, item.createdAt);
+        }
+      } catch { /* voicebox unavailable — empty list ok */ }
+    }
+    const jobs = voiceTtsJobs.listForUser(userId, limit).map((j) => voiceTtsJobs.publicRow(j));
+    res.json({ success: true, data: { jobs }, error: null });
+  });
+
   // 生成配音 / 造声工厂试听
   router.post('/generate', async (req: Request, res: Response) => {
     try {
       const b = req.body || {};
+      const text = String(b.text || '');
+      const voiceId = b.voiceId || b.voice_id;
+      const modelId = b.modelId || b.model_id;
       const task = await voicebox.generateDubbing({
-        text: b.text,
-        voiceId: b.voiceId || b.voice_id,
-        modelId: b.modelId || b.model_id,
+        text,
+        voiceId,
+        modelId,
         language: b.language || 'zh-CN',
         maxChunkChars: b.maxChunkChars ?? b.max_chunk_chars,
         instruct: b.instruct,
       });
+      if (voiceTtsJobs && task?.id) {
+        voiceTtsJobs.create({
+          id: task.id,
+          userId: getUserId(req),
+          text,
+          voiceId: voiceId ? String(voiceId) : null,
+          voiceName: b.voiceName || b.voice_name || null,
+          modelId: modelId ? String(modelId) : null,
+          modelName: b.modelName || b.model_name || null,
+          language: b.language || 'zh-CN',
+        });
+      }
       res.json({ success: true, data: task, error: null });
     } catch (error: any) {
       const status = /缺少/.test(error.message || '') ? 400 : 503;
@@ -224,6 +286,13 @@ export function createVoiceboxRouter(
   router.get('/tasks/:id', async (req: Request<P>, res: Response) => {
     try {
       const task = await voicebox.getTaskStatus(req.params.id);
+      if (voiceTtsJobs && task?.id) {
+        const mapped = mapVbStatus(String(task.status || ''));
+        voiceTtsJobs.updateStatus(task.id, {
+          status: mapped,
+          error: mapped === 'failed' ? (task.error || '生成失败') : null,
+        });
+      }
       res.json({ success: true, data: task, error: null });
     } catch {
       res.json({ success: true, data: { status: 'failed', error: 'Voicebox服务不可用' }, error: null });
@@ -234,6 +303,15 @@ export function createVoiceboxRouter(
   router.get('/tasks/:id/result', async (req: Request<P>, res: Response) => {
     try {
       const result = await voicebox.getTaskResult(req.params.id);
+      if (voiceTtsJobs) {
+        voiceTtsJobs.updateStatus(req.params.id, {
+          status: 'completed',
+          duration: result.duration || 0,
+          text: result.text || undefined,
+          voice_name: result.profileName || undefined,
+          error: null,
+        });
+      }
       res.json({
         success: true,
         data: { ...result, audioUrl: `/api/v1/voicebox/tasks/${req.params.id}/audio` },
@@ -330,10 +408,11 @@ export function createVoiceboxRouter(
   router.post('/tasks/:id/cancel', async (req: Request<P>, res: Response) => {
     try {
       await voicebox.cancelTask(req.params.id);
-      res.json({ success: true, data: null, error: null });
-    } catch {
-      res.json({ success: true, data: null, error: null });
+    } catch { /* ignore remote cancel errors */ }
+    if (voiceTtsJobs) {
+      voiceTtsJobs.updateStatus(req.params.id, { status: 'cancelled' });
     }
+    res.json({ success: true, data: null, error: null });
   });
 
   // ── 多人对话（造声工厂）────────────────────────────────────────────

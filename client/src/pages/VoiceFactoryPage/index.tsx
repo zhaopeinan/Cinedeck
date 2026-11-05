@@ -142,6 +142,34 @@ const VoiceFactoryPage: React.FC = () => {
     }
   }, []);
 
+  const formatHistoryTime = (iso: string) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString();
+  };
+
+  const loadHistory = useCallback(async () => {
+    try {
+      const res = await voiceboxApi.listTtsJobs(40);
+      const jobs = res.data.data?.jobs || [];
+      setHistory(
+        jobs
+          .filter((j: any) => j.status === 'completed' && j.hasAudio !== false)
+          .map((j: any) => ({
+            id: j.id,
+            text: j.text || '',
+            voiceName: j.voiceName || j.voiceId || '音色',
+            modelName: j.modelName || j.modelId || '',
+            duration: Number(j.duration || 0),
+            createdAt: formatHistoryTime(j.createdAt || j.finishedAt || ''),
+          })),
+      );
+    } catch {
+      /* keep local history if endpoint unavailable */
+    }
+  }, []);
+
   const previewScript = useCallback(async (script: string) => {
     const raw = script.trim();
     if (!raw) {
@@ -173,6 +201,7 @@ const VoiceFactoryPage: React.FC = () => {
 
   useEffect(() => {
     document.title = 'Cinedeck · 造声工厂';
+    void loadHistory();
     voiceboxApi.healthCheck().then((res) => {
       const ok = res.data?.data?.available ?? false;
       setVoiceboxAvailable(ok);
@@ -191,7 +220,7 @@ const VoiceFactoryPage: React.FC = () => {
       audioRef.current?.pause();
       sampleRef.current?.pause();
     };
-  }, [loadVoices, loadModels, loadDialogueJobs]);
+  }, [loadVoices, loadModels, loadDialogueJobs, loadHistory]);
 
   // 剧本变更时防抖预览
   useEffect(() => {
@@ -302,6 +331,8 @@ const VoiceFactoryPage: React.FC = () => {
         modelId: selectedModelId,
         language,
         instruct: instruct.trim() || undefined,
+        voiceName: selectedVoice?.name || selectedVoiceId,
+        modelName: selectedModel?.name || selectedModelId,
       });
       const taskId = res.data.data?.id;
       if (!taskId) throw new Error('未返回任务 ID');
@@ -320,12 +351,12 @@ const VoiceFactoryPage: React.FC = () => {
           }
           const st = await voiceboxApi.getTaskStatus(taskId);
           const status = st.data.data?.status;
-          if (status === 'processing') {
+          if (status === 'processing' || status === 'queued' || status === 'running') {
             setGenStatus('合成中，请稍候…');
             return;
           }
           stopPolling();
-          if (status === 'succeeded') {
+          if (status === 'succeeded' || status === 'completed' || status === 'success') {
             const result = await voiceboxApi.getTaskResult(taskId);
             const duration = Number(result.data.data?.duration || 0);
             setHistory((prev) => [{
@@ -334,12 +365,13 @@ const VoiceFactoryPage: React.FC = () => {
               voiceName: selectedVoice?.name || selectedVoiceId,
               modelName: selectedModel?.name || selectedModelId,
               duration,
-              createdAt: new Date().toLocaleTimeString(),
-            }, ...prev].slice(0, 12));
+              createdAt: new Date().toLocaleString(),
+            }, ...prev.filter((h) => h.id !== taskId)].slice(0, 40));
             setGenerating(false);
             setGenStatus('生成完成');
             message.success(`生成完成${duration ? `，时长 ${duration.toFixed(1)}s` : ''}`);
             playTask(taskId);
+            void loadHistory();
           } else {
             setGenerating(false);
             setGenStatus('');
@@ -597,7 +629,7 @@ const VoiceFactoryPage: React.FC = () => {
 
           <Card title="4. 生成结果" style={{ marginTop: 24 }}>
             {history.length === 0 ? (
-              <Paragraph type="secondary" style={{ margin: 0 }}>生成后可在此播放和下载。</Paragraph>
+              <Paragraph type="secondary" style={{ margin: 0 }}>生成后可在此播放和下载；记录会持久保存，刷新后仍可查看。</Paragraph>
             ) : (
               <List
                 dataSource={history}

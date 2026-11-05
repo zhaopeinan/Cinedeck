@@ -508,6 +508,48 @@ export class VoiceboxAdapter {
     };
   }
 
+  /** List recent Voicebox generation history. */
+  async listHistory(opts?: { limit?: number; offset?: number; profileId?: string }): Promise<{
+    items: Array<{
+      id: string;
+      text: string;
+      profileId: string;
+      profileName: string;
+      modelSize: string | null;
+      engine: string | null;
+      duration: number;
+      status: string;
+      language: string;
+      createdAt: string;
+    }>;
+    total: number;
+  }> {
+    const res = await axios.get(`${this.baseUrl}/history`, {
+      params: {
+        limit: opts?.limit ?? 40,
+        offset: opts?.offset ?? 0,
+        profile_id: opts?.profileId || undefined,
+      },
+      timeout: 15000,
+    });
+    const items = Array.isArray(res.data?.items) ? res.data.items : [];
+    return {
+      total: Number(res.data?.total || items.length),
+      items: items.map((g: any) => ({
+        id: String(g.id),
+        text: String(g.text || ''),
+        profileId: String(g.profile_id || ''),
+        profileName: String(g.profile_name || ''),
+        modelSize: g.model_size != null ? String(g.model_size) : null,
+        engine: g.engine != null ? String(g.engine) : null,
+        duration: Number(g.duration || 0),
+        status: String(g.status || 'completed'),
+        language: String(g.language || 'zh'),
+        createdAt: String(g.created_at || ''),
+      })),
+    };
+  }
+
   /**
    * Transcribe an audio file via Voicebox Whisper.
    * `model` is Voicebox size: base | small | medium | large | turbo

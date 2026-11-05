@@ -50,6 +50,7 @@ import { ExplainGenSettingsService } from './services/explainGenSettings';
 import { initExplainPipeline } from './services/explainWorker';
 import { createExplainRouter } from './routes/explain';
 import { initExplainExportQueue } from './services/explainExportQueue';
+import { VoiceTtsJobService } from './services/voiceTtsJobService';
 
 const PORT = process.env.PORT || 3001;
 
@@ -91,6 +92,7 @@ async function main() {
   const transcribeJobs = new TranscribeJobService(db);
   const hyperframeJobs = new HyperframeJobService(db);
   const dialogueJobs = new DialogueJobService(db);
+  const voiceTtsJobs = new VoiceTtsJobService(db);
   const explainJobs = new ExplainJobService(db);
   const explainGenSettings = new ExplainGenSettingsService(db);
   const openApiKeys = new OpenApiKeyService(db);
@@ -123,7 +125,7 @@ async function main() {
 
   // Protected routes (require login)
   app.use('/api/v1/projects', authRequired, createProjectRouter(projectService, pptParser));
-  app.use('/api/v1/voicebox', authRequired, createVoiceboxRouter(voicebox, dialogueJobs));
+  app.use('/api/v1/voicebox', authRequired, createVoiceboxRouter(voicebox, dialogueJobs, voiceTtsJobs));
   app.use('/api/v1/projects', authRequired, createVideoRouter(projectService, videoComposer));
   app.use('/api/v1/projects', authRequired, createDubbingRouter(projectService, voicebox, videoComposer, systemSettings));
   app.use('/api/v1/projects', authRequired, createOpenCutRouter(projectService, openCutAdapter, videoComposer));
@@ -169,8 +171,8 @@ async function main() {
   app.use('/api/v1/system', authRequired, createSystemRouter());
 
   // Unified job list / task center
-  const jobRegistry = new JobRegistry({ db, projectService, videoComposer });
-  app.use('/api/v1/jobs', authRequired, createJobsRouter(jobRegistry, { dialogueJobs, moocJobs, explainJobs }));
+  const jobRegistry = new JobRegistry({ db, projectService, videoComposer, voiceTtsJobs });
+  app.use('/api/v1/jobs', authRequired, createJobsRouter(jobRegistry, { dialogueJobs, moocJobs, explainJobs, voiceTtsJobs }));
 
   // System settings — admin only
   app.use('/api/v1/system-settings', authRequired, adminRequired, createSystemSettingsRouter(systemSettings));
