@@ -295,6 +295,17 @@ const MoocPage: React.FC = () => {
     setDetailJob(null);
   }, []);
 
+  useEffect(() => {
+    if (!explainPreview?.fullscreen) return undefined;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setExplainPreview((prev) => (prev ? { ...prev, fullscreen: false } : prev));
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [explainPreview?.fullscreen]);
+
   const [retryingExplainId, setRetryingExplainId] = useState<string | null>(null);
 
   const refreshJobs = useCallback(async () => {
