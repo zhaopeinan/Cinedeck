@@ -123,7 +123,8 @@ export function buildMoocProgressDetail(opts: {
     .map((s) => {
       const log = logById.get(s.id);
       const done = checkpointAtLeast(checkpoint, s.checkpoint)
-        || job.status === 'success' && s.checkpoint === 'composed';
+        || (job.status === 'success' && s.checkpoint === 'composed')
+        || log?.status === 'done';
       const isCurrent = s.stages.includes(job.stage)
         && (job.status === 'running' || job.status === 'queued');
       let status: 'pending' | 'running' | 'done' | 'failed' | 'skipped' = 'pending';
@@ -198,12 +199,28 @@ export function buildMoocProgressDetail(opts: {
     // Enrich explain_gen step summary
     const genStep = steps.find((x) => x.id === 'explain_gen');
     if (genStep) {
-      genStep.summary = `完成 ${stats.completed}/${stats.total}`
-        + (stats.running ? ` · 进行中 ${stats.running}` : '')
-        + (stats.queued ? ` · 排队 ${stats.queued}` : '')
-        + (stats.failed ? ` · 失败 ${stats.failed}` : '')
-        + (stats.retrying ? ` · 重试 ${stats.retrying}` : '')
-        + (conc ? ` · 并发 ${conc}` : '');
+      const msg = String(job.message || '');
+      if (/^导出/.test(msg)) {
+        genStep.summary = `HTML ${stats.completed}/${stats.total} · ${msg}`;
+      } else {
+        genStep.summary = `完成 ${stats.completed}/${stats.total}`
+          + (stats.running ? ` · 进行中 ${stats.running}` : '')
+          + (stats.queued ? ` · 排队 ${stats.queued}` : '')
+          + (stats.failed ? ` · 失败 ${stats.failed}` : '')
+          + (stats.retrying ? ` · 重试 ${stats.retrying}` : '')
+          + (conc ? ` · 并发 ${conc}` : '');
+      }
+    }
+  }
+
+  // If a later step is running/done, mark earlier pending steps as done (resume jobs
+  // may lack stageLog for early stages even though checkpoint advanced).
+  const activeIdx = steps.findIndex((s) => s.status === 'running' || s.status === 'failed');
+  const lastDoneIdx = steps.reduce((acc, s, i) => (s.status === 'done' || s.status === 'skipped' ? i : acc), -1);
+  const forceDoneUntil = Math.max(activeIdx < 0 ? -1 : activeIdx - 1, lastDoneIdx);
+  if (forceDoneUntil >= 0) {
+    for (let i = 0; i <= forceDoneUntil; i++) {
+      if (steps[i].status === 'pending') steps[i].status = 'done';
     }
   }
 
@@ -228,8 +245,18 @@ function buildProgressSummary(job: MoocJobRow, steps: any[], explain: any): stri
   if (job.status === 'queued') return '排队等待中';
 
   const current = steps.find((s) => s.status === 'running');
+  const msg = String(job.message || '');
+  // Export / avatar-on-insert phases after HTML children finish
+  if (/^导出/.test(msg) || /叠数字人|知识点插片/.test(msg) || /合成讲解视频/.test(msg)) {
+    return msg;
+  }
   if (explain && (job.stage === 'explain_gen' || job.stage === 'explain_points')) {
     const s = explain.stats;
+    if (s.completed >= s.total && s.total > 0 && !s.running && !s.queued) {
+      return msg && !/^讲解动画/.test(msg)
+        ? msg
+        : `讲解 HTML 已完成 ${s.completed}/${s.total}，正在导出插片…`;
+    }
     const parts = [
       `讲解动画 ${s.completed}/${s.total} 完成`,
     ];
