@@ -509,6 +509,8 @@ export class VideoComposerService {
       return { outputPath, chromaKey, chromaSimilarity, duration, cached: true };
     }
 
+    // composeSlideWithAvatar writes pcm_s16le (needs mkv); remux to aac/mp4 for browser.
+    const rawMkv = path.join(previewDir, `p${opts.pageIndex}${tag}.mkv`);
     const encoder = await detectVideoEncoder();
     await this.composeSlideWithAvatar({
       projectId: opts.projectId,
@@ -517,12 +519,20 @@ export class VideoComposerService {
       audioPath: slide.dubbing_audio_path,
       duration,
       layoutJson: slide.avatar_layout_json || project.avatar_layout_json,
-      outputPath,
+      outputPath: rawMkv,
       encoder,
       jobKind: 'compose',
       chromaKey,
       chromaSimilarity,
     });
+    await this.runCmd(opts.projectId, 'compose', 'ffmpeg', [
+      '-y', '-i', rawMkv,
+      '-c:v', 'copy',
+      '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '1',
+      '-movflags', '+faststart',
+      outputPath,
+    ], { timeout: 120000 });
+    try { fs.unlinkSync(rawMkv); } catch { /* ignore */ }
     return { outputPath, chromaKey, chromaSimilarity, duration, cached: false };
   }
 
