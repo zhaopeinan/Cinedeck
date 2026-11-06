@@ -22,6 +22,8 @@ export async function attachAvatarsToExplainInserts(opts: {
   chromaSimilarity: number;
   isCancelled: () => boolean;
   onProgress?: (message: string, progress: number) => void;
+  /** Rebuild even if insert_*.mp4 already exists (needed after re-export repair). */
+  force?: boolean;
 }): Promise<{ inserts: ExplainInsertClip[]; avatarApplied: number; avatarFailed: number }> {
   const inserts = opts.inserts.slice();
   if (!inserts.length) return { inserts, avatarApplied: 0, avatarFailed: 0 };
@@ -78,11 +80,16 @@ export async function attachAvatarsToExplainInserts(opts: {
       const avatarOut = path.join(outDir, `avatar_${tag}.mp4`);
       const composited = path.join(outDir, `insert_${tag}.mp4`);
 
-      // Resume: already composited
-      if (fs.existsSync(composited)) {
+      // Resume: already composited (unless force rebuild after re-export)
+      if (!opts.force && fs.existsSync(composited)) {
         inserts[i] = { ...clip, videoPath: composited };
         avatarApplied += 1;
         continue;
+      }
+      if (opts.force) {
+        for (const stale of [composited, avatarOut]) {
+          try { if (fs.existsSync(stale)) fs.unlinkSync(stale); } catch { /* ignore */ }
+        }
       }
 
       const audioPath = (clip.audioPath && fs.existsSync(clip.audioPath))

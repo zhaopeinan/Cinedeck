@@ -323,6 +323,7 @@ export async function repairExplainChildForMooc(opts: {
             db: opts.db,
             chromaSimilarity: cfg.chromaSimilarity ?? 0.28,
             isCancelled: () => false,
+            force: true,
           });
           if (av.inserts?.[0]) clip = av.inserts[0];
         } catch (err: any) {
