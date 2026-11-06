@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Alert, Button, Card, Checkbox, Col, Divider, Form, InputNumber, Modal, Progress, Radio, Row,
-  Select, Slider, Space, Spin, Switch, Table, Tag, Tooltip, Typography, Upload, message,
+  Alert, Button, Card, Checkbox, Col, Divider, Drawer, Form, InputNumber, Modal, Progress, Radio, Row,
+  Select, Slider, Space, Spin, Steps, Switch, Table, Tag, Tooltip, Typography, Upload, message,
 } from 'antd';
 import {
   CloudUploadOutlined, DeleteOutlined, DownloadOutlined, ExclamationCircleOutlined, PlayCircleOutlined, PlusOutlined,
-  ReloadOutlined, RocketOutlined, StopOutlined,
+  ProfileOutlined, ReloadOutlined, RocketOutlined, StopOutlined,
 } from '@ant-design/icons';
 import { moocApi, videoApi, voiceboxApi } from '../../api';
 import AvatarPipEditor from '../../components/AvatarPipEditor';
@@ -129,6 +129,10 @@ const MoocPage: React.FC = () => {
   const [errorModal, setErrorModal] = useState<{ open: boolean; title: string; content: string }>({
     open: false, title: '', content: '',
   });
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailJob, setDetailJob] = useState<any | null>(null);
+  const detailIdRef = useRef<string | null>(null);
   const pollRef = useRef<number | null>(null);
   const previewReqRef = useRef(0);
 
@@ -253,16 +257,50 @@ const MoocPage: React.FC = () => {
     }
   }, [avatarFirstPageOnly]);
 
+  const loadJobDetail = useCallback(async (id: string, opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setDetailLoading(true);
+    try {
+      const res = await moocApi.getJob(id);
+      const data = res.data.data;
+      if (detailIdRef.current === id) setDetailJob(data);
+      return data;
+    } catch (e: any) {
+      if (!opts?.silent) {
+        message.error(e.response?.data?.error?.message || '加载进度详情失败');
+      }
+      return null;
+    } finally {
+      if (!opts?.silent) setDetailLoading(false);
+    }
+  }, []);
+
+  const openJobDetail = useCallback(async (id: string) => {
+    detailIdRef.current = id;
+    setDetailOpen(true);
+    setDetailJob(null);
+    await loadJobDetail(id);
+  }, [loadJobDetail]);
+
+  const closeJobDetail = useCallback(() => {
+    detailIdRef.current = null;
+    setDetailOpen(false);
+    setDetailJob(null);
+  }, []);
+
   const refreshJobs = useCallback(async () => {
     try {
       const res = await moocApi.listJobs();
       const data = res.data.data;
       setJobs(data.jobs || []);
       setQueueInfo(data.queue || {});
+      const openId = detailIdRef.current;
+      if (openId && detailOpen) {
+        void loadJobDetail(openId, { silent: true });
+      }
     } catch {
       // ignore polling errors
     }
-  }, []);
+  }, [detailOpen, loadJobDetail]);
 
   const loadVoiceOptions = useCallback(async (opts?: { silent?: boolean }) => {
     try {
@@ -462,14 +500,30 @@ const MoocPage: React.FC = () => {
     {
       title: '进度',
       key: 'progress',
-      width: 120,
+      width: 148,
       render: (_: any, r: any) => {
         const stageText = r.status === 'failed'
           ? (r.failedStageLabel || STAGE_LABEL[r.failedStage] || STAGE_LABEL[r.stage] || r.stage)
           : (r.stageLabel || STAGE_LABEL[r.stage] || r.stage);
+        const summary = r.progressSummary || '';
         return (
-          <div style={{ width: 108 }}>
+          <div style={{ width: 136 }}>
             <div style={{ fontSize: 12, marginBottom: 2 }}>{stageText}</div>
+            {summary && summary !== stageText && (
+              <Tooltip title={summary}>
+                <div style={{
+                  fontSize: 11,
+                  color: 'rgba(0,0,0,0.45)',
+                  marginBottom: 2,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+                >
+                  {truncateText(summary, 22)}
+                </div>
+              </Tooltip>
+            )}
             {(r.retryCount > 0 || (r.maxRetries != null && r.status !== 'success')) && (
               <div style={{ fontSize: 11, color: 'rgba(0,0,0,0.45)', marginBottom: 2 }}>
                 重试 {r.retryCount || 0}/{r.maxRetries ?? 5}
@@ -501,7 +555,11 @@ const MoocPage: React.FC = () => {
           estimateQueuePosition(jobs, r.id),
           msg,
         );
-        const text = r.error || hint || msg || '-';
+        const explainHint = r.explainStats
+          ? `讲解 ${r.explainStats.completed || 0}/${r.explainStats.total || 0}`
+            + (r.explainEtaLabel ? ` · 预计剩余 ${r.explainEtaLabel}` : '')
+          : '';
+        const text = r.error || r.progressSummary || explainHint || hint || msg || '-';
         const short = truncateText(text.replace(/\n/g, ' '), 56);
         const isFail = r.status === 'failed';
         return (
@@ -515,6 +573,15 @@ const MoocPage: React.FC = () => {
                 {short}
               </Text>
             </Tooltip>
+            <Button
+              type="link"
+              size="small"
+              icon={<ProfileOutlined />}
+              style={{ padding: 0, height: 'auto' }}
+              onClick={() => void openJobDetail(r.id)}
+            >
+              进度
+            </Button>
             {isFail && r.error && (
               <Button
                 type="link"
@@ -527,7 +594,7 @@ const MoocPage: React.FC = () => {
                   content: r.error,
                 })}
               >
-                详情
+                错误
               </Button>
             )}
           </Space>
@@ -1139,6 +1206,182 @@ const MoocPage: React.FC = () => {
           {errorModal.content}
         </pre>
       </Modal>
+
+      <Drawer
+        title={detailJob ? `进度详情 · ${truncateText(detailJob.name || detailJob.fileName || '', 28)}` : '进度详情'}
+        open={detailOpen}
+        onClose={closeJobDetail}
+        width={560}
+        destroyOnClose
+        extra={
+          detailJob?.id ? (
+            <Button size="small" icon={<ReloadOutlined />} onClick={() => void loadJobDetail(detailJob.id)}>
+              刷新
+            </Button>
+          ) : null
+        }
+      >
+        {detailLoading && !detailJob ? (
+          <div style={{ textAlign: 'center', padding: 48 }}><Spin /></div>
+        ) : !detailJob ? (
+          <Text type="secondary">暂无数据</Text>
+        ) : (
+          <Space direction="vertical" size={20} style={{ width: '100%' }}>
+            <div>
+              <Space wrap size={[8, 8]}>
+                <Tag color={STATUS_COLOR[detailJob.status] || 'default'}>
+                  {STATUS_LABEL[detailJob.status] || detailJob.status}
+                </Tag>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {detailJob.stageLabel || STAGE_LABEL[detailJob.stage] || detailJob.stage}
+                </Text>
+                {detailJob.elapsedLabel && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>已用 {detailJob.elapsedLabel}</Text>
+                )}
+                {(detailJob.status === 'running' || detailJob.status === 'queued') && (
+                  <Progress
+                    percent={detailJob.progress || 0}
+                    size="small"
+                    style={{ width: 120, margin: 0 }}
+                    status={detailJob.status === 'queued' ? 'normal' : 'active'}
+                  />
+                )}
+              </Space>
+              {detailJob.progressSummary && (
+                <div style={{ marginTop: 8 }}>
+                  <Text>{detailJob.progressSummary}</Text>
+                </div>
+              )}
+            </div>
+
+            <div>
+              <Title level={5} style={{ marginTop: 0, marginBottom: 12 }}>流水线</Title>
+              <Steps
+                direction="vertical"
+                size="small"
+                current={(detailJob.pipeline || []).findIndex((s: any) => s.status === 'running')}
+                items={(detailJob.pipeline || []).map((s: any) => {
+                  const statusMap: Record<string, 'wait' | 'process' | 'finish' | 'error'> = {
+                    pending: 'wait',
+                    running: 'process',
+                    done: 'finish',
+                    failed: 'error',
+                    skipped: 'finish',
+                  };
+                  const bits = [
+                    s.status === 'skipped' ? '已跳过' : null,
+                    s.durationLabel || null,
+                    s.summary || null,
+                  ].filter(Boolean);
+                  return {
+                    title: s.label,
+                    status: statusMap[s.status] || 'wait',
+                    description: bits.length ? (
+                      <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>
+                        {bits.join(' · ')}
+                      </span>
+                    ) : undefined,
+                  };
+                })}
+              />
+            </div>
+
+            {detailJob.explain && (
+              <div>
+                <Title level={5} style={{ marginTop: 0, marginBottom: 8 }}>知识点讲解</Title>
+                <Space wrap size={[8, 8]} style={{ marginBottom: 12 }}>
+                  <Tag>
+                    完成 {detailJob.explain.stats?.completed || 0}/{detailJob.explain.stats?.total || 0}
+                  </Tag>
+                  {!!detailJob.explain.stats?.running && (
+                    <Tag color="processing">进行中 {detailJob.explain.stats.running}</Tag>
+                  )}
+                  {!!detailJob.explain.stats?.queued && (
+                    <Tag>排队 {detailJob.explain.stats.queued}</Tag>
+                  )}
+                  {!!detailJob.explain.stats?.failed && (
+                    <Tag color="error">失败 {detailJob.explain.stats.failed}</Tag>
+                  )}
+                  {!!detailJob.explain.stats?.retrying && (
+                    <Tag color="warning">重试 {detailJob.explain.stats.retrying}</Tag>
+                  )}
+                  {detailJob.explain.concurrency != null && (
+                    <Tag>并发 {detailJob.explain.concurrency}</Tag>
+                  )}
+                  {detailJob.explain.avgDoneLabel && (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      均时 {detailJob.explain.avgDoneLabel}
+                    </Text>
+                  )}
+                  {detailJob.explain.etaLabel && (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      预计剩余 {detailJob.explain.etaLabel}
+                    </Text>
+                  )}
+                </Space>
+                <Table
+                  rowKey="id"
+                  size="small"
+                  pagination={false}
+                  dataSource={detailJob.explain.children || []}
+                  locale={{ emptyText: '暂无子任务' }}
+                  columns={[
+                    {
+                      title: '知识点',
+                      dataIndex: 'title',
+                      ellipsis: true,
+                      render: (t: string, row: any) => (
+                        <Tooltip title={row.name || t}>
+                          <span>{t || '-'}</span>
+                        </Tooltip>
+                      ),
+                    },
+                    {
+                      title: '状态',
+                      dataIndex: 'status',
+                      width: 88,
+                      render: (s: string, row: any) => (
+                        <Tag
+                          color={
+                            s === 'completed' ? 'success'
+                              : s === 'running' ? 'processing'
+                                : s === 'failed' || s === 'cancelled' ? 'error'
+                                  : 'default'
+                          }
+                          style={{ margin: 0 }}
+                        >
+                          {s === 'completed' ? '完成'
+                            : s === 'running' ? '进行中'
+                              : s === 'queued' ? (row.message?.includes('自动重试') ? '重试中' : '排队')
+                                : s === 'failed' ? '失败'
+                                  : s === 'cancelled' ? '取消'
+                                    : s}
+                        </Tag>
+                      ),
+                    },
+                    {
+                      title: '进度',
+                      width: 72,
+                      render: (_: any, row: any) => (
+                        row.status === 'running' || row.status === 'queued'
+                          ? `${row.progress || 0}%`
+                          : (row.durationLabel || '-')
+                      ),
+                    },
+                    {
+                      title: '阶段',
+                      dataIndex: 'stageLabel',
+                      width: 100,
+                      ellipsis: true,
+                      render: (t: string, row: any) => t || row.stage || '-',
+                    },
+                  ]}
+                />
+              </div>
+            )}
+          </Space>
+        )}
+      </Drawer>
     </div>
   );
 };

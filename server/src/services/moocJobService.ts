@@ -85,6 +85,16 @@ export interface MoocJobConfig {
   explainBatchId?: string | null;
   /** 成功插入段数 / 跳过说明（运行时写入） */
   explainInsertSummary?: string | null;
+  /** 各流水线阶段起止时间（运行时写入，供进度详情） */
+  stageLog?: Array<{
+    id: string;
+    label?: string;
+    status?: string;
+    startedAt?: string | null;
+    finishedAt?: string | null;
+    durationSec?: number | null;
+    summary?: string | null;
+  }>;
 }
 
 export interface MoocJobRow {

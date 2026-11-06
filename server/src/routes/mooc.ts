@@ -8,6 +8,9 @@ import { clampChromaSimilarity } from '../services/avatarComposeService';
 import { pumpMoocQueue, requestMoocJobCancel } from '../services/moocPipelineWorker';
 import { ProjectService } from '../services/projectService';
 import { PptParserService } from '../services/pptParser';
+import { buildMoocProgressDetail } from '../services/moocProgressDetail';
+import type { ExplainBatchService } from '../services/explainBatchService';
+import type { ExplainJobService } from '../services/explainJobService';
 
 const PREVIEW_DIR = path.join(getMoocUploadDir(), 'previews');
 fs.mkdirSync(PREVIEW_DIR, { recursive: true });
@@ -24,7 +27,15 @@ function getUserId(req: Request): string {
   return (req as any).user?.id || '';
 }
 
-function serializeJob(job: any, projectService?: ProjectService) {
+function serializeJob(
+  job: any,
+  projectService?: ProjectService,
+  extras?: {
+    explainBatches?: ExplainBatchService | null;
+    explainJobs?: ExplainJobService | null;
+    detail?: boolean;
+  },
+) {
   let config: any = {};
   try { config = JSON.parse(job.config_json || '{}'); } catch { /* ignore */ }
   // Don't leak absolute server paths for photo
@@ -50,7 +61,7 @@ function serializeJob(job: any, projectService?: ProjectService) {
   }
 
   const failedStage = job.failed_stage || (job.status === 'failed' ? job.stage : null);
-  return {
+  const base: any = {
     id: job.id,
     userId: job.user_id,
     projectId: job.project_id,
@@ -84,14 +95,45 @@ function serializeJob(job: any, projectService?: ProjectService) {
     startedAt: job.started_at,
     finishedAt: job.finished_at,
   };
+
+  if (projectService) {
+    try {
+      const detail = buildMoocProgressDetail({
+        job,
+        config: { ...config },
+        projectService,
+        explainBatches: extras?.explainBatches,
+        explainJobs: extras?.explainJobs,
+        includeChildren: !!extras?.detail,
+      });
+      base.progressSummary = detail.progressSummary;
+      base.elapsedLabel = detail.elapsedLabel;
+      base.elapsedSec = detail.elapsedSec;
+      if (extras?.detail) {
+        base.pipeline = detail.pipeline;
+        base.explain = detail.explain;
+      } else if (detail.explain?.stats) {
+        base.explainStats = detail.explain.stats;
+        base.explainEtaLabel = detail.explain.etaLabel;
+        base.explainConcurrency = detail.explain.concurrency;
+      }
+    } catch (err: any) {
+      console.warn('[MOOC] progress detail failed:', err?.message || err);
+    }
+  }
+
+  return base;
 }
 
 export function createMoocRouter(
   moocJobs: MoocJobService,
   projectService: ProjectService,
   pptParser: PptParserService,
+  explainBatches?: ExplainBatchService,
+  explainJobs?: ExplainJobService,
 ): Router {
   const router = Router();
+  const progressExtras = { explainBatches, explainJobs };
 
   /**
    * Upload PPTX and render real slide images for layout preview.
@@ -215,7 +257,7 @@ export function createMoocRouter(
     res.json({
       success: true,
       data: {
-        jobs: jobs.map((j) => serializeJob(j, projectService)),
+        jobs: jobs.map((j) => serializeJob(j, projectService, progressExtras)),
         queue: {
           hasRunning: moocJobs.hasRunning(),
           queuedCount: jobs.filter((j) => j.status === 'queued').length,
@@ -225,14 +267,18 @@ export function createMoocRouter(
     });
   });
 
-  // Get single job
+  // Get single job (full pipeline + explain children)
   router.get('/jobs/:id', (req: Request, res: Response) => {
     const userId = getUserId(req);
     const job = moocJobs.getJob(String(req.params.id));
     if (!job || job.user_id !== userId) {
       return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     }
-    res.json({ success: true, data: serializeJob(job, projectService), error: null });
+    res.json({
+      success: true,
+      data: serializeJob(job, projectService, { ...progressExtras, detail: true }),
+      error: null,
+    });
   });
 
   // Download original uploaded PPTX
@@ -431,7 +477,7 @@ export function createMoocRouter(
       // Kick serial queue
       pumpMoocQueue();
 
-      res.json({ success: true, data: serializeJob(job, projectService), error: null });
+      res.json({ success: true, data: serializeJob(job, projectService, progressExtras), error: null });
     } catch (error: any) {
       res.status(500).json({
         success: false, data: null,
@@ -449,14 +495,14 @@ export function createMoocRouter(
     }
     if (job.status === 'queued') {
       const updated = moocJobs.cancelJob(job.id, userId);
-      return res.json({ success: true, data: serializeJob(updated, projectService), error: null });
+      return res.json({ success: true, data: serializeJob(updated, projectService, progressExtras), error: null });
     }
     if (job.status === 'running') {
       requestMoocJobCancel(job.id);
       const updated = moocJobs.getJob(job.id);
-      return res.json({ success: true, data: serializeJob(updated, projectService), error: null });
+      return res.json({ success: true, data: serializeJob(updated, projectService, progressExtras), error: null });
     }
-    res.json({ success: true, data: serializeJob(job, projectService), error: null });
+    res.json({ success: true, data: serializeJob(job, projectService, progressExtras), error: null });
   });
 
   /**
@@ -501,7 +547,7 @@ export function createMoocRouter(
     pumpMoocQueue();
     res.json({
       success: true,
-      data: { ...serializeJob(updated, projectService), resume: wantResume },
+      data: { ...serializeJob(updated, projectService, progressExtras), resume: wantResume },
       error: null,
     });
   });

@@ -28,6 +28,7 @@ import type { ExplainBatchService } from './explainBatchService';
 import type { ExplainJobService } from './explainJobService';
 import { runMoocExplainInsert, type ExplainInsertClip } from './moocExplainBridge';
 import { attachAvatarsToExplainInserts } from './moocExplainAvatar';
+import { recordMoocStageEvent } from './moocProgressDetail';
 
 export interface MoocPipelineDeps {
   db: Database.Database;
@@ -144,14 +145,39 @@ async function runMoocJob(job: MoocJobRow) {
     }
   }
 
+  const CHECKPOINT_STAGE: Partial<Record<MoocCheckpoint, string>> = {
+    created: 'creating',
+    parsed: 'parsing',
+    scripted: 'script',
+    dubbed: 'dubbing',
+    avatar: 'avatar',
+    explain_points: 'explain_points',
+    explain_ready: 'explain_gen',
+    composed: 'compose',
+  };
+
+  const beginStage = (stageId: string) => {
+    recordMoocStageEvent(d.moocJobs, job.id, stageId, 'start');
+  };
+
   const setProgress = (stage: MoocJobStage, progress: number, message: string) => {
     currentStage = stage;
     d.moocJobs.updateJob(job.id, { stage, progress, message });
   };
 
-  const markCheckpoint = (cp: MoocCheckpoint, progress: number, message: string) => {
+  const markCheckpoint = (
+    cp: MoocCheckpoint,
+    progress: number,
+    message: string,
+    opts?: { skip?: boolean },
+  ) => {
     checkpoint = cp;
     d.moocJobs.updateJob(job.id, { checkpoint: cp, progress, message });
+    const stageId = CHECKPOINT_STAGE[cp];
+    if (stageId) {
+      const skip = opts?.skip ?? /跳过|未启用|未就绪/.test(message);
+      recordMoocStageEvent(d.moocJobs, job.id, stageId, skip ? 'skip' : 'end', message);
+    }
   };
 
   const fail = (stage: MoocJobStage, detailed: string) => {
@@ -163,6 +189,7 @@ async function runMoocJob(job: MoocJobRow) {
 
     // ── 1) Create project ──────────────────────────────────────────
     if (!checkpointAtLeast(checkpoint, 'created')) {
+      beginStage('creating');
       setProgress('creating', 5, '创建项目…');
       if (!fs.existsSync(job.file_path)) {
         throw Object.assign(new Error('上传的 PPTX 文件不存在，请重新提交任务'), { stage: 'creating' });
@@ -181,6 +208,7 @@ async function runMoocJob(job: MoocJobRow) {
       if (!projectId || !d.projectService.getProject(projectId)) {
         // Lost project — force recreate
         checkpoint = 'none';
+        beginStage('creating');
         setProgress('creating', 5, '原项目丢失，重新创建…');
         const project = d.projectService.createProject(
           job.file_name,
@@ -191,6 +219,7 @@ async function runMoocJob(job: MoocJobRow) {
         projectId = project.id;
         d.moocJobs.updateJob(job.id, { project_id: projectId, checkpoint: 'created' });
         checkpoint = 'created';
+        recordMoocStageEvent(d.moocJobs, job.id, 'creating', 'end', '项目已重建');
       } else {
         setProgress('creating', 8, '断点续跑：跳过创建项目');
       }
@@ -227,6 +256,7 @@ async function runMoocJob(job: MoocJobRow) {
 
     // ── 2) Parse ───────────────────────────────────────────────────
     if (!checkpointAtLeast(checkpoint, 'parsed')) {
+      beginStage('parsing');
       setProgress('parsing', 12, '解析 PPT…');
       await d.pptParser.parsePpt(projectId!);
       markCheckpoint('parsed', 20, 'PPT 解析完成');
@@ -237,6 +267,7 @@ async function runMoocJob(job: MoocJobRow) {
 
     // ── 3) Scripts ─────────────────────────────────────────────────
     if (!checkpointAtLeast(checkpoint, 'scripted')) {
+      beginStage('script');
       setProgress('script', 25, '生成解说词…');
       const targetSec = config.targetDurationMin > 0 ? config.targetDurationMin * 60 : 0;
       await d.scriptGenerator.generateScripts(
@@ -262,6 +293,7 @@ async function runMoocJob(job: MoocJobRow) {
 
     // ── 4) Dubbing ─────────────────────────────────────────────────
     if (!checkpointAtLeast(checkpoint, 'dubbed')) {
+      beginStage('dubbing');
       setProgress('dubbing', 45, '生成配音…');
       try {
         await ensureVoiceboxRunningForAudio();
@@ -363,6 +395,7 @@ async function runMoocJob(job: MoocJobRow) {
     // ── 5) Avatar ──────────────────────────────────────────────────
     if (config.enableAvatar) {
       if (!checkpointAtLeast(checkpoint, 'avatar')) {
+        beginStage('avatar');
         setProgress('avatar', 75, '生成数字人…');
         if (config.avatarDriveMode === 'video' && !config.avatarRefVideoId) {
           throw Object.assign(new Error('已启用数字人但未选择参考视频'), { stage: 'avatar' });
@@ -482,11 +515,14 @@ async function runMoocJob(job: MoocJobRow) {
           : '1080p') as '720p' | '1080p' | '1440p';
 
         if (!checkpointAtLeast(checkpoint, 'explain_points')) {
+          beginStage('explain_points');
           setProgress('explain_points', 72, '分析课件知识点…');
         } else {
+          beginStage('explain_gen');
           setProgress('explain_gen', 80, '生成知识点讲解动画…');
         }
 
+        let explainGenStarted = checkpointAtLeast(checkpoint, 'explain_points');
         try {
           const result = await runMoocExplainInsert({
             deps: {
@@ -505,6 +541,11 @@ async function runMoocJob(job: MoocJobRow) {
             quality,
             isCancelled: () => d.moocJobs.isCancelRequested(job.id),
             onProgress: (stage, progress, message) => {
+              if (stage === 'explain_gen' && !explainGenStarted) {
+                recordMoocStageEvent(d.moocJobs, job.id, 'explain_points', 'end', '知识点分析完成');
+                beginStage('explain_gen');
+                explainGenStarted = true;
+              }
               setProgress(stage === 'explain_points' ? 'explain_points' : 'explain_gen', progress, message);
             },
           });
@@ -559,7 +600,10 @@ async function runMoocJob(job: MoocJobRow) {
           // Soft-fail: continue compose without inserts
           explainSummary = `知识点插入跳过：${String(err?.message || err).slice(0, 160)}`;
           console.warn(`[MOOC] Explain insert soft-fail job=${job.id}:`, explainSummary);
-          markCheckpoint('explain_ready', 88, explainSummary);
+          if (!checkpointAtLeast(checkpoint, 'explain_points')) {
+            markCheckpoint('explain_points', 78, explainSummary, { skip: true });
+          }
+          markCheckpoint('explain_ready', 88, explainSummary, { skip: true });
         }
       } else {
         // Resume: load inserts from disk
@@ -591,6 +635,7 @@ async function runMoocJob(job: MoocJobRow) {
 
     // ── 7) Compose ─────────────────────────────────────────────────
     if (!checkpointAtLeast(checkpoint, 'composed')) {
+      beginStage('compose');
       setProgress('compose', 90, insertClips.length
         ? `合成讲解视频（含 ${insertClips.length} 段知识点动画）…`
         : '合成讲解视频…');
