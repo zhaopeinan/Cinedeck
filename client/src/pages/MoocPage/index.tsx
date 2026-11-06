@@ -6,7 +6,7 @@ import {
 } from 'antd';
 import {
   CloudUploadOutlined, DeleteOutlined, DownloadOutlined, ExclamationCircleOutlined, ExpandOutlined,
-  EyeOutlined, PlayCircleOutlined, PlusOutlined, ThunderboltOutlined,
+  EyeOutlined, PlayCircleOutlined, PlusOutlined, ThunderboltOutlined, UserOutlined,
   ProfileOutlined, ReloadOutlined, RocketOutlined, StopOutlined,
 } from '@ant-design/icons';
 import { explainApi, moocApi, projectApi, videoApi, voiceboxApi } from '../../api';
@@ -651,6 +651,61 @@ const MoocPage: React.FC = () => {
     });
   };
 
+  const [avatarOptimizeJob, setAvatarOptimizeJob] = useState<any | null>(null);
+  const [avatarOptimizeSubmitting, setAvatarOptimizeSubmitting] = useState(false);
+  const [avatarOptimizePhoto, setAvatarOptimizePhoto] = useState<File | null>(null);
+  const [avatarOptimizeForm] = Form.useForm();
+
+  const openAvatarOptimize = (job: any) => {
+    setAvatarOptimizeJob(job);
+    setAvatarOptimizePhoto(null);
+    void loadRefs();
+    const cfg = job.config || {};
+    avatarOptimizeForm.setFieldsValue({
+      avatarDriveMode: cfg.avatarDriveMode || 'video',
+      avatarRefVideoId: cfg.avatarRefVideoId || undefined,
+      chromaSimilarity: Number(cfg.chromaSimilarity ?? 0.28),
+      avatarFirstPageOnly: !!cfg.avatarFirstPageOnly,
+    });
+  };
+
+  const submitAvatarOptimize = async () => {
+    if (!avatarOptimizeJob) return;
+    try {
+      const values = await avatarOptimizeForm.validateFields();
+      if (values.avatarDriveMode === 'photo' && !avatarOptimizePhoto && !avatarOptimizeJob.config?.hasAvatarPhoto) {
+        message.warning('请上传数字人静照');
+        return;
+      }
+      if (values.avatarDriveMode === 'video' && !values.avatarRefVideoId) {
+        message.warning('请选择参考视频');
+        return;
+      }
+      setAvatarOptimizeSubmitting(true);
+      const fd = new FormData();
+      fd.append('avatar_drive_mode', values.avatarDriveMode || 'video');
+      if (values.avatarRefVideoId) fd.append('avatar_ref_video_id', values.avatarRefVideoId);
+      if (avatarOptimizePhoto) fd.append('photo', avatarOptimizePhoto);
+      const chroma = Number(values.chromaSimilarity);
+      fd.append(
+        'chroma_similarity',
+        String(Number.isFinite(chroma) ? Math.min(0.6, Math.max(0.05, chroma)) : 0.28),
+      );
+      if (values.avatarFirstPageOnly) fd.append('avatar_first_page_only', '1');
+      const layout = avatarOptimizeJob.config?.avatarLayout || DEFAULT_AVATAR_LAYOUT;
+      fd.append('avatar_layout', JSON.stringify(layout));
+      await moocApi.optimizeAvatar(avatarOptimizeJob.id, fd);
+      message.success('已排队：更换数字人并重合成');
+      setAvatarOptimizeJob(null);
+      await refreshJobs();
+    } catch (e: any) {
+      if (e?.errorFields) return;
+      message.error(e.response?.data?.error?.message || '更换数字人失败');
+    } finally {
+      setAvatarOptimizeSubmitting(false);
+    }
+  };
+
   const handleOptimizeExplainBatch = () => {
     const candidates = jobs.filter((j) => j.canOptimizeExplain || (
       j.projectId && (j.status === 'success' || j.status === 'failed' || j.status === 'cancelled')
@@ -920,6 +975,16 @@ const MoocPage: React.FC = () => {
               onClick={() => handleOptimizeExplain(r)}
             >
               {r.hasExplainInsert ? '重做讲解' : '加讲解'}
+            </Button>
+          )}
+          {r.canOptimizeAvatar && (
+            <Button
+              size="small"
+              type="link"
+              icon={<UserOutlined />}
+              onClick={() => openAvatarOptimize(r)}
+            >
+              换数字人
             </Button>
           )}
           {(r.status === 'queued' || r.status === 'running') && (
@@ -1465,6 +1530,86 @@ const MoocPage: React.FC = () => {
         >
           {errorModal.content}
         </pre>
+      </Modal>
+
+      <Modal
+        open={!!avatarOptimizeJob}
+        title={avatarOptimizeJob
+          ? `更换数字人 · ${truncateText(avatarOptimizeJob.name || avatarOptimizeJob.fileName || '', 24)}`
+          : '更换数字人'}
+        onCancel={() => {
+          if (avatarOptimizeSubmitting) return;
+          setAvatarOptimizeJob(null);
+          setAvatarOptimizePhoto(null);
+        }}
+        onOk={() => void submitAvatarOptimize()}
+        okText="开始更换"
+        confirmLoading={avatarOptimizeSubmitting}
+        width={640}
+        destroyOnClose
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="保留配音等已有产物；若已有知识点讲解，会用新数字人重叠插片后重合成，不会重跑讲解 HTML。"
+        />
+        <Form form={avatarOptimizeForm} layout="vertical">
+          <Form.Item label="驱动方式" name="avatarDriveMode" rules={[{ required: true }]}>
+            <Radio.Group optionType="button" buttonStyle="solid">
+              <Radio.Button value="video">参考视频</Radio.Button>
+              <Radio.Button value="photo">静照</Radio.Button>
+            </Radio.Group>
+          </Form.Item>
+          <Form.Item noStyle shouldUpdate={(a, b) => a.avatarDriveMode !== b.avatarDriveMode}>
+            {() => (
+              avatarOptimizeForm.getFieldValue('avatarDriveMode') === 'photo' ? (
+                <Form.Item label="静照" required>
+                  <Upload
+                    accept="image/*"
+                    maxCount={1}
+                    showUploadList={false}
+                    beforeUpload={(f) => { setAvatarOptimizePhoto(f); return false; }}
+                  >
+                    <Button icon={<PlusOutlined />}>
+                      {avatarOptimizePhoto
+                        ? avatarOptimizePhoto.name
+                        : (avatarOptimizeJob?.config?.hasAvatarPhoto ? '重新上传（可沿用原静照）' : '上传照片')}
+                    </Button>
+                  </Upload>
+                </Form.Item>
+              ) : (
+                <Form.Item
+                  label="参考视频"
+                  name="avatarRefVideoId"
+                  rules={[{ required: true, message: '请选择参考视频' }]}
+                >
+                  <AvatarRefLibraryPanel
+                    mode="select"
+                    refs={refs}
+                    selectedId={avatarOptimizeForm.getFieldValue('avatarRefVideoId') || null}
+                    onSelect={(id) => { avatarOptimizeForm.setFieldValue('avatarRefVideoId', id); }}
+                  />
+                </Form.Item>
+              )
+            )}
+          </Form.Item>
+          <Form.Item
+            label="绿幕抠图强度"
+            name="chromaSimilarity"
+            tooltip="仅绿幕参考视频生效"
+          >
+            <Slider
+              min={0.05}
+              max={0.6}
+              step={0.01}
+              marks={{ 0.05: '弱', 0.28: '默认', 0.6: '强' }}
+            />
+          </Form.Item>
+          <Form.Item name="avatarFirstPageOnly" valuePropName="checked">
+            <Checkbox>仅第 1 页生成数字人</Checkbox>
+          </Form.Item>
+        </Form>
       </Modal>
 
       <Drawer

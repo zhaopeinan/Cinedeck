@@ -637,6 +637,12 @@ export const moocApi = {
       '/mooc/jobs/optimize-explain',
       { ids, ...opts },
     ),
+  /** Keep dubbing (+ explain HTML if any); regenerate avatar and re-compose */
+  optimizeAvatar: (id: string, formData: FormData) =>
+    apiClient.post<ApiResponse<any>>(`/mooc/jobs/${id}/optimize-avatar`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 180000,
+    }),
   getPptDownloadUrl: (id: string) => withToken(`/api/v1/mooc/jobs/${id}/ppt`),
   /** 下载用户提交的原始 PPTX */
   downloadPpt: async (id: string, filenameHint?: string) => {

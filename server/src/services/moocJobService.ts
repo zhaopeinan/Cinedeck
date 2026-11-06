@@ -95,6 +95,11 @@ export interface MoocJobConfig {
     durationSec?: number | null;
     summary?: string | null;
   }>;
+  /**
+   * 更换数字人优化：保留已有讲解 HTML/插片，仅重新叠数字人后合成。
+   * 运行时消费后清除。
+   */
+  avatarOptimizeKeepExplain?: boolean;
 }
 
 export interface MoocJobRow {
@@ -441,6 +446,72 @@ export class MoocJobService {
       progress: 70,
       checkpoint: 'avatar',
       message: '一键优化：排队补知识点讲解并重新合成',
+      error: null,
+      failed_stage: null,
+      retry_count: 0,
+      finished_at: null,
+      config_json: JSON.stringify(cfg),
+    });
+  }
+
+  /**
+   * Re-run avatar (and re-compose) for a finished job with new avatar settings.
+   * Keeps parse/script/dubbing. If explain inserts exist, keeps HTML and only re-overlays avatar.
+   */
+  queueOptimizeAvatar(
+    id: string,
+    userId: string,
+    avatarPatch: Partial<MoocJobConfig>,
+  ): MoocJobRow | null {
+    const job = this.getJob(id);
+    if (!job || job.user_id !== userId) return null;
+    if (job.status === 'running' || job.status === 'queued') return null;
+    if (!job.project_id) return null;
+    const p = this.db.prepare('SELECT id, file_path FROM projects WHERE id = ?').get(job.project_id) as
+      { id: string; file_path?: string } | undefined;
+    if (!p) return null;
+    if (!fs.existsSync(job.file_path)) return null;
+
+    const cfg: any = { ...this.parseConfig(job), ...avatarPatch };
+    cfg.enableAvatar = true;
+    let keepExplain = false;
+    try {
+      if (p.file_path) {
+        const insertsPath = path.join(path.dirname(p.file_path), 'explain_inserts.json');
+        keepExplain = !!(cfg.enableExplainInsert && fs.existsSync(insertsPath));
+      }
+    } catch { /* ignore */ }
+    cfg.avatarOptimizeKeepExplain = keepExplain;
+    if (Array.isArray(cfg.stageLog)) {
+      cfg.stageLog = cfg.stageLog.filter((x: any) =>
+        x?.id !== 'avatar' && x?.id !== 'compose'
+        && !(keepExplain && (x?.id === 'explain_gen')));
+    }
+
+    // Reset slide avatar so worker regenerates with new ref/photo/layout
+    try {
+      this.db.prepare(`
+        UPDATE slides
+        SET avatar_status = 'pending',
+            avatar_video_path = NULL,
+            avatar_error = NULL,
+            avatar_enabled = 1,
+            updated_at = ?
+        WHERE project_id = ?
+          AND dubbing_status = 'generated'
+      `).run(new Date().toISOString(), job.project_id);
+    } catch (err: any) {
+      console.warn('[MOOC] reset slide avatars failed:', err?.message || err);
+    }
+
+    return this.updateJob(id, {
+      status: 'queued',
+      stage: 'queued',
+      progress: 70,
+      checkpoint: 'dubbed',
+      message: keepExplain
+        ? '更换数字人：排队重跑数字人、重叠讲解插片并重合成'
+        : '更换数字人：排队重跑数字人并重合成',
       error: null,
       failed_stage: null,
       retry_count: 0,

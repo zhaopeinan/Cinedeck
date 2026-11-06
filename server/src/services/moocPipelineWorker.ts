@@ -501,7 +501,90 @@ async function runMoocJob(job: MoocJobRow) {
     let insertClips: ExplainInsertClip[] = [];
     let explainSummary = '';
     if (config.enableExplainInsert) {
-      if (!d.explainBatches || !d.explainJobs) {
+      const projectForExplain = d.projectService.getProject(projectId!) as any;
+      const projectDirForExplain = projectForExplain?.file_path
+        ? path.dirname(projectForExplain.file_path)
+        : '';
+      const insertsPathExisting = projectDirForExplain
+        ? path.join(projectDirForExplain, 'explain_inserts.json')
+        : '';
+      const keepExplainOnly = !!(config as any).avatarOptimizeKeepExplain
+        && insertsPathExisting
+        && fs.existsSync(insertsPathExisting);
+
+      if (keepExplainOnly) {
+        // Avatar-optimize path: reuse existing explain inserts, only re-overlay avatar
+        beginStage('explain_gen');
+        setProgress('explain_gen', 86, '用新数字人重叠知识点插片…');
+        try {
+          const raw = JSON.parse(fs.readFileSync(insertsPathExisting, 'utf8'));
+          explainSummary = String(raw.summary || '已有知识点插片');
+          insertClips = (Array.isArray(raw.inserts) ? raw.inserts : [])
+            .filter((c: any) => c?.videoPath && fs.existsSync(c.videoPath))
+            .map((c: any) => ({
+              afterPage: Number(c.afterPage) || 0,
+              videoPath: String(c.videoPath),
+              title: String(c.title || ''),
+              explainJobId: String(c.explainJobId || ''),
+            }));
+          // Prefer original export without prior avatar overlay when present
+          insertClips = insertClips.map((c) => {
+            const dir = path.dirname(c.videoPath);
+            const base = path.basename(c.videoPath);
+            // If previous path was avatar-composited, try sibling export_*.mp4
+            const exportGuess = ['export_1080p.mp4', 'export_720p.mp4', 'export_1440p.mp4']
+              .map((n) => path.join(dir, n))
+              .find((f) => fs.existsSync(f));
+            if (exportGuess && /_avatar|avatar_/i.test(base)) {
+              return { ...c, videoPath: exportGuess };
+            }
+            return c;
+          });
+          if (config.enableAvatar && insertClips.length) {
+            const av = await attachAvatarsToExplainInserts({
+              projectId: projectId!,
+              userId: job.user_id,
+              projectDir: projectDirForExplain,
+              inserts: insertClips,
+              projectService: d.projectService,
+              videoComposer: d.videoComposer,
+              db: d.db,
+              chromaSimilarity: config.chromaSimilarity ?? 0.28,
+              isCancelled: () => d.moocJobs.isCancelRequested(job.id),
+              onProgress: (message, progress) => setProgress('explain_gen', progress, message),
+            });
+            insertClips = av.inserts;
+            const summaryExtra = av.avatarApplied
+              ? `（换数字人后叠了 ${av.avatarApplied} 段`
+                + (av.avatarFailed ? `，${av.avatarFailed} 段失败仍用原片` : '')
+                + '）'
+              : (av.avatarFailed ? `（换数字人叠插片失败 ${av.avatarFailed}）` : '');
+            explainSummary = `${explainSummary}${summaryExtra}`;
+            fs.writeFileSync(insertsPathExisting, JSON.stringify({
+              summary: explainSummary,
+              inserts: insertClips,
+              updatedAt: new Date().toISOString(),
+            }, null, 2), 'utf8');
+          }
+          markCheckpoint('explain_points', 78, '保留原知识点分析');
+          markCheckpoint('explain_ready', 88, explainSummary || '知识点插片已按新数字人更新');
+        } catch (err: any) {
+          if (err?.code === 'CANCELLED' || /CANCELLED|取消/.test(String(err?.message || ''))) {
+            throw err;
+          }
+          console.warn(`[MOOC] Keep-explain avatar reattach soft-fail:`, err?.message || err);
+          markCheckpoint('explain_ready', 88, `换数字人叠插片跳过：${String(err?.message || err).slice(0, 120)}`, { skip: true });
+        }
+        // Clear one-shot flag
+        try {
+          const fresh = d.moocJobs.getJob(job.id);
+          if (fresh) {
+            const c2: any = { ...d.moocJobs.parseConfig(fresh) };
+            delete c2.avatarOptimizeKeepExplain;
+            d.moocJobs.updateJob(job.id, { config_json: JSON.stringify(c2) });
+          }
+        } catch { /* ignore */ }
+      } else if (!d.explainBatches || !d.explainJobs) {
         console.warn('[MOOC] enableExplainInsert but explain services missing — skipping inserts');
         markCheckpoint('explain_ready', 88, '讲解动画服务未就绪，跳过插入');
       } else if (!checkpointAtLeast(checkpoint, 'explain_ready')) {

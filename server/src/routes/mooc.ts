@@ -95,6 +95,10 @@ function serializeJob(
       job.project_id
       && (job.status === 'success' || job.status === 'failed' || job.status === 'cancelled')
     ),
+    canOptimizeAvatar: !!(
+      job.project_id
+      && (job.status === 'success' || job.status === 'failed' || job.status === 'cancelled')
+    ),
     hasExplainInsert: !!(config.enableExplainInsert && (config.explainInsertSummary || config.explainBatchId)),
     createdAt: job.created_at,
     updatedAt: job.updated_at,
@@ -545,6 +549,113 @@ export function createMoocRouter(
       return res.status(400).json({
         success: false, data: null,
         error: { code: '400', message: '无法优化（需保留项目产物；若原文件丢失请重跑）' },
+      });
+    }
+    pumpMoocQueue();
+    res.json({
+      success: true,
+      data: serializeJob(updated, projectService, progressExtras),
+      error: null,
+    });
+  });
+
+  /**
+   * Replace avatar on a finished job: keep dubbing (+ optional explain HTML),
+   * regenerate digital human, re-overlay inserts if any, then re-compose.
+   */
+  router.post('/jobs/:id/optimize-avatar', (req, res, next) => {
+    upload.fields([{ name: 'photo', maxCount: 1 }])(req, res, (err) => {
+      if (err) {
+        return res.status(400).json({
+          success: false, data: null,
+          error: { code: '1001', message: err.message },
+        });
+      }
+      next();
+    });
+  }, (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    const job = moocJobs.getJob(String(req.params.id));
+    if (!job || job.user_id !== userId) {
+      return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
+    }
+    if (job.status === 'running' || job.status === 'queued') {
+      return res.status(400).json({
+        success: false, data: null,
+        error: { code: '400', message: '任务进行中，无法更换数字人' },
+      });
+    }
+    const body = req.body || {};
+    const files = req.files as { [field: string]: Express.Multer.File[] } | undefined;
+    const photoFile = files?.photo?.[0];
+    const driveMode = (body.avatar_drive_mode || body.avatarDriveMode || 'video') as 'photo' | 'video';
+    if (driveMode === 'photo' && !photoFile) {
+      const cfg0 = moocJobs.parseConfig(job);
+      if (!cfg0.avatarPhotoPath || !fs.existsSync(cfg0.avatarPhotoPath)) {
+        return res.status(400).json({
+          success: false, data: null,
+          error: { code: '4001', message: '静照模式请上传数字人照片' },
+        });
+      }
+    }
+    if (driveMode === 'video' && !(body.avatar_ref_video_id || body.avatarRefVideoId)) {
+      return res.status(400).json({
+        success: false, data: null,
+        error: { code: '4001', message: '视频模式请选择参考视频' },
+      });
+    }
+
+    let avatarPageIndexes: number[] | null = null;
+    const pagesRaw = body.avatar_page_indexes ?? body.avatarPageIndexes;
+    if (pagesRaw != null && pagesRaw !== '' && pagesRaw !== 'all') {
+      try {
+        const parsed = typeof pagesRaw === 'string' ? JSON.parse(pagesRaw) : pagesRaw;
+        if (Array.isArray(parsed)) {
+          avatarPageIndexes = parsed.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n) && n >= 1);
+          if (!avatarPageIndexes.length) avatarPageIndexes = null;
+        }
+      } catch { avatarPageIndexes = null; }
+    }
+    const avatarFirstPageOnly = body.avatar_first_page_only === '1'
+      || body.avatar_first_page_only === 'true'
+      || body.avatarFirstPageOnly === true;
+
+    let avatarLayout = moocJobs.parseConfig(job).avatarLayout || { x: 0.72, y: 0.52, w: 0.25, h: 0.444 };
+    const layoutRaw = body.avatar_layout ?? body.avatarLayout;
+    if (layoutRaw) {
+      try {
+        const src = typeof layoutRaw === 'string' ? JSON.parse(layoutRaw) : layoutRaw;
+        const x = Number(src?.x); const y = Number(src?.y);
+        const w = Number(src?.w); const h = Number(src?.h);
+        if ([x, y, w, h].every((n) => Number.isFinite(n))) {
+          avatarLayout = {
+            x: Math.min(0.95, Math.max(0, x)),
+            y: Math.min(0.95, Math.max(0, y)),
+            w: Math.min(1, Math.max(0.05, w)),
+            h: Math.min(1, Math.max(0.05, h)),
+          };
+        }
+      } catch { /* keep */ }
+    }
+
+    const patch: Partial<MoocJobConfig> = {
+      enableAvatar: true,
+      avatarDriveMode: driveMode === 'photo' ? 'photo' : 'video',
+      avatarRefVideoId: body.avatar_ref_video_id || body.avatarRefVideoId || null,
+      avatarPhotoPath: photoFile?.path || moocJobs.parseConfig(job).avatarPhotoPath || null,
+      avatarPageIndexes: avatarFirstPageOnly ? [1] : avatarPageIndexes,
+      avatarFirstPageOnly,
+      avatarLayout,
+      chromaSimilarity: clampChromaSimilarity(
+        body.chroma_similarity ?? body.chromaSimilarity ?? moocJobs.parseConfig(job).chromaSimilarity,
+      ),
+    };
+
+    const updated = moocJobs.queueOptimizeAvatar(job.id, userId, patch);
+    if (!updated) {
+      return res.status(400).json({
+        success: false, data: null,
+        error: { code: '400', message: '无法更换数字人（需保留项目产物）' },
       });
     }
     pumpMoocQueue();
