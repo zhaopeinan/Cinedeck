@@ -5,7 +5,8 @@ import {
   Select, Slider, Space, Spin, Steps, Switch, Table, Tag, Tooltip, Typography, Upload, message,
 } from 'antd';
 import {
-  CloudUploadOutlined, DeleteOutlined, DownloadOutlined, ExclamationCircleOutlined, PlayCircleOutlined, PlusOutlined,
+  CloudUploadOutlined, DeleteOutlined, DownloadOutlined, ExclamationCircleOutlined, ExpandOutlined,
+  EyeOutlined, PlayCircleOutlined, PlusOutlined,
   ProfileOutlined, ReloadOutlined, RocketOutlined, StopOutlined,
 } from '@ant-design/icons';
 import { explainApi, moocApi, videoApi, voiceboxApi } from '../../api';
@@ -133,6 +134,13 @@ const MoocPage: React.FC = () => {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailJob, setDetailJob] = useState<any | null>(null);
   const detailIdRef = useRef<string | null>(null);
+  const [explainPreview, setExplainPreview] = useState<{
+    open: boolean;
+    id: string;
+    title: string;
+    kind: 'final' | 'sample';
+  } | null>(null);
+  const explainPreviewRef = useRef<HTMLDivElement | null>(null);
   const pollRef = useRef<number | null>(null);
   const previewReqRef = useRef(0);
 
@@ -1454,21 +1462,39 @@ const MoocPage: React.FC = () => {
                     {
                       title: '',
                       key: 'actions',
-                      width: 56,
+                      width: 96,
                       render: (_: any, row: any) => (
-                        (row.status === 'failed' || row.status === 'cancelled') ? (
-                          <Button
-                            type="link"
-                            size="small"
-                            icon={<ReloadOutlined />}
-                            style={{ padding: 0 }}
-                            loading={retryingExplainId === row.id}
-                            disabled={retryingExplainId === '__all__'}
-                            onClick={() => void retryExplainChild(row.id, row.title)}
-                          >
-                            重试
-                          </Button>
-                        ) : null
+                        <Space size={0} wrap>
+                          {(row.hasFinal || row.hasSample) && (
+                            <Button
+                              type="link"
+                              size="small"
+                              icon={<EyeOutlined />}
+                              style={{ padding: '0 4px' }}
+                              onClick={() => setExplainPreview({
+                                open: true,
+                                id: row.id,
+                                title: row.title || row.name || '知识点预览',
+                                kind: row.hasFinal ? 'final' : 'sample',
+                              })}
+                            >
+                              预览
+                            </Button>
+                          )}
+                          {(row.status === 'failed' || row.status === 'cancelled') && (
+                            <Button
+                              type="link"
+                              size="small"
+                              icon={<ReloadOutlined />}
+                              style={{ padding: '0 4px' }}
+                              loading={retryingExplainId === row.id}
+                              disabled={retryingExplainId === '__all__'}
+                              onClick={() => void retryExplainChild(row.id, row.title)}
+                            >
+                              重试
+                            </Button>
+                          )}
+                        </Space>
                       ),
                     },
                   ]}
@@ -1478,6 +1504,65 @@ const MoocPage: React.FC = () => {
           </Space>
         )}
       </Drawer>
+
+      <Modal
+        open={!!explainPreview?.open}
+        title={explainPreview
+          ? `${explainPreview.kind === 'final' ? '全片预览' : '样片预览'} · ${truncateText(explainPreview.title, 24)}`
+          : '预览'}
+        onCancel={() => setExplainPreview(null)}
+        footer={[
+          <Button
+            key="blank"
+            href={explainPreview
+              ? (explainPreview.kind === 'final'
+                ? explainApi.finalUrl(explainPreview.id)
+                : explainApi.sampleUrl(explainPreview.id))
+              : undefined}
+            target="_blank"
+            disabled={!explainPreview}
+          >
+            新窗口打开
+          </Button>,
+          <Button
+            key="fs"
+            icon={<ExpandOutlined />}
+            onClick={() => {
+              const el = explainPreviewRef.current;
+              if (!el) return;
+              if (document.fullscreenElement) void document.exitFullscreen();
+              else void el.requestFullscreen?.();
+            }}
+          >
+            全屏
+          </Button>,
+          <Button key="close" type="primary" onClick={() => setExplainPreview(null)}>
+            关闭
+          </Button>,
+        ]}
+        width={880}
+        destroyOnClose
+        styles={{ body: { paddingTop: 12 } }}
+      >
+        {explainPreview && (
+          <div ref={explainPreviewRef} style={{ background: '#000', borderRadius: 8, overflow: 'hidden' }}>
+            <iframe
+              title={explainPreview.kind === 'final' ? 'explain-final' : 'explain-sample'}
+              src={explainPreview.kind === 'final'
+                ? explainApi.finalUrl(explainPreview.id)
+                : explainApi.sampleUrl(explainPreview.id)}
+              style={{
+                width: '100%',
+                height: 480,
+                border: 'none',
+                display: 'block',
+                background: '#000',
+              }}
+              allow="fullscreen; autoplay"
+            />
+          </div>
+        )}
+      </Modal>
     </div>
   );
 };

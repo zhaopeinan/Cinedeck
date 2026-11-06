@@ -1,6 +1,7 @@
 /**
  * Build rich progress payload for MOOC job list/detail UI.
  */
+import fs from 'fs';
 import type { MoocJobConfig, MoocJobRow, MoocCheckpoint } from './moocJobService';
 import { STAGE_LABEL_CN } from './moocJobService';
 import type { ExplainBatchService } from './explainBatchService';
@@ -72,6 +73,8 @@ function childPublic(c: ExplainJobRow) {
     : null;
   const durationSec = secBetween(startedAt, finishedAt || (['running', 'queued'].includes(c.status) ? null : c.updated_at));
   const elapsedSec = startedAt && !finishedAt ? secBetween(startedAt, null) : durationSec;
+  const hasFinal = !!(c.final_path && fs.existsSync(c.final_path));
+  const hasSample = !!(c.sample_path && fs.existsSync(c.sample_path));
   return {
     id: c.id,
     title: shortTitle(c.name),
@@ -84,6 +87,8 @@ function childPublic(c: ExplainJobRow) {
     error: c.error,
     retryCount: Number(cfg.retryCount || 0),
     maxRetries: Number(cfg.maxRetries != null ? cfg.maxRetries : 3),
+    hasFinal,
+    hasSample,
     startedAt,
     finishedAt,
     updatedAt: c.updated_at,
