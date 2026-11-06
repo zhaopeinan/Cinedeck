@@ -408,7 +408,44 @@ export function initDatabase(dbPath?: string): Database.Database {
     if (!explainCols.find((c) => c.name === 'video_path')) {
       db.exec('ALTER TABLE explain_jobs ADD COLUMN video_path TEXT');
     }
+    if (!explainCols.find((c) => c.name === 'batch_id')) {
+      db.exec('ALTER TABLE explain_jobs ADD COLUMN batch_id TEXT');
+    }
+    if (!explainCols.find((c) => c.name === 'knowledge_point_id')) {
+      db.exec('ALTER TABLE explain_jobs ADD COLUMN knowledge_point_id TEXT');
+    }
   }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_explain_jobs_batch_id ON explain_jobs(batch_id);`);
+
+  // 讲解专题：一份 PPT → 多知识点 → 批量自动生成讲解动画
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS explain_batches (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      source_file_name TEXT,
+      source_file_path TEXT,
+      topic_text TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'queued',
+      stage TEXT NOT NULL DEFAULT 'queued',
+      progress INTEGER NOT NULL DEFAULT 0,
+      message TEXT,
+      error TEXT,
+      knowledge_points_json TEXT,
+      voiceover TEXT NOT NULL DEFAULT 'zh',
+      selected_voice_id TEXT,
+      selected_model_id TEXT,
+      subtitles INTEGER NOT NULL DEFAULT 0,
+      cancel_requested INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_explain_batches_user_id ON explain_batches(user_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_explain_batches_status ON explain_batches(status);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_explain_batches_created_at ON explain_batches(created_at DESC);`);
 
   // 造声工厂单人 TTS 生成记录（刷新可回看 + 任务中心）
   db.exec(`

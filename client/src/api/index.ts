@@ -713,7 +713,8 @@ export type UnifiedJobKind =
   | 'mooc'
   | 'hyperframe'
   | 'explain'
-  | 'explain_export';
+  | 'explain_export'
+  | 'explain_batch';
 
 /** 讲解动画（风格技能产品化） */
 export type ExplainGenSettings = {
@@ -799,6 +800,33 @@ export const explainApi = {
     ),
   exportVideo: (id: string, quality: '720p' | '1080p' | '1440p' = '1080p') =>
     apiClient.post<ApiResponse<any>>(`/explain/jobs/${id}/export`, { quality }, { timeout: 30000 }),
+
+  // 讲解专题：PPT → 多知识点批量动画
+  listBatches: () => apiClient.get<ApiResponse<{ batches: any[] }>>('/explain/batches'),
+  getBatch: (id: string) => apiClient.get<ApiResponse<any>>(`/explain/batches/${id}`),
+  createBatch: (opts: {
+    file: File;
+    name?: string;
+    voiceover: 'none' | 'zh' | 'en';
+    voiceId?: string | null;
+    modelId?: string | null;
+    subtitles?: boolean;
+  }) => {
+    const fd = new FormData();
+    fd.append('file', opts.file);
+    if (opts.name) fd.append('name', opts.name);
+    fd.append('voiceover', opts.voiceover);
+    if (opts.voiceId) fd.append('voiceId', opts.voiceId);
+    if (opts.modelId) fd.append('modelId', opts.modelId);
+    if (typeof opts.subtitles === 'boolean') fd.append('subtitles', String(opts.subtitles));
+    return apiClient.post<ApiResponse<any>>('/explain/batches', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 180000,
+    });
+  },
+  startBatch: (id: string, pointIds?: string[]) =>
+    apiClient.post<ApiResponse<any>>(`/explain/batches/${id}/start`, { pointIds }),
+  cancelBatch: (id: string) => apiClient.post<ApiResponse<any>>(`/explain/batches/${id}/cancel`),
 };
 
 export type UnifiedJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';

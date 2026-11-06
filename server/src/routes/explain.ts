@@ -5,6 +5,11 @@ import fs from 'fs';
 import { randomUUID } from 'crypto';
 import { ExplainJobService, EXPLAIN_UPLOAD_DIR } from '../services/explainJobService';
 import { pumpExplainQueue, resumeExplainJob } from '../services/explainWorker';
+import { ExplainBatchService } from '../services/explainBatchService';
+import {
+  pumpExplainBatchQueue,
+  startBatchGeneration,
+} from '../services/explainBatchWorker';
 import { getExplainPosterPath, getExplainStyle, listExplainStyles } from '../services/explainStyleCatalog';
 import { LlmService } from '../services/llmService';
 import { ExplainGenSettingsService } from '../services/explainGenSettings';
@@ -57,6 +62,7 @@ export function createExplainRouter(
   jobs: ExplainJobService,
   llm: LlmService,
   genSettings: ExplainGenSettingsService,
+  batches?: ExplainBatchService,
 ): Router {
   const router = Router();
   fs.mkdirSync(EXPLAIN_UPLOAD_DIR, { recursive: true });
@@ -450,6 +456,108 @@ export function createExplainRouter(
     res.setHeader('Content-Disposition', `attachment; filename="explain-${job.id.slice(0, 8)}.mp4"`);
     res.sendFile(path.resolve(job.video_path));
   });
+
+  // ── 讲解专题（PPT → 多知识点批量动画）────────────────────────────
+  if (batches) {
+    router.get('/batches', (req: Request, res: Response) => {
+      const userId = getUserId(req);
+      const rows = batches.listForUser(userId).map((b) => batches.publicRow(b));
+      res.json({ success: true, data: { batches: rows }, error: null });
+    });
+
+    router.get('/batches/:id', (req: Request, res: Response) => {
+      const userId = getUserId(req);
+      const batch = batches.getOwned(String(req.params.id), userId);
+      if (!batch) {
+        return res.status(404).json({ success: false, data: null, error: { code: '404', message: '专题不存在' } });
+      }
+      if (batch.status === 'generating') batches.refreshFromChildren(batch.id);
+      const fresh = batches.get(batch.id)!;
+      const children = batches.listChildJobs(fresh.id).map((j) => jobs.publicRow(j));
+      res.json({
+        success: true,
+        data: { ...batches.publicRow(fresh), children },
+        error: null,
+      });
+    });
+
+    router.post('/batches', upload.single('file'), (req: Request, res: Response) => {
+      const userId = getUserId(req);
+      if (!userId) return res.status(401).json({ success: false, data: null, error: { code: '401', message: '未登录' } });
+      const cfg = llm.resolveConfig({ userId, module: 'explain' });
+      if (!cfg) {
+        return res.status(400).json({
+          success: false,
+          data: null,
+          error: { code: 'LLM_REQUIRED', message: '请先在「设置 → 大模型」中配置并激活 LLM API' },
+        });
+      }
+      const file = req.file;
+      if (!file) {
+        return res.status(400).json({
+          success: false,
+          data: null,
+          error: { code: '400', message: '请上传 PPTX 课件' },
+        });
+      }
+      const voice = parseVoiceBody(req.body);
+      if (!voice.ok) {
+        return res.status(400).json({
+          success: false,
+          data: null,
+          error: { code: '400', message: voice.message },
+        });
+      }
+      const subtitles = parseSubtitlesBody(req.body);
+      const name = String(req.body?.name || '').trim()
+        || decodeUploadFilename(file.originalname)
+        || '讲解专题';
+      const batch = batches.create({
+        userId,
+        name,
+        sourceFileName: decodeUploadFilename(file.originalname),
+        sourceFilePath: file.path,
+        voiceover: voice.voiceover,
+        voiceId: voice.voiceId,
+        modelId: voice.modelId,
+        subtitles: subtitles ?? (voice.voiceover === 'none'),
+      });
+      pumpExplainBatchQueue();
+      res.json({ success: true, data: batches.publicRow(batch), error: null });
+    });
+
+    router.post('/batches/:id/start', (req: Request, res: Response) => {
+      const userId = getUserId(req);
+      const ids = Array.isArray(req.body?.pointIds)
+        ? req.body.pointIds.map(String)
+        : (Array.isArray(req.body?.point_ids) ? req.body.point_ids.map(String) : undefined);
+      const result = startBatchGeneration(String(req.params.id), userId, ids);
+      if (!result.ok) {
+        return res.status(400).json({
+          success: false,
+          data: null,
+          error: { code: '400', message: result.message },
+        });
+      }
+      res.json({ success: true, data: result.batch, error: null });
+    });
+
+    router.post('/batches/:id/cancel', (req: Request, res: Response) => {
+      const userId = getUserId(req);
+      const updated = batches.requestCancel(String(req.params.id), userId);
+      if (!updated) {
+        return res.status(404).json({ success: false, data: null, error: { code: '404', message: '专题不存在' } });
+      }
+      // Best-effort cancel child jobs still waiting
+      for (const child of batches.listChildJobs(updated.id)) {
+        if (['queued', 'await_style', 'await_sample', 'running'].includes(child.status)) {
+          jobs.requestCancel(child.id, userId);
+        }
+      }
+      batches.refreshFromChildren(updated.id);
+      res.json({ success: true, data: batches.publicRow(batches.get(updated.id)!), error: null });
+    });
+  }
 
   return router;
 }

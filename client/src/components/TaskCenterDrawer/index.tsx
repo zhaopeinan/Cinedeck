@@ -23,6 +23,7 @@ const KIND_LABEL: Record<string, string> = {
   hyperframe: 'HyperFrame',
   explain: '讲解动画',
   explain_export: '讲解导出',
+  explain_batch: '讲解专题',
 };
 
 const STATUS_META: Record<

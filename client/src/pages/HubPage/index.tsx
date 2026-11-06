@@ -80,7 +80,7 @@ const HubPage: React.FC = () => {
     {
       key: 'explain',
       title: '讲解动画',
-      desc: '输入选题或上传文稿，LLM 推荐风格 → 20 秒样片确认 → 完整 HTML 讲解动画。',
+      desc: '单题动画，或上传整份 PPT 自动拆知识点并批量生成讲解动画。',
       path: '/explain',
       icon: <FormOutlined />,
       accent: '#531dab',

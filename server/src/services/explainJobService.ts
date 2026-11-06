@@ -55,6 +55,8 @@ export interface ExplainJobRow {
   sample_path: string | null;
   final_path: string | null;
   video_path: string | null;
+  batch_id: string | null;
+  knowledge_point_id: string | null;
   config_json: string;
   cancel_requested: number;
   created_at: string;
@@ -86,11 +88,21 @@ export class ExplainJobService {
     sourceType?: 'text' | 'file';
     sourceFileName?: string | null;
     sourceFilePath?: string | null;
+    batchId?: string | null;
+    knowledgePointId?: string | null;
+    voiceover?: 'none' | 'zh' | 'en';
+    voiceId?: string | null;
+    modelId?: string | null;
+    subtitles?: boolean;
+    autoMode?: boolean;
   }): ExplainJobRow {
     const id = uuidv4();
     const now = new Date().toISOString();
     const workDir = path.join(EXPLAIN_WORK_DIR, id);
     fs.mkdirSync(workDir, { recursive: true });
+    const config: Record<string, any> = {};
+    if (input.autoMode) config.autoMode = true;
+    if (typeof input.subtitles === 'boolean') config.subtitles = input.subtitles;
     const row: ExplainJobRow = {
       id,
       user_id: input.userId,
@@ -107,15 +119,17 @@ export class ExplainJobService {
       recommendations_json: null,
       selected_style_id: null,
       selected_variant: null,
-      voiceover: 'none',
-      selected_voice_id: null,
-      selected_model_id: null,
+      voiceover: input.voiceover || 'none',
+      selected_voice_id: input.voiceId || null,
+      selected_model_id: input.modelId || null,
       script_json: null,
       work_dir: workDir,
       sample_path: null,
       final_path: null,
       video_path: null,
-      config_json: '{}',
+      batch_id: input.batchId || null,
+      knowledge_point_id: input.knowledgePointId || null,
+      config_json: JSON.stringify(config),
       cancel_requested: 0,
       created_at: now,
       updated_at: now,
@@ -126,20 +140,24 @@ export class ExplainJobService {
       INSERT INTO explain_jobs (
         id, user_id, name, source_type, source_file_name, source_file_path, topic_text,
         status, stage, progress, message, error, recommendations_json,
-        selected_style_id, selected_variant, voiceover,         selected_voice_id, selected_model_id,
+        selected_style_id, selected_variant, voiceover, selected_voice_id, selected_model_id,
         script_json, work_dir,
-        sample_path, final_path, video_path, config_json, cancel_requested,
+        sample_path, final_path, video_path, batch_id, knowledge_point_id, config_json, cancel_requested,
         created_at, updated_at, started_at, finished_at
       ) VALUES (
         @id, @user_id, @name, @source_type, @source_file_name, @source_file_path, @topic_text,
         @status, @stage, @progress, @message, @error, @recommendations_json,
         @selected_style_id, @selected_variant, @voiceover, @selected_voice_id, @selected_model_id,
         @script_json, @work_dir,
-        @sample_path, @final_path, @video_path, @config_json, @cancel_requested,
+        @sample_path, @final_path, @video_path, @batch_id, @knowledge_point_id, @config_json, @cancel_requested,
         @created_at, @updated_at, @started_at, @finished_at
       )
     `).run(row);
     return row;
+  }
+
+  isAutoMode(job: ExplainJobRow): boolean {
+    return !!this.parseConfig(job).autoMode;
   }
 
   getJob(id: string): ExplainJobRow | null {
@@ -237,7 +255,8 @@ export class ExplainJobService {
       'name', 'topic_text', 'status', 'stage', 'progress', 'message', 'error',
       'recommendations_json', 'selected_style_id', 'selected_variant', 'voiceover',
       'selected_voice_id', 'selected_model_id',
-      'script_json', 'work_dir', 'sample_path', 'final_path', 'video_path', 'config_json',
+      'script_json', 'work_dir', 'sample_path', 'final_path', 'video_path',
+      'batch_id', 'knowledge_point_id', 'config_json',
       'cancel_requested', 'started_at', 'finished_at',
     ] as const;
     const sets: string[] = [];
@@ -361,6 +380,9 @@ export class ExplainJobService {
       hasFinal: !!(job.final_path && fs.existsSync(job.final_path)),
       hasVideo: !!(job.video_path && fs.existsSync(job.video_path)),
       exportInfo: this.parseConfig(job)?.export || null,
+      autoMode: !!this.parseConfig(job)?.autoMode,
+      batchId: job.batch_id,
+      knowledgePointId: job.knowledge_point_id,
       createdAt: job.created_at,
       updatedAt: job.updated_at,
       startedAt: job.started_at,

@@ -33,6 +33,15 @@ function genSettingsFor(userId: string): ExplainGenSettings {
 
 let deps: ExplainPipelineDeps | null = null;
 let pumping = false;
+let terminalHook: ((jobId: string) => void) | null = null;
+
+export function setExplainJobTerminalHook(fn: (jobId: string) => void) {
+  terminalHook = fn;
+}
+
+function notifyTerminal(jobId: string) {
+  try { terminalHook?.(jobId); } catch { /* ignore */ }
+}
 
 export function initExplainPipeline(d: ExplainPipelineDeps) {
   deps = d;
@@ -189,15 +198,32 @@ ${catalog}
     // ensure one recommended
     if (!recommendations.some((r: any) => r.recommended)) recommendations[0].recommended = true;
 
+    const recPayload = {
+      coreQuestion: rec.coreQuestion || '',
+      recommendations,
+    };
+
+    // 专题自动模式：LLM 已标 recommended 的风格直接开跑，不再等人选
+    if (jobs.isAutoMode(job)) {
+      const pick = recommendations.find((r: any) => r.recommended) || recommendations[0];
+      jobs.updateJob(jobId, {
+        recommendations_json: JSON.stringify(recPayload),
+        selected_style_id: Number(pick.id),
+        status: 'running',
+        stage: 'scripting',
+        progress: 40,
+        message: `自动选用风格：${pick.nameZh || pick.name}`,
+      });
+      void continueExplainAfterStyle(jobId);
+      return;
+    }
+
     jobs.updateJob(jobId, {
       status: 'await_style',
       stage: 'await_style',
       progress: 35,
       message: '请选择风格与是否配音',
-      recommendations_json: JSON.stringify({
-        coreQuestion: rec.coreQuestion || '',
-        recommendations,
-      }),
+      recommendations_json: JSON.stringify(recPayload),
     });
     // wait for user — resume via resumeExplainJob after select-style
   } catch (err: any) {
@@ -211,6 +237,7 @@ ${catalog}
       error: msg.slice(0, 2000),
       finished_at: new Date().toISOString(),
     });
+    notifyTerminal(jobId);
   }
 }
 
@@ -325,6 +352,65 @@ nodes 4–6 个，总时长约 18–40 秒。`,
     const samplePath = path.join(sampleDir, 'index.html');
     fs.writeFileSync(samplePath, sampleHtml, 'utf-8');
 
+    // 专题自动模式：由 LLM 审样片，通过则直接进全片
+    if (jobs.isAutoMode(job)) {
+      jobs.updateJob(jobId, {
+        sample_path: samplePath,
+        progress: 72,
+        message: 'LLM 正在审阅样片…',
+        status: 'running',
+        stage: 'generating_sample',
+      });
+      const review = await reviewSampleWithLlm({
+        llm,
+        userId: job.user_id,
+        topic: job.topic_text,
+        script,
+        html: sampleHtml,
+      });
+      jobs.mergeConfig(jobId, {
+        sampleReview: {
+          ok: review.ok,
+          reason: review.reason,
+          at: new Date().toISOString(),
+        },
+      });
+      if (!review.ok) {
+        const cfg = jobs.parseConfig(jobs.getJob(jobId)!);
+        const attempts = Number(cfg.sampleReviewAttempts || 0) + 1;
+        jobs.mergeConfig(jobId, { sampleReviewAttempts: attempts });
+        if (attempts < 2) {
+          jobs.updateJob(jobId, {
+            message: `样片未过审（${review.reason.slice(0, 80)}），正在重做…`,
+            progress: 55,
+            script_json: null,
+          });
+          // Clear sample and regenerate once
+          try { fs.rmSync(sampleDir, { recursive: true, force: true }); } catch { /* ignore */ }
+          void continueExplainAfterStyle(jobId);
+          return;
+        }
+        jobs.updateJob(jobId, {
+          status: 'failed',
+          stage: 'failed',
+          progress: 100,
+          message: '样片未通过 LLM 审阅',
+          error: review.reason.slice(0, 2000),
+          finished_at: new Date().toISOString(),
+        });
+        notifyTerminal(jobId);
+        return;
+      }
+      jobs.updateJob(jobId, {
+        status: 'running',
+        stage: 'generating_final',
+        progress: 80,
+        message: `样片已通过：${review.reason.slice(0, 60)}，开始生成全片…`,
+      });
+      void continueExplainAfterSampleApprove(jobId);
+      return;
+    }
+
     jobs.updateJob(jobId, {
       status: 'await_sample',
       stage: 'await_sample',
@@ -343,8 +429,65 @@ nodes 4–6 个，总时长约 18–40 秒。`,
       error: msg.slice(0, 2000),
       finished_at: new Date().toISOString(),
     });
+    notifyTerminal(jobId);
   } finally {
     pumpExplainQueue();
+  }
+}
+
+async function reviewSampleWithLlm(opts: {
+  llm: LlmService;
+  userId: string;
+  topic: string;
+  script: any;
+  html: string;
+}): Promise<{ ok: boolean; reason: string }> {
+  const cfg = opts.llm.resolveConfig({ userId: opts.userId, module: 'explain' });
+  if (!cfg) return { ok: true, reason: '无 LLM 配置，默认通过' };
+  const htmlSnippet = opts.html
+    .replace(/<script[\s\S]*?<\/script>/gi, '<script>…</script>')
+    .replace(/<style[\s\S]*?<\/style>/gi, '<style>…</style>')
+    .slice(0, 5000);
+  try {
+    const raw = await opts.llm.chat(
+      [
+        {
+          role: 'system',
+          content:
+            '你是讲解动画质检员。根据选题、分镜与样片 HTML 结构判断是否值得扩展成全片。只输出 JSON：{"ok":true|false,"reason":"一句中文理由"}。',
+        },
+        {
+          role: 'user',
+          content: `选题：
+${(opts.topic || '').slice(0, 3000)}
+
+分镜：
+${JSON.stringify(opts.script || {}).slice(0, 3000)}
+
+样片 HTML 摘要：
+${htmlSnippet}
+
+判定标准：
+- 通过：有清晰核心问题、动效不是纯静态轮播、文案可读、结构完整
+- 不通过：明显骨架/空洞、文不对题、无法解释概念
+宁可稍宽松通过，避免无谓重做。`,
+        },
+      ],
+      {
+        userId: opts.userId,
+        module: 'explain',
+        temperature: 0.2,
+        maxTokens: 400,
+        reasoningEffort: 'none',
+      },
+    );
+    const parsed = extractJsonBlock(raw);
+    return {
+      ok: parsed?.ok !== false && parsed?.ok !== 'false',
+      reason: String(parsed?.reason || (parsed?.ok === false ? '未通过' : '通过')).slice(0, 300),
+    };
+  } catch {
+    return { ok: true, reason: '审阅异常，默认通过' };
   }
 }
 
@@ -419,6 +562,7 @@ export async function continueExplainAfterSampleApprove(jobId: string) {
       sample_path: null,
       finished_at: new Date().toISOString(),
     });
+    notifyTerminal(jobId);
   } catch (err: any) {
     const msg = err?.message || String(err);
     jobs.updateJob(jobId, {
@@ -429,6 +573,7 @@ export async function continueExplainAfterSampleApprove(jobId: string) {
       error: msg.slice(0, 2000),
       finished_at: new Date().toISOString(),
     });
+    notifyTerminal(jobId);
   } finally {
     pumpExplainQueue();
   }

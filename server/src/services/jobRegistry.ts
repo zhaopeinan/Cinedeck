@@ -24,6 +24,7 @@ import {
   listExplainExportJobsForUser,
 } from './explainExportQueue';
 import type { VoiceTtsJobService } from './voiceTtsJobService';
+import type { ExplainBatchService } from './explainBatchService';
 
 export type JobKind =
   | 'tts_dubbing'
@@ -37,6 +38,7 @@ export type JobKind =
   | 'hyperframe'
   | 'explain'
   | 'explain_export'
+  | 'explain_batch'
   | 'voice_tts';
 
 export type UnifiedJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -119,6 +121,7 @@ export interface JobRegistryDeps {
   projectService: ProjectService;
   videoComposer: VideoComposerService;
   voiceTtsJobs?: VoiceTtsJobService;
+  explainBatches?: ExplainBatchService;
 }
 
 export class JobRegistry {
@@ -139,6 +142,7 @@ export class JobRegistry {
     items.push(...this.fromVoiceTts(userId));
     items.push(...this.fromAvatar(userId));
     items.push(...this.fromCompose(userId));
+    items.push(...this.fromExplainBatch(userId));
     items.push(...this.fromExplain(userId));
     items.push(...this.fromExplainExport(userId));
     items.push(...this.fromProjectDubbing(userId));
@@ -389,11 +393,42 @@ export class JobRegistry {
     });
   }
 
+  private fromExplainBatch(userId: string): UnifiedJob[] {
+    const rows = this.deps.explainBatches?.listForUser(userId, 40)
+      || (this.deps.db.prepare(
+        `SELECT * FROM explain_batches WHERE user_id = ? ORDER BY created_at DESC LIMIT 40`,
+      ).all(userId) as any[]);
+
+    return rows.map((r: any) => {
+      let status = mapDbStatus(r.status);
+      if (r.status === 'analyzing' || r.status === 'await_points' || r.status === 'generating') {
+        status = 'running';
+      }
+      return {
+        id: r.id,
+        kind: 'explain_batch' as const,
+        title: `讲解专题 · ${r.name || r.id.slice(0, 8)}`,
+        status,
+        progress: Number(r.progress) || 0,
+        message: r.message,
+        queuePosition: null,
+        createdAt: r.created_at || r.createdAt,
+        updatedAt: r.updated_at || r.updatedAt,
+        startedAt: r.started_at || r.startedAt,
+        finishedAt: r.finished_at || r.finishedAt,
+        href: '/explain?tab=batch',
+        cancellable: ['queued', 'analyzing', 'await_points', 'generating'].includes(String(r.status)),
+      };
+    });
+  }
+
   private fromExplain(userId: string): UnifiedJob[] {
+    // 专题子任务由 explain_batch 汇总，任务中心不再重复列出
     const rows = this.deps.db
       .prepare(
         `SELECT id, name, status, progress, message, created_at, updated_at, started_at, finished_at, config_json
-         FROM explain_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 40`,
+         FROM explain_jobs WHERE user_id = ? AND (batch_id IS NULL OR batch_id = '')
+         ORDER BY created_at DESC LIMIT 40`,
       )
       .all(userId) as Array<{
       id: string;

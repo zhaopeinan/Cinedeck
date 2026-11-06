@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Alert, Button, Card, Col, Input, List, Progress, Radio, Row, Select, Space, Switch, Tag, Typography, Upload, message, Popconfirm,
+  Alert, Button, Card, Checkbox, Col, Input, List, Progress, Radio, Row, Select, Space, Switch, Tabs, Tag, Typography, Upload, message, Popconfirm,
 } from 'antd';
 import {
   ArrowLeftOutlined, CheckOutlined, DeleteOutlined, DownloadOutlined, ExpandOutlined,
   PauseOutlined, PlayCircleOutlined, ReloadOutlined, RocketOutlined, SettingOutlined,
 } from '@ant-design/icons';
+import { useSearchParams } from 'react-router-dom';
 import { explainApi } from '../../api';
 import {
   ModelSelectField, VoiceSelectField, fetchVoiceSampleObjectUrl, useVoiceboxCatalog,
@@ -20,6 +21,9 @@ const { Dragger } = Upload;
 const STATUS_TAG: Record<string, { color: string; text: string }> = {
   queued: { color: 'default', text: '排队中' },
   running: { color: 'processing', text: '进行中' },
+  analyzing: { color: 'processing', text: '分析中' },
+  await_points: { color: 'warning', text: '确认知识点' },
+  generating: { color: 'processing', text: '批量生成' },
   await_style: { color: 'warning', text: '选风格' },
   await_sample: { color: 'warning', text: '确认样片' },
   completed: { color: 'success', text: '已完成' },
@@ -29,12 +33,23 @@ const STATUS_TAG: Record<string, { color: string; text: string }> = {
 
 const ExplainAnimationPage: React.FC = () => {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [tab, setTab] = useState<'single' | 'batch'>(
+    searchParams.get('tab') === 'batch' ? 'batch' : 'single',
+  );
   const [topic, setTopic] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [jobs, setJobs] = useState<any[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [detail, setDetail] = useState<any | null>(null);
+  const [batches, setBatches] = useState<any[]>([]);
+  const [activeBatchId, setActiveBatchId] = useState<string | null>(null);
+  const [batchDetail, setBatchDetail] = useState<any | null>(null);
+  const [batchFile, setBatchFile] = useState<File | null>(null);
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
+  const [batchStarting, setBatchStarting] = useState(false);
+  const [selectedPointIds, setSelectedPointIds] = useState<string[]>([]);
   const [llmOk, setLlmOk] = useState<{
     configured: boolean;
     name?: string | null;
@@ -76,7 +91,10 @@ const ExplainAnimationPage: React.FC = () => {
   const loadJobs = useCallback(async () => {
     try {
       const res = await explainApi.listJobs();
-      if (res.data?.success) setJobs(res.data.data?.jobs || []);
+      if (res.data?.success) {
+        const all = res.data.data?.jobs || [];
+        setJobs(all.filter((j: any) => !j.batchId));
+      }
     } catch { /* ignore */ }
   }, []);
 
@@ -84,6 +102,27 @@ const ExplainAnimationPage: React.FC = () => {
     try {
       const res = await explainApi.getJob(id);
       if (res.data?.success) setDetail(res.data.data);
+    } catch { /* ignore */ }
+  }, []);
+
+  const loadBatches = useCallback(async () => {
+    try {
+      const res = await explainApi.listBatches();
+      if (res.data?.success) setBatches(res.data.data?.batches || []);
+    } catch { /* ignore */ }
+  }, []);
+
+  const loadBatchDetail = useCallback(async (id: string) => {
+    try {
+      const res = await explainApi.getBatch(id);
+      if (res.data?.success) {
+        const data = res.data.data;
+        setBatchDetail(data);
+        const pts = data?.knowledgePoints || [];
+        setSelectedPointIds(
+          pts.filter((p: any) => p.selected !== false).map((p: any) => p.id),
+        );
+      }
     } catch { /* ignore */ }
   }, []);
 
@@ -99,13 +138,18 @@ const ExplainAnimationPage: React.FC = () => {
   useEffect(() => {
     document.title = 'Cinedeck · 讲解动画';
     void loadJobs();
+    void loadBatches();
     void loadLlm();
     return () => {
       if (pollRef.current) window.clearInterval(pollRef.current);
       sampleAudioRef.current?.pause();
       sampleAudioRef.current = null;
     };
-  }, [loadJobs, loadLlm]);
+  }, [loadJobs, loadBatches, loadLlm]);
+
+  useEffect(() => {
+    setSearchParams(tab === 'batch' ? { tab: 'batch' } : {}, { replace: true });
+  }, [tab, setSearchParams]);
 
   useEffect(() => {
     if (!voices.length) return;
@@ -163,6 +207,14 @@ const ExplainAnimationPage: React.FC = () => {
     void loadDetail(activeId);
   }, [activeId, loadDetail]);
 
+  useEffect(() => {
+    if (!activeBatchId) {
+      setBatchDetail(null);
+      return;
+    }
+    void loadBatchDetail(activeBatchId);
+  }, [activeBatchId, loadBatchDetail]);
+
   // Sync narration prefs when switching jobs (not on every poll)
   useEffect(() => {
     if (!detail?.id) return;
@@ -184,7 +236,10 @@ const ExplainAnimationPage: React.FC = () => {
 
   useEffect(() => {
     const exportingVideo = ['queued', 'running'].includes(String(detail?.exportInfo?.status || ''));
-    const busy = exportingVideo || jobs.some((j) =>
+    const batchBusy = batches.some((b) =>
+      ['queued', 'analyzing', 'await_points', 'generating'].includes(b.status),
+    ) || (batchDetail && ['queued', 'analyzing', 'generating'].includes(batchDetail.status));
+    const busy = exportingVideo || batchBusy || jobs.some((j) =>
       ['queued', 'running', 'await_style', 'await_sample'].includes(j.status),
     ) || (detail && ['queued', 'running'].includes(detail.status));
     if (!busy) {
@@ -197,7 +252,9 @@ const ExplainAnimationPage: React.FC = () => {
     if (pollRef.current) return;
     pollRef.current = window.setInterval(() => {
       void loadJobs();
+      void loadBatches();
       if (activeId) void loadDetail(activeId);
+      if (activeBatchId) void loadBatchDetail(activeBatchId);
     }, 2500);
     return () => {
       if (pollRef.current) {
@@ -205,7 +262,7 @@ const ExplainAnimationPage: React.FC = () => {
         pollRef.current = null;
       }
     };
-  }, [jobs, detail?.status, detail?.exportInfo?.status, activeId, loadJobs, loadDetail]);
+  }, [jobs, batches, detail?.status, detail?.exportInfo?.status, batchDetail?.status, activeId, activeBatchId, loadJobs, loadBatches, loadDetail, loadBatchDetail]);
 
   const handleCreate = async () => {
     if (!llmOk?.configured) {
@@ -230,6 +287,62 @@ const ExplainAnimationPage: React.FC = () => {
       message.error(e?.response?.data?.error?.message || e?.message || '提交失败');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleCreateBatch = async () => {
+    if (!llmOk?.configured) {
+      message.warning('请先配置 LLM API');
+      navigate('/settings');
+      return;
+    }
+    if (!batchFile) {
+      message.warning('请上传 PPTX 课件');
+      return;
+    }
+    if (voiceover !== 'none' && (!voiceId || !modelId)) {
+      message.warning('请先选定专题统一音色与配音模型');
+      return;
+    }
+    setBatchSubmitting(true);
+    try {
+      const res = await explainApi.createBatch({
+        file: batchFile,
+        voiceover,
+        voiceId: voiceover === 'none' ? null : voiceId,
+        modelId: voiceover === 'none' ? null : modelId,
+        subtitles,
+      });
+      if (!res.data?.success) throw new Error(res.data?.error?.message || '提交失败');
+      message.success('专题已创建，正在分析课件知识点…');
+      setBatchFile(null);
+      await loadBatches();
+      setActiveBatchId(res.data.data.id);
+      setTab('batch');
+    } catch (e: any) {
+      message.error(e?.response?.data?.error?.message || e?.message || '提交失败');
+    } finally {
+      setBatchSubmitting(false);
+    }
+  };
+
+  const handleStartBatch = async () => {
+    if (!batchDetail?.id) return;
+    if (!selectedPointIds.length) {
+      message.warning('请至少勾选一个知识点');
+      return;
+    }
+    setBatchStarting(true);
+    try {
+      const res = await explainApi.startBatch(batchDetail.id, selectedPointIds);
+      if (!res.data?.success) throw new Error(res.data?.error?.message || '启动失败');
+      message.success('已启动批量生成：风格自动选，样片由 LLM 审阅');
+      await loadBatches();
+      await loadBatchDetail(batchDetail.id);
+    } catch (e: any) {
+      message.error(e?.response?.data?.error?.message || e?.message || '启动失败');
+    } finally {
+      setBatchStarting(false);
     }
   };
 
@@ -439,8 +552,7 @@ const ExplainAnimationPage: React.FC = () => {
       </Space>
 
       <Paragraph type="secondary">
-        上传文稿或直接输入选题 → LLM 推荐 3 种风格（含示例图）→ 确认约 20 秒样片 → 扩展全片 HTML。
-        流程来自 Opus 讲解动画技能，需配置可用的大模型 API。
+        单题：选题 → 选风格 → 确认样片 → 全片。专题：上传整份 PPT，LLM 拆知识点后批量自动生成（风格自动选、样片 LLM 审阅、配音专题统一）。
       </Paragraph>
 
       {!llmOk?.configured ? (
@@ -471,6 +583,14 @@ const ExplainAnimationPage: React.FC = () => {
         />
       )}
 
+      <Tabs
+        activeKey={tab}
+        onChange={(k) => setTab(k === 'batch' ? 'batch' : 'single')}
+        items={[
+          {
+            key: 'single',
+            label: '单题动画',
+            children: (
       <Row gutter={20}>
         <Col xs={24} lg={10}>
           <Card title="1. 选题 / 上传">
@@ -798,6 +918,236 @@ const ExplainAnimationPage: React.FC = () => {
           </Card>
         </Col>
       </Row>
+            ),
+          },
+          {
+            key: 'batch',
+            label: 'PPT 专题批量',
+            children: (
+              <Row gutter={20}>
+                <Col xs={24} lg={10}>
+                  <Card title="1. 上传课件并选定统一配音">
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 12 }}
+                      message="创建专题时选定一套音色；之后风格由 LLM 自动选，样片由 LLM 审阅，无需逐步确认。"
+                    />
+                    <Dragger
+                      multiple={false}
+                      maxCount={1}
+                      accept=".pptx"
+                      beforeUpload={(f) => {
+                        setBatchFile(f);
+                        return false;
+                      }}
+                      onRemove={() => setBatchFile(null)}
+                      fileList={batchFile ? [{ uid: 'b1', name: batchFile.name, status: 'done' as const }] : []}
+                    >
+                      <p className="ant-upload-text">上传整份 .pptx</p>
+                      <p className="ant-upload-hint">LLM 将拆出适合动画讲解的知识点</p>
+                    </Dragger>
+                    <div style={{ marginTop: 16 }}>{renderVoicePanel()}</div>
+                    <Button
+                      type="primary"
+                      icon={<RocketOutlined />}
+                      block
+                      style={{ marginTop: 16 }}
+                      loading={batchSubmitting}
+                      disabled={!llmOk?.configured || !batchFile}
+                      onClick={() => void handleCreateBatch()}
+                    >
+                      分析课件知识点
+                    </Button>
+                  </Card>
+
+                  <Card title="专题列表" style={{ marginTop: 16 }}>
+                    {batches.length === 0 ? (
+                      <Text type="secondary">暂无专题</Text>
+                    ) : (
+                      <List
+                        dataSource={batches}
+                        renderItem={(item) => {
+                          const st = STATUS_TAG[item.status] || { color: 'default', text: item.status };
+                          return (
+                            <List.Item
+                              onClick={() => setActiveBatchId(item.id)}
+                              style={{
+                                cursor: 'pointer',
+                                background: activeBatchId === item.id ? 'rgba(22,119,255,0.06)' : undefined,
+                                padding: '8px 10px',
+                                borderRadius: 8,
+                              }}
+                            >
+                              <List.Item.Meta
+                                title={
+                                  <Space wrap>
+                                    <Text ellipsis style={{ maxWidth: 180 }}>{item.name}</Text>
+                                    <Tag color={st.color}>{st.text}</Tag>
+                                  </Space>
+                                }
+                                description={
+                                  <Space direction="vertical" size={0}>
+                                    <Text type="secondary" style={{ fontSize: 12 }}>
+                                      {item.completedCount || 0}/{item.childCount || item.knowledgePoints?.length || 0} 完成
+                                    </Text>
+                                    <Progress percent={item.progress || 0} size="small" style={{ margin: 0, width: 180 }} />
+                                  </Space>
+                                }
+                              />
+                            </List.Item>
+                          );
+                        }}
+                      />
+                    )}
+                  </Card>
+                </Col>
+
+                <Col xs={24} lg={14}>
+                  <Card
+                    title={batchDetail ? batchDetail.name : '专题详情'}
+                    extra={batchDetail && (
+                      <Space>
+                        <Button
+                          size="small"
+                          icon={<ReloadOutlined />}
+                          onClick={() => activeBatchId && void loadBatchDetail(activeBatchId)}
+                        >
+                          刷新
+                        </Button>
+                        {['queued', 'analyzing', 'await_points', 'generating'].includes(batchDetail.status) && (
+                          <Button
+                            size="small"
+                            danger
+                            onClick={async () => {
+                              await explainApi.cancelBatch(batchDetail.id);
+                              await loadBatches();
+                              await loadBatchDetail(batchDetail.id);
+                            }}
+                          >
+                            取消
+                          </Button>
+                        )}
+                      </Space>
+                    )}
+                  >
+                    {!batchDetail ? (
+                      <Text type="secondary">选择左侧专题查看知识点与生成进度</Text>
+                    ) : (
+                      <>
+                        <Space wrap style={{ marginBottom: 12 }}>
+                          <Tag color={(STATUS_TAG[batchDetail.status] || {}).color}>
+                            {(STATUS_TAG[batchDetail.status] || {}).text || batchDetail.status}
+                          </Tag>
+                          <Text type="secondary">{batchDetail.stageLabel || batchDetail.message}</Text>
+                        </Space>
+                        <Progress percent={batchDetail.progress || 0} style={{ marginBottom: 16 }} />
+                        {batchDetail.error && (
+                          <Alert type="error" showIcon style={{ marginBottom: 12 }} message={batchDetail.error} />
+                        )}
+
+                        {(batchDetail.knowledgePoints || []).length > 0 && (
+                          <>
+                            <Title level={5}>知识点</Title>
+                            <Checkbox.Group
+                              style={{ width: '100%', marginBottom: 12 }}
+                              value={selectedPointIds}
+                              onChange={(vals) => setSelectedPointIds(vals as string[])}
+                              disabled={batchDetail.status !== 'await_points'}
+                            >
+                              <Space direction="vertical" style={{ width: '100%' }}>
+                                {(batchDetail.knowledgePoints || []).map((p: any) => (
+                                  <Card key={p.id} size="small" type="inner">
+                                    <Space align="start">
+                                      <Checkbox value={p.id} />
+                                      <div>
+                                        <Text strong>{p.title}</Text>
+                                        {p.coreQuestion && (
+                                          <Paragraph type="secondary" style={{ margin: '4px 0' }}>
+                                            {p.coreQuestion}
+                                          </Paragraph>
+                                        )}
+                                        <Text type="secondary" style={{ fontSize: 12 }}>{p.summary}</Text>
+                                        <div style={{ marginTop: 6 }}>
+                                          {p.jobStatus && (
+                                            <Tag color={(STATUS_TAG[p.jobStatus] || {}).color}>
+                                              {(STATUS_TAG[p.jobStatus] || {}).text || p.jobStatus}
+                                            </Tag>
+                                          )}
+                                          {p.sourcePages && <Tag>{p.sourcePages}</Tag>}
+                                          {p.hasFinal && p.jobId && (
+                                            <Button
+                                              type="link"
+                                              size="small"
+                                              href={explainApi.finalUrl(p.jobId)}
+                                              target="_blank"
+                                            >
+                                              打开全片
+                                            </Button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </Space>
+                                  </Card>
+                                ))}
+                              </Space>
+                            </Checkbox.Group>
+                            {batchDetail.status === 'await_points' && (
+                              <Button
+                                type="primary"
+                                icon={<CheckOutlined />}
+                                loading={batchStarting}
+                                onClick={() => void handleStartBatch()}
+                              >
+                                开始生成所选动画（{selectedPointIds.length}）
+                              </Button>
+                            )}
+                          </>
+                        )}
+
+                        {(batchDetail.children || []).length > 0 && (
+                          <>
+                            <Title level={5} style={{ marginTop: 20 }}>子任务进度</Title>
+                            <List
+                              dataSource={batchDetail.children}
+                              renderItem={(c: any) => (
+                                <List.Item
+                                  actions={c.hasFinal ? [
+                                    <Button key="open" type="link" href={explainApi.finalUrl(c.id)} target="_blank">
+                                      全片
+                                    </Button>,
+                                  ] : undefined}
+                                >
+                                  <List.Item.Meta
+                                    title={
+                                      <Space>
+                                        <Text>{c.name}</Text>
+                                        <Tag color={(STATUS_TAG[c.status] || {}).color}>
+                                          {(STATUS_TAG[c.status] || {}).text || c.status}
+                                        </Tag>
+                                      </Space>
+                                    }
+                                    description={
+                                      <Space direction="vertical" size={0} style={{ width: '100%' }}>
+                                        <Text type="secondary" style={{ fontSize: 12 }}>{c.message}</Text>
+                                        <Progress percent={c.progress || 0} size="small" />
+                                      </Space>
+                                    }
+                                  />
+                                </List.Item>
+                              )}
+                            />
+                          </>
+                        )}
+                      </>
+                    )}
+                  </Card>
+                </Col>
+              </Row>
+            ),
+          },
+        ]}
+      />
     </div>
   );
 };

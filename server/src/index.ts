@@ -47,7 +47,9 @@ import { JobRegistry } from './services/jobRegistry';
 import { createJobsRouter } from './routes/jobs';
 import { ExplainJobService } from './services/explainJobService';
 import { ExplainGenSettingsService } from './services/explainGenSettings';
+import { ExplainBatchService } from './services/explainBatchService';
 import { initExplainPipeline } from './services/explainWorker';
+import { initExplainBatchPipeline } from './services/explainBatchWorker';
 import { createExplainRouter } from './routes/explain';
 import { initExplainExportQueue } from './services/explainExportQueue';
 import { VoiceTtsJobService } from './services/voiceTtsJobService';
@@ -94,6 +96,7 @@ async function main() {
   const dialogueJobs = new DialogueJobService(db);
   const voiceTtsJobs = new VoiceTtsJobService(db);
   const explainJobs = new ExplainJobService(db);
+  const explainBatches = new ExplainBatchService(db);
   const explainGenSettings = new ExplainGenSettingsService(db);
   const openApiKeys = new OpenApiKeyService(db);
 
@@ -135,7 +138,7 @@ async function main() {
   app.use('/api/v1/mooc', authRequired, createMoocRouter(moocJobs, projectService, pptParser));
   app.use('/api/v1/transcribe', authRequired, createTranscribeRouter(transcribeJobs));
   app.use('/api/v1/hyperframe', authRequired, createHyperframeRouter(hyperframeJobs, projectService));
-  app.use('/api/v1/explain', authRequired, createExplainRouter(explainJobs, llmService, explainGenSettings));
+  app.use('/api/v1/explain', authRequired, createExplainRouter(explainJobs, llmService, explainGenSettings, explainBatches));
   app.use('/api/v1/workers', createWorkerRouter()); // workers use their own auth (API key)
 
   initMoocPipeline({
@@ -165,13 +168,19 @@ async function main() {
     genSettings: explainGenSettings,
     voicebox,
   });
+  initExplainBatchPipeline({
+    batches: explainBatches,
+    jobs: explainJobs,
+    llm: llmService,
+    genSettings: explainGenSettings,
+  });
   initExplainExportQueue(explainJobs);
 
   // System status (GPU etc.) — any logged-in user
   app.use('/api/v1/system', authRequired, createSystemRouter());
 
   // Unified job list / task center
-  const jobRegistry = new JobRegistry({ db, projectService, videoComposer, voiceTtsJobs });
+  const jobRegistry = new JobRegistry({ db, projectService, videoComposer, voiceTtsJobs, explainBatches });
   app.use('/api/v1/jobs', authRequired, createJobsRouter(jobRegistry, { dialogueJobs, moocJobs, explainJobs, voiceTtsJobs }));
 
   // System settings — admin only
