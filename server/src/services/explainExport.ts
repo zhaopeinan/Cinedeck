@@ -156,6 +156,29 @@ export function prepareExplainHtmlForRecording(html: string): string {
     '',
   );
 
+  // Hide interactive preview chrome (play bar / scrubber) — must not appear in MP4.
+  // Preview iframe keeps the original HTML; only the recording copy gets this CSS.
+  const hidePlayerCss = `
+<style id="explain-hide-player-chrome">
+#player, #playBtn, #playIcon, #track, #fill, #knob, #chapter, #time,
+#controls, #controlBar, #control-bar, #scrubber, #progress,
+.player-bar, .playback-bar, .play-bar, .controls-bar,
+[data-explain-player], [aria-label="播放/暂停"], [aria-label="播放"], [aria-label="暂停"] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  overflow: hidden !important;
+}
+</style>`;
+  if (!/id=["']explain-hide-player-chrome["']/.test(out)) {
+    if (/<\/head>/i.test(out)) out = out.replace(/<\/head>/i, `${hidePlayerCss}</head>`);
+    else if (/<body[^>]*>/i.test(out)) out = out.replace(/<body([^>]*)>/i, `<body$1>${hidePlayerCss}`);
+    else out = `${hidePlayerCss}\n${out}`;
+  }
+
   // Expose timeline controls for headless capture. Screenshotting is slower than
   // realtime, so rAF-driven clocks freeze; the recorder seeks each frame instead.
   const bridge = `
