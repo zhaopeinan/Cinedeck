@@ -13,6 +13,7 @@ import {
   type ExplainExportQuality,
 } from '../services/explainExport';
 import { prepareAndEnqueueExplainExport } from '../services/explainExportQueue';
+import { patchNarrationAudioSync } from '../services/explainNarration';
 import { decodeUploadFilename } from '../utils/uploadFilename';
 
 function getUserId(req: Request): string {
@@ -427,7 +428,15 @@ export function createExplainRouter(
     const filePath = kind === 'sample' ? job.sample_path : job.final_path;
     if (!filePath || !fs.existsSync(filePath)) return res.status(404).end();
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.sendFile(path.resolve(filePath));
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      // Hot-patch older pages so #playBtn pause also stops narration audio
+      const raw = fs.readFileSync(filePath, 'utf8');
+      const html = patchNarrationAudioSync(raw);
+      return res.send(html);
+    } catch {
+      return res.sendFile(path.resolve(filePath));
+    }
   };
 
   router.get('/jobs/:id/sample', (req, res) => sendHtml(req, res, 'sample'));

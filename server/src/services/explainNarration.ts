@@ -84,6 +84,121 @@ export function applySubtitlePreference(html: string, enabled: boolean): string 
   return `${css}\n${html}`;
 }
 
+/** Sync script for injected <audio id="explain-narration"> with page play/pause UI. */
+export function buildNarrationSyncScript(): string {
+  // Handles LLM players that use a single #playBtn toggle (not separate .play/.pause).
+  return `<script id="explain-narration-sync">
+(function(){
+  var a=document.getElementById('explain-narration');
+  if(!a) return;
+  a.volume=1;
+  try { a.loop = true; } catch (e) {}
+
+  function syncPlay(playing){
+    try {
+      if(playing){ if(a.paused) a.play().catch(function(){}); }
+      else { if(!a.paused) a.pause(); }
+    } catch(e) {}
+  }
+
+  function iconLooksPlaying(){
+    var icon = document.getElementById('playIcon');
+    if(!icon) return null;
+    var h = String(icon.innerHTML || '');
+    // triangle play icon => animation paused
+    if (/M8\\s+5v14l11/i.test(h)) return false;
+    // two-bar pause icon => animation playing
+    if (/M6\\s+5h4v14|M14\\s+5h4v14/i.test(h)) return true;
+    return null;
+  }
+
+  function syncFromUi(){
+    var playing = iconLooksPlaying();
+    if (playing == null) {
+      var btn = document.getElementById('playBtn');
+      if (btn) {
+        var label = String(btn.getAttribute('aria-label') || '') + String(btn.textContent || '');
+        if (/暂停|Pause/i.test(label) && !/播放\\s*\\/\\s*暂停|Play\\s*\\/\\s*Pause/i.test(label)) playing = true;
+        else if (/播放|Play/i.test(label) && !/暂停|Pause/i.test(label)) playing = false;
+      }
+    }
+    if (playing == null) return;
+    syncPlay(playing);
+  }
+
+  function seekAudioFromTimeLabel(){
+    var el = document.getElementById('time');
+    if (!el || !isFinite(a.duration) || a.duration <= 0) return;
+    var m = String(el.textContent || '').match(/(\\d+):(\\d+)/);
+    if (!m) return;
+    var sec = Number(m[1]) * 60 + Number(m[2]);
+    if (!isFinite(sec)) return;
+    if (Math.abs((a.currentTime || 0) - sec) > 0.4) {
+      try { a.currentTime = Math.max(0, Math.min(sec, a.duration)); } catch (e) {}
+    }
+  }
+
+  document.addEventListener('click', function(ev){
+    var t = ev.target;
+    if (!t || !t.closest) return;
+    // Single toggle used by讲解动画 HTML（#playBtn）
+    if (t.closest('#playBtn,[data-play-toggle],.play-toggle,button[aria-label*=\"播放\"],button[aria-label*=\"Play\"],button[aria-label*=\"暂停\"],button[aria-label*=\"Pause\"]')) {
+      setTimeout(syncFromUi, 0);
+      return;
+    }
+    if (t.closest('[data-play],.play,button.play,#btn-play')) syncPlay(true);
+    if (t.closest('[data-pause],.pause,button.pause,#btn-pause')) syncPlay(false);
+  }, true);
+
+  ['mousedown','mouseup','touchend','click'].forEach(function(evt){
+    document.addEventListener(evt, function(ev){
+      var t = ev.target;
+      if (!t || !t.closest) return;
+      if (t.closest('#track,#knob,#fill')) setTimeout(seekAudioFromTimeLabel, 0);
+    }, true);
+  });
+
+  // Catch icon updates / loop resets while playing
+  var icon = document.getElementById('playIcon');
+  if (icon && typeof MutationObserver !== 'undefined') {
+    try {
+      new MutationObserver(function(){ syncFromUi(); }).observe(icon, { childList: true, subtree: true, characterData: true });
+    } catch (e) {}
+  }
+  setInterval(function(){
+    if (!a.paused) seekAudioFromTimeLabel();
+  }, 500);
+
+  function boot(){
+    setTimeout(function(){
+      syncFromUi();
+      // If UI already playing (common) but icon heuristic failed, still try autoplay
+      if (iconLooksPlaying() !== false && a.paused) a.play().catch(function(){});
+    }, 350);
+  }
+  if (document.readyState === 'complete') boot();
+  else window.addEventListener('load', boot);
+})();
+</script>`;
+}
+
+const NARRATION_SYNC_RE =
+  /<script(?:\s+id=["']explain-narration-sync["'])?>\s*\(function\(\)\{\s*var a=document\.getElementById\(['"]explain-narration['"]\);[\s\S]*?<\/script>/i;
+
+/** Upgrade old narration sync scripts in already-generated HTML (preview serve / re-inject). */
+export function patchNarrationAudioSync(html: string): string {
+  if (!html.includes('id="explain-narration"') && !html.includes("id='explain-narration'")) {
+    return html;
+  }
+  const script = buildNarrationSyncScript();
+  if (NARRATION_SYNC_RE.test(html)) {
+    return html.replace(NARRATION_SYNC_RE, script);
+  }
+  // Audio present but sync missing / unrecognized — append before </body>
+  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${script}</body>`);
+  return `${html}\n${script}`;
+}
+
 /** Inject a looping/controllable <audio> into the HTML so iframe sample stays self-contained. */
 export function injectNarrationAudio(html: string, audioPath: string): string {
   if (!fs.existsSync(audioPath)) return html;
@@ -91,34 +206,15 @@ export function injectNarrationAudio(html: string, audioPath: string): string {
   const ext = path.extname(audioPath).toLowerCase();
   const mime = ext === '.mp3' ? 'audio/mpeg' : ext === '.ogg' ? 'audio/ogg' : 'audio/wav';
   const dataUri = `data:${mime};base64,${buf.toString('base64')}`;
+  // Drop any previous narration block before re-injecting
+  let out = html
+    .replace(/<audio\b[^>]*\bid\s*=\s*["']explain-narration["'][^>]*>[\s\S]*?<\/audio>/gi, '')
+    .replace(NARRATION_SYNC_RE, '');
   const snip = `
 <audio id="explain-narration" src="${dataUri}" preload="auto" style="display:none"></audio>
-<script>
-(function(){
-  var a=document.getElementById('explain-narration');
-  if(!a) return;
-  function syncPlay(playing){
-    try {
-      if(playing){ if(a.paused) a.play().catch(function(){}); }
-      else { if(!a.paused) a.pause(); }
-    } catch(e) {}
-  }
-  // Hook common custom player buttons if present
-  document.addEventListener('click', function(ev){
-    var t=ev.target;
-    if(!t || !t.closest) return;
-    if(t.closest('[data-play],.play,button.play,#btn-play')) syncPlay(true);
-    if(t.closest('[data-pause],.pause,button.pause,#btn-pause')) syncPlay(false);
-  }, true);
-  // Autoplay attempt (may be blocked); user can press play on page controls
-  a.volume=1;
-  var tryPlay=function(){ a.play().catch(function(){}); };
-  if(document.readyState==='complete') setTimeout(tryPlay, 400);
-  else window.addEventListener('load', function(){ setTimeout(tryPlay, 400); });
-})();
-</script>`;
-  if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, `${snip}</body>`);
-  return `${html}\n${snip}`;
+${buildNarrationSyncScript()}`;
+  if (/<\/body>/i.test(out)) return out.replace(/<\/body>/i, `${snip}</body>`);
+  return `${out}\n${snip}`;
 }
 
 /**

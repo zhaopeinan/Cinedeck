@@ -150,9 +150,9 @@ export function prepareExplainHtmlForRecording(html: string): string {
   out = out.replace(/<audio\b[^>]*\bid\s*=\s*["']explain-narration["'][^>]*>[\s\S]*?<\/audio>/gi, '');
   // Remove any remaining giant data:audio URIs (safety)
   out = out.replace(/\s*src\s*=\s*["']data:audio\/[^"']+["']/gi, ' src=""');
-  // Drop the autoplay hook script block that only targets explain-narration
+  // Drop narration sync scripts (old + id="explain-narration-sync")
   out = out.replace(
-    /<script>\s*\(function\(\)\{\s*var a=document\.getElementById\(['"]explain-narration['"]\);[\s\S]*?<\/script>/gi,
+    /<script(?:\s+id=["']explain-narration-sync["'])?>\s*\(function\(\)\{\s*var a=document\.getElementById\(['"]explain-narration['"]\);[\s\S]*?<\/script>/gi,
     '',
   );
 
