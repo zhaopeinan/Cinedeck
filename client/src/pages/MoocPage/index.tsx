@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom';
 import {
   Alert, Button, Card, Checkbox, Col, Divider, Form, InputNumber, Modal, Progress, Radio, Row,
-  Select, Space, Spin, Switch, Table, Tag, Tooltip, Typography, Upload, message,
+  Select, Slider, Space, Spin, Switch, Table, Tag, Tooltip, Typography, Upload, message,
 } from 'antd';
 import {
   CloudUploadOutlined, DeleteOutlined, DownloadOutlined, ExclamationCircleOutlined, PlayCircleOutlined, PlusOutlined,
@@ -95,6 +95,13 @@ function buildMoocFormData(
   fd.append('enable_explain_insert', values.enableExplainInsert ? '1' : '0');
   if (values.enableExplainInsert) {
     fd.append('explain_export_quality', String(values.explainExportQuality || '1080p'));
+  }
+  if (values.enableAvatar) {
+    const chroma = Number(values.chromaSimilarity);
+    fd.append(
+      'chroma_similarity',
+      String(Number.isFinite(chroma) ? Math.min(0.6, Math.max(0.05, chroma)) : 0.28),
+    );
   }
   return fd;
 }
@@ -308,6 +315,7 @@ const MoocPage: React.FC = () => {
       maxRetries: 5,
       enableExplainInsert: false,
       explainExportQuality: '1080p',
+      chromaSimilarity: 0.28,
     });
 
     void (async () => {
@@ -811,7 +819,7 @@ const MoocPage: React.FC = () => {
                 label="插入知识点讲解动画"
                 name="enableExplainInsert"
                 valuePropName="checked"
-                extra="全自动拆知识点并生成动画，按页插入最终成片（耗时更长）"
+                extra="全自动拆知识点并生成动画，按页插入最终成片；若同时开启数字人，插片也会叠同款数字人（复用下方布局与绿幕强度）"
               >
                 <Switch checkedChildren="开启" unCheckedChildren="关闭" />
               </Form.Item>
@@ -1001,6 +1009,24 @@ const MoocPage: React.FC = () => {
                         渲染真实幻灯片以配置布局
                       </Button>
                     )}
+                  </Form.Item>
+
+                  <Form.Item
+                    label="绿幕抠图强度"
+                    name="chromaSimilarity"
+                    tooltip="仅绿幕参考视频生效；数值越大抠得越狠。页讲解与知识点插片共用。"
+                    extra="默认 28。非绿幕素材可忽略此项。"
+                    getValueProps={(v) => ({
+                      value: Math.round((Number(v) || 0.28) * 100),
+                    })}
+                    normalize={(v) => Math.min(0.6, Math.max(0.05, (Number(v) || 28) / 100))}
+                  >
+                    <Slider
+                      min={10}
+                      max={50}
+                      tooltip={{ formatter: (v) => `${v}` }}
+                      marks={{ 10: '弱', 28: '默认', 50: '强' }}
+                    />
                   </Form.Item>
                 </>
               )}

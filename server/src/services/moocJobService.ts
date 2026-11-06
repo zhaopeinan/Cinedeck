@@ -72,6 +72,11 @@ export interface MoocJobConfig {
   pauseDuration: number;
   /** 出错后自动重试次数（不含首次），默认 5；0 表示不自动重试 */
   maxRetries: number;
+  /**
+   * 绿幕抠图强度（chromakey similarity），仅绿幕参考视频生效。
+   * 默认 0.28，范围约 0.05–0.6。
+   */
+  chromaSimilarity: number;
   /** 拆知识点并插入讲解动画到成片（默认关） */
   enableExplainInsert: boolean;
   /** 讲解动画导出清晰度 */
@@ -126,6 +131,7 @@ const DEFAULT_CONFIG: MoocJobConfig = {
   defaultSilentPageDuration: 5,
   pauseDuration: 2,
   maxRetries: 5,
+  chromaSimilarity: 0.28,
   enableExplainInsert: false,
   explainExportQuality: '1080p',
   explainBatchId: null,

@@ -7,6 +7,10 @@ import { ProjectService } from './projectService';
 import { detectVideoEncoder, videoEncodeArgs, type FfmpegVideoEncoder } from './ffmpegEncoder';
 import { beginJob, clearCancel, isCancelled, JobCancelledError, requestCancel } from './jobCancel';
 import {
+  buildChromakeyFilter,
+  clampChromaSimilarity,
+} from './avatarComposeService';
+import {
   legacySlideAudioCachePath,
   slideAudioCachePath,
 } from '../utils/mediaCache';
@@ -32,6 +36,8 @@ export interface ComposeInput {
   pauseDuration?: number;
   /** 知识点讲解动画等：按页插入到 concat 时间线 */
   insertClips?: ComposeInsertClip[];
+  /** 绿幕抠图强度（仅 chromaKey 时生效） */
+  chromaSimilarity?: number;
 }
 
 export interface ExportRenderInput {
@@ -358,6 +364,7 @@ export class VideoComposerService {
     jobKind?: TrackedJob;
     /** When true, chromakey green (Duix greenscreen) before overlay. */
     chromaKey?: boolean;
+    chromaSimilarity?: number;
   }): Promise<void> {
     const jobKind: TrackedJob = opts.jobKind || 'compose';
     const { width, height } = await this.probeSize(opts.imagePath);
@@ -399,12 +406,9 @@ export class VideoComposerService {
     // If short: freeze last frame; if long/equal: trim.
     const needFreeze = avatarDur > 0.2 && avatarDur + 0.05 < dur;
     const padSec = needFreeze ? Math.max(0.05, dur - avatarDur) : 0;
-    // Greenscreen: chromakey then harden alpha.
-    // Soft blend alone leaves the person semi-transparent (ghostly) on white slides;
-    // lut forces near-transparent → 0 and everything else → opaque.
-    // similarity ~0.28 clears Duix's muddy green without needing extreme values.
+    const chromaSim = clampChromaSimilarity(opts.chromaSimilarity);
     const pixFmt = opts.chromaKey
-      ? "chromakey=0x00FF00:0.28:0.10,format=rgba,lut=a='if(lt(val\\,64)\\,0\\,255)',format=yuva420p"
+      ? buildChromakeyFilter(chromaSim, 0.1)
       : 'format=yuv420p';
     const pipChain = needFreeze
       ? `setpts=PTS-STARTPTS,fps=25,scale=${ow}:${oh},setsar=1,${pixFmt},tpad=stop_mode=clone:stop_duration=${padSec.toFixed(3)},trim=duration=${dur.toFixed(3)},setpts=PTS-STARTPTS`
@@ -444,7 +448,7 @@ export class VideoComposerService {
     ].join(';');
 
     if (opts.chromaKey) {
-      console.log(`[VideoComposer] Chromakey greenscreen overlay for ${path.basename(opts.outputPath)}`);
+      console.log(`[VideoComposer] Chromakey greenscreen overlay sim=${chromaSim} for ${path.basename(opts.outputPath)}`);
     }
 
     await this.runCmd(opts.projectId, jobKind, 'ffmpeg', [
@@ -459,6 +463,107 @@ export class VideoComposerService {
       '-t', String(dur),
       opts.outputPath,
     ], { timeout: this.segmentTimeoutMs(dur, 'avatar') });
+  }
+
+  /**
+   * Overlay a Duix avatar clip onto a background video (e.g. explain animation MP4).
+   * Keeps background audio; uses same layout / chromakey as slide compose.
+   */
+  async overlayAvatarOnBackgroundVideo(opts: {
+    projectId: string;
+    backgroundPath: string;
+    avatarPath: string;
+    outputPath: string;
+    layoutJson: any;
+    chromaKey?: boolean;
+    chromaSimilarity?: number;
+  }): Promise<string> {
+    const encoder = await detectVideoEncoder();
+    const bg = await this.probeMediaSize(opts.backgroundPath);
+    const dur = await this.probeDuration(opts.backgroundPath);
+    const avatar = await this.probeSize(opts.avatarPath);
+    const layout = this.parseLayout(opts.layoutJson);
+    const even = (n: number) => Math.max(2, Math.floor(n / 2) * 2);
+    const width = even(bg.width);
+    const height = even(bg.height);
+    const avatarAr = Math.max(0.2, avatar.width / Math.max(1, avatar.height));
+    let ow = even(width * layout.w);
+    let oh = even(ow / avatarAr);
+    if (oh > height * 0.95) {
+      oh = even(height * 0.95);
+      ow = even(oh * avatarAr);
+    }
+    let ox = even(width * layout.x);
+    let oy = even(height * layout.y);
+    if (ox + ow > width) ox = even(Math.max(0, width - ow));
+    if (oy + oh > height) oy = even(Math.max(0, height - oh));
+
+    let avatarDur = 0;
+    try {
+      const { stdout } = await execFileAsync('ffprobe', [
+        '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'stream=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        opts.avatarPath,
+      ], { timeout: 30000 });
+      avatarDur = parseFloat(String(stdout).trim()) || 0;
+    } catch { /* ignore */ }
+    if (!(avatarDur > 0)) avatarDur = await this.probeDuration(opts.avatarPath).catch(() => 0);
+
+    const needFreeze = avatarDur > 0.2 && avatarDur + 0.05 < dur;
+    const padSec = needFreeze ? Math.max(0.05, dur - avatarDur) : 0;
+    const chromaSim = clampChromaSimilarity(opts.chromaSimilarity);
+    const pixFmt = opts.chromaKey
+      ? buildChromakeyFilter(chromaSim, 0.1)
+      : 'format=yuv420p';
+    const pipChain = needFreeze
+      ? `setpts=PTS-STARTPTS,fps=25,scale=${ow}:${oh},setsar=1,${pixFmt},tpad=stop_mode=clone:stop_duration=${padSec.toFixed(3)},trim=duration=${dur.toFixed(3)},setpts=PTS-STARTPTS`
+      : `setpts=PTS-STARTPTS,fps=25,scale=${ow}:${oh},setsar=1,${pixFmt},trim=duration=${dur.toFixed(3)},setpts=PTS-STARTPTS`;
+
+    // Prefer background (explain) audio so narration stays intact
+    let hasBgAudio = false;
+    try {
+      const { stdout } = await execFileAsync('ffprobe', [
+        '-v', 'error', '-select_streams', 'a:0',
+        '-show_entries', 'stream=codec_type',
+        '-of', 'csv=p=0',
+        opts.backgroundPath,
+      ], { timeout: 15000 });
+      hasBgAudio = String(stdout).trim().length > 0;
+    } catch { /* ignore */ }
+
+    try { if (fs.existsSync(opts.outputPath)) fs.unlinkSync(opts.outputPath); } catch { /* ignore */ }
+
+    const filterComplex = hasBgAudio
+      ? [
+          `[0:v]scale=${width}:${height},setsar=1,fps=25,format=yuv420p,setpts=PTS-STARTPTS[bg]`,
+          `[1:v]${pipChain}[pip]`,
+          `[bg][pip]overlay=${ox}:${oy}:eof_action=repeat:shortest=1[v]`,
+          `[0:a]aresample=async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,apad,atrim=0:${dur.toFixed(3)},asetpts=PTS-STARTPTS[a]`,
+        ].join(';')
+      : [
+          `[0:v]scale=${width}:${height},setsar=1,fps=25,format=yuv420p,setpts=PTS-STARTPTS[bg]`,
+          `[1:v]${pipChain}[pip]`,
+          `[bg][pip]overlay=${ox}:${oy}:eof_action=repeat:shortest=1[v]`,
+        ].join(';');
+
+    const args = [
+      '-y',
+      '-i', opts.backgroundPath,
+      '-i', opts.avatarPath,
+      '-filter_complex', filterComplex,
+      '-map', '[v]',
+      ...(hasBgAudio ? ['-map', '[a]'] : ['-an']),
+      ...videoEncodeArgs(encoder, { fast: dur >= 90 }),
+      ...(hasBgAudio ? ['-c:a', 'aac', '-b:a', '192k'] : []),
+      '-shortest',
+      '-t', String(dur),
+      opts.outputPath,
+    ];
+    await this.runCmd(opts.projectId, 'compose', 'ffmpeg', args, {
+      timeout: this.segmentTimeoutMs(dur, 'avatar'),
+    });
+    return opts.outputPath;
   }
 
   private resolveAvatarPath(slide: any): string | null {
@@ -613,6 +718,7 @@ export class VideoComposerService {
     this.projectService.updateProject(input.projectId, { video_status: 'generating' });
     const encoder = await detectVideoEncoder();
     const chromaKey = this.projectService.isAvatarRefGreenscreen((project as any).avatar_ref_video_id);
+    const chromaSimilarity = clampChromaSimilarity(input.chromaSimilarity);
 
     try {
       const projectDir = path.dirname(project.file_path);
@@ -627,6 +733,7 @@ export class VideoComposerService {
       const segmentFiles: string[] = [];
 
       const totalPages = input.slides.length;
+      const gsTag = chromaKey ? `_gs${Math.round(chromaSimilarity * 100)}` : '';
       const insertClips = Array.isArray(input.insertClips) ? input.insertClips.filter((c) => c?.videoPath && fs.existsSync(c.videoPath)) : [];
       const insertsByPage = new Map<number, ComposeInsertClip[]>();
       for (const clip of insertClips) {
@@ -726,7 +833,7 @@ export class VideoComposerService {
           duration = input.defaultSilentPageDuration;
         }
 
-        const segmentPath = path.join(segmentsDir, chromaKey ? `segment_${pageIndex}_gs3.mkv` : `segment_${pageIndex}.mkv`);
+        const segmentPath = path.join(segmentsDir, `segment_${pageIndex}${gsTag}.mkv`);
         const segTimeout = this.segmentTimeoutMs(duration, 'simple');
         const useFastEncode = duration >= 90;
         let usedAvatar = false;
@@ -753,6 +860,7 @@ export class VideoComposerService {
               outputPath: segmentPath,
               encoder,
               chromaKey,
+              chromaSimilarity,
             });
           } else {
             // Intermediate mkv+pcm avoids AAC priming delay (~21ms) that makes lips look late.
@@ -1089,6 +1197,7 @@ export class VideoComposerService {
           encoder,
           jobKind: 'export',
           chromaKey,
+          chromaSimilarity: 0.28,
         });
 
         const vfParts: string[] = hasCrop

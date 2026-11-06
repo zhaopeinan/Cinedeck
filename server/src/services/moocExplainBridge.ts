@@ -22,6 +22,8 @@ export interface ExplainInsertClip {
   videoPath: string;
   title: string;
   explainJobId: string;
+  /** 旁白 wav（叠数字人用），通常与 export 同目录 */
+  audioPath?: string | null;
 }
 
 export interface MoocExplainBridgeResult {
@@ -51,6 +53,7 @@ function writeInsertsJson(projectDir: string, inserts: ExplainInsertClip[], summ
       videoPath: c.videoPath,
       title: c.title,
       explainJobId: c.explainJobId,
+      audioPath: c.audioPath || null,
     })),
     updatedAt: new Date().toISOString(),
   }, null, 2), 'utf8');
@@ -69,6 +72,7 @@ function readExistingInserts(projectDir: string): ExplainInsertClip[] | null {
         videoPath: String(x.videoPath || ''),
         title: String(x.title || ''),
         explainJobId: String(x.explainJobId || ''),
+        audioPath: x.audioPath && fs.existsSync(x.audioPath) ? String(x.audioPath) : null,
       }))
       .filter((c: ExplainInsertClip) =>
         Number.isFinite(c.afterPage) && c.videoPath && fs.existsSync(c.videoPath));
@@ -279,6 +283,11 @@ export async function runMoocExplainInsert(opts: {
   let failed = 0;
   let skipped = 0;
 
+  const resolveNarration = (finalDir: string) => {
+    const wav = path.join(finalDir, 'narration.wav');
+    return fs.existsSync(wav) ? wav : null;
+  };
+
   for (const p of points.filter((x) => x.selected !== false)) {
     if (opts.isCancelled()) throw Object.assign(new Error('CANCELLED'), { code: 'CANCELLED' });
     const jobId = p.jobId;
@@ -295,30 +304,31 @@ export async function runMoocExplainInsert(opts: {
     const quality = opts.quality;
     const finalDir = path.dirname(child.final_path);
     const outPath = path.join(finalDir, `export_${quality}.mp4`);
+    const audioPath = resolveNarration(finalDir);
+    const afterPage = Number.isFinite(Number(p.insertAfterPage))
+      ? Number(p.insertAfterPage)
+      : (Number(p.pageEnd) || Number(p.pageStart) || 0);
 
     // Reuse existing export
     if (child.video_path && fs.existsSync(child.video_path)) {
-      // prefer quality-specific if present
       const preferred = fs.existsSync(outPath) ? outPath : child.video_path;
       inserts.push({
-        afterPage: Number.isFinite(Number(p.insertAfterPage))
-          ? Number(p.insertAfterPage)
-          : (Number(p.pageEnd) || Number(p.pageStart) || 0),
+        afterPage,
         videoPath: preferred,
         title: p.title || child.name,
         explainJobId: child.id,
+        audioPath,
       });
       continue;
     }
     if (fs.existsSync(outPath)) {
       explainJobs.updateJob(child.id, { video_path: outPath });
       inserts.push({
-        afterPage: Number.isFinite(Number(p.insertAfterPage))
-          ? Number(p.insertAfterPage)
-          : (Number(p.pageEnd) || Number(p.pageStart) || 0),
+        afterPage,
         videoPath: outPath,
         title: p.title || child.name,
         explainJobId: child.id,
+        audioPath,
       });
       continue;
     }
@@ -354,12 +364,11 @@ export async function runMoocExplainInsert(opts: {
         continue;
       }
       inserts.push({
-        afterPage: Number.isFinite(Number(p.insertAfterPage))
-          ? Number(p.insertAfterPage)
-          : (Number(p.pageEnd) || Number(p.pageStart) || 0),
+        afterPage,
         videoPath,
         title: p.title || child.name,
         explainJobId: child.id,
+        audioPath,
       });
     } catch (err: any) {
       console.warn(`[MOOC-Explain] export failed for ${child.id}:`, err?.message || err);

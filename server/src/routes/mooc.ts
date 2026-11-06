@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { MoocJobService, STAGE_LABEL_CN, getMoocUploadDir, type MoocJobConfig } from '../services/moocJobService';
+import { clampChromaSimilarity } from '../services/avatarComposeService';
 import { pumpMoocQueue, requestMoocJobCancel } from '../services/moocPipelineWorker';
 import { ProjectService } from '../services/projectService';
 import { PptParserService } from '../services/pptParser';
@@ -410,6 +411,9 @@ export function createMoocRouter(
         defaultSilentPageDuration: Number(body.default_silent_page_duration ?? body.defaultSilentPageDuration ?? 5) || 5,
         pauseDuration,
         maxRetries,
+        chromaSimilarity: clampChromaSimilarity(
+          body.chroma_similarity ?? body.chromaSimilarity,
+        ),
         enableExplainInsert,
         explainExportQuality,
         explainBatchId: null,

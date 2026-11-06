@@ -27,6 +27,7 @@ import {
 import type { ExplainBatchService } from './explainBatchService';
 import type { ExplainJobService } from './explainJobService';
 import { runMoocExplainInsert, type ExplainInsertClip } from './moocExplainBridge';
+import { attachAvatarsToExplainInserts } from './moocExplainAvatar';
 
 export interface MoocPipelineDeps {
   db: Database.Database;
@@ -509,8 +510,48 @@ async function runMoocJob(job: MoocJobRow) {
           });
           insertClips = result.inserts;
           explainSummary = result.summary;
-          markCheckpoint('explain_points', 78, `知识点分析完成（${result.inserts.length} 段待插入）`);
-          markCheckpoint('explain_ready', 88, result.summary);
+
+          // Reuse MOOC avatar config on knowledge-point inserts
+          if (config.enableAvatar && insertClips.length) {
+            setProgress('explain_gen', 86, '为知识点插片生成数字人…');
+            try {
+              const av = await attachAvatarsToExplainInserts({
+                projectId: projectId!,
+                userId: job.user_id,
+                projectDir,
+                inserts: insertClips,
+                projectService: d.projectService,
+                videoComposer: d.videoComposer,
+                db: d.db,
+                chromaSimilarity: config.chromaSimilarity ?? 0.28,
+                isCancelled: () => d.moocJobs.isCancelRequested(job.id),
+                onProgress: (message, progress) => setProgress('explain_gen', progress, message),
+              });
+              insertClips = av.inserts;
+              // Rewrite inserts.json with avatar-composited paths
+              const insertsPath = path.join(projectDir, 'explain_inserts.json');
+              const summaryExtra = av.avatarApplied
+                ? `（其中 ${av.avatarApplied} 段已叠数字人`
+                  + (av.avatarFailed ? `，${av.avatarFailed} 段数字人失败仍用原片` : '')
+                  + '）'
+                : (av.avatarFailed ? `（知识点数字人失败 ${av.avatarFailed}，用原片）` : '');
+              explainSummary = `${result.summary}${summaryExtra}`;
+              fs.writeFileSync(insertsPath, JSON.stringify({
+                summary: explainSummary,
+                inserts: insertClips,
+                updatedAt: new Date().toISOString(),
+              }, null, 2), 'utf8');
+            } catch (err: any) {
+              if (err?.code === 'CANCELLED' || /CANCELLED|取消/.test(String(err?.message || ''))) {
+                throw err;
+              }
+              console.warn(`[MOOC] Explain avatar soft-fail:`, err?.message || err);
+              explainSummary = `${result.summary}（知识点数字人跳过：${String(err?.message || err).slice(0, 80)}）`;
+            }
+          }
+
+          markCheckpoint('explain_points', 78, `知识点分析完成（${insertClips.length} 段待插入）`);
+          markCheckpoint('explain_ready', 88, explainSummary);
         } catch (err: any) {
           if (err?.code === 'CANCELLED' || /CANCELLED|取消/.test(String(err?.message || ''))) {
             throw err;
@@ -579,6 +620,7 @@ async function runMoocJob(job: MoocJobRow) {
           allowSilentPages: !!config.allowSilentPages,
           defaultSilentPageDuration: config.defaultSilentPageDuration || 5,
           pauseDuration: config.pauseDuration ?? 2,
+          chromaSimilarity: config.chromaSimilarity ?? 0.28,
           insertClips: insertClips.map((c) => ({
             afterPage: c.afterPage,
             videoPath: c.videoPath,
