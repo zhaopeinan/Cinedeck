@@ -500,17 +500,31 @@ const MoocPage: React.FC = () => {
     {
       title: '进度',
       key: 'progress',
-      width: 148,
+      width: 160,
       render: (_: any, r: any) => {
         const stageText = r.status === 'failed'
           ? (r.failedStageLabel || STAGE_LABEL[r.failedStage] || STAGE_LABEL[r.stage] || r.stage)
           : (r.stageLabel || STAGE_LABEL[r.stage] || r.stage);
         const summary = r.progressSummary || '';
         return (
-          <div style={{ width: 136 }}>
-            <div style={{ fontSize: 12, marginBottom: 2 }}>{stageText}</div>
-            {summary && summary !== stageText && (
-              <Tooltip title={summary}>
+          <Tooltip title="点击查看流水线与知识点详情">
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={(e) => {
+                e.stopPropagation();
+                void openJobDetail(r.id);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  void openJobDetail(r.id);
+                }
+              }}
+              style={{ width: 148, cursor: 'pointer' }}
+            >
+              <div style={{ fontSize: 12, marginBottom: 2, color: '#1677ff' }}>{stageText}</div>
+              {summary && summary !== stageText && (
                 <div style={{
                   fontSize: 11,
                   color: 'rgba(0,0,0,0.45)',
@@ -522,26 +536,26 @@ const MoocPage: React.FC = () => {
                 >
                   {truncateText(summary, 22)}
                 </div>
-              </Tooltip>
-            )}
-            {(r.retryCount > 0 || (r.maxRetries != null && r.status !== 'success')) && (
-              <div style={{ fontSize: 11, color: 'rgba(0,0,0,0.45)', marginBottom: 2 }}>
-                重试 {r.retryCount || 0}/{r.maxRetries ?? 5}
-              </div>
-            )}
-            {(r.status === 'running' || r.status === 'queued') ? (
-              <Progress
-                percent={r.progress || 0}
-                size="small"
-                status={r.status === 'queued' ? 'normal' : 'active'}
-                showInfo={false}
-              />
-            ) : r.status === 'success' ? (
-              <Progress percent={100} size="small" status="success" showInfo={false} />
-            ) : r.status === 'failed' ? (
-              <Progress percent={r.progress || 0} size="small" status="exception" showInfo={false} />
-            ) : null}
-          </div>
+              )}
+              {(r.retryCount > 0 || (r.maxRetries != null && r.status !== 'success')) && (
+                <div style={{ fontSize: 11, color: 'rgba(0,0,0,0.45)', marginBottom: 2 }}>
+                  重试 {r.retryCount || 0}/{r.maxRetries ?? 5}
+                </div>
+              )}
+              {(r.status === 'running' || r.status === 'queued') ? (
+                <Progress
+                  percent={r.progress || 0}
+                  size="small"
+                  status={r.status === 'queued' ? 'normal' : 'active'}
+                  showInfo={false}
+                />
+              ) : r.status === 'success' ? (
+                <Progress percent={100} size="small" status="success" showInfo={false} />
+              ) : r.status === 'failed' ? (
+                <Progress percent={r.progress || 0} size="small" status="exception" showInfo={false} />
+              ) : null}
+            </div>
+          </Tooltip>
         );
       },
     },
@@ -564,24 +578,16 @@ const MoocPage: React.FC = () => {
         const isFail = r.status === 'failed';
         return (
           <Space size={4}>
-            <Tooltip title={text}>
+            <Tooltip title={`${text}（点击查看详情）`}>
               <Text
                 type={isFail ? 'danger' : 'secondary'}
-                style={{ fontSize: 12, maxWidth: 360, display: 'inline-block' }}
+                style={{ fontSize: 12, maxWidth: 360, display: 'inline-block', cursor: 'pointer' }}
                 ellipsis
+                onClick={() => void openJobDetail(r.id)}
               >
                 {short}
               </Text>
             </Tooltip>
-            <Button
-              type="link"
-              size="small"
-              icon={<ProfileOutlined />}
-              style={{ padding: 0, height: 'auto' }}
-              onClick={() => void openJobDetail(r.id)}
-            >
-              进度
-            </Button>
             {isFail && r.error && (
               <Button
                 type="link"
@@ -620,10 +626,18 @@ const MoocPage: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 280,
+      width: 320,
       fixed: 'right' as const,
       render: (_: any, r: any) => (
         <Space size={4} wrap>
+          <Button
+            size="small"
+            type="link"
+            icon={<ProfileOutlined />}
+            onClick={() => void openJobDetail(r.id)}
+          >
+            详情
+          </Button>
           {(r.pptAvailable || r.fileName) && (
             <Button
               size="small"
@@ -1167,8 +1181,11 @@ const MoocPage: React.FC = () => {
               columns={columns as any}
               dataSource={jobs}
               pagination={{ pageSize: 8, size: 'small' }}
-              scroll={{ x: 1100 }}
+              scroll={{ x: 1180 }}
               locale={{ emptyText: '暂无任务，左侧配置后加入队列' }}
+              onRow={(r) => ({
+                onDoubleClick: () => { void openJobDetail(r.id); },
+              })}
             />
           </Card>
         </Col>
