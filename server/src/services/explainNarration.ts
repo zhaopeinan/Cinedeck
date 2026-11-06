@@ -4,6 +4,7 @@ import axios from 'axios';
 import { VoiceboxAdapter } from './voiceboxAdapter';
 import { withVoiceboxGpu } from './voiceboxGpuQueue';
 import { ensureVoiceboxRunningForAudio } from './avatarWorker';
+import { MediaQualityError, assertSpeechAudioOk } from '../utils/mediaQuality';
 
 function pickNarrationNodes(script: any, mode: 'sample' | 'final'): Array<{ narration: string; seconds?: number }> {
   const nodes = Array.isArray(script?.nodes) ? script.nodes : [];
@@ -245,29 +246,42 @@ export async function synthesizeExplainNarration(opts: {
 
   await ensureVoiceboxRunningForAudio();
   const ttsWaitStarted = Date.now();
-  await withVoiceboxGpu('explain:narration', async () => {
+  const maxQcAttempts = 3;
+  let lastErr: Error | null = null;
+  for (let attempt = 1; attempt <= maxQcAttempts; attempt++) {
     try {
-      const { noteExplainTtsWait } = await import('./explainConcurrency');
-      noteExplainTtsWait(Date.now() - ttsWaitStarted);
-    } catch { /* ignore */ }
-    const task = await opts.voicebox.generateDubbing({
-      text,
-      voiceId: opts.voiceId,
-      modelId: opts.modelId,
-      language: opts.language === 'en' ? 'en-US' : 'zh-CN',
-      maxChunkChars: opts.maxChunkChars ?? 150,
-      instruct: opts.language === 'en'
-        ? 'Steady pace, clear diction, suitable for explainer narration.'
-        : '语速平稳，吐字清晰，适合讲解动画旁白。',
-    });
-    const ok = await waitVoiceboxTask(opts.voicebox, task.id, opts.timeoutSec ?? 600);
-    if (!ok) {
-      const st = await opts.voicebox.getTaskStatus(task.id).catch(() => null);
-      throw new Error(`配音失败${st?.error ? `：${st.error}` : ''}`);
+      await withVoiceboxGpu('explain:narration', async () => {
+        try {
+          const { noteExplainTtsWait } = await import('./explainConcurrency');
+          noteExplainTtsWait(Date.now() - ttsWaitStarted);
+        } catch { /* ignore */ }
+        const task = await opts.voicebox.generateDubbing({
+          text,
+          voiceId: opts.voiceId,
+          modelId: opts.modelId,
+          language: opts.language === 'en' ? 'en-US' : 'zh-CN',
+          maxChunkChars: opts.maxChunkChars ?? 150,
+          instruct: opts.language === 'en'
+            ? 'Steady pace, clear diction, suitable for explainer narration.'
+            : '语速平稳，吐字清晰，适合讲解动画旁白。',
+        });
+        const ok = await waitVoiceboxTask(opts.voicebox, task.id, opts.timeoutSec ?? 600);
+        if (!ok) {
+          const st = await opts.voicebox.getTaskStatus(task.id).catch(() => null);
+          throw new Error(`配音失败${st?.error ? `：${st.error}` : ''}`);
+        }
+        const result = await opts.voicebox.getTaskResult(task.id);
+        if (!result?.audioPath) throw new Error('配音完成但未返回音频');
+        await downloadAudio(result.audioPath, opts.outPath);
+      });
+      await assertSpeechAudioOk({ filePath: opts.outPath, text });
+      return opts.outPath;
+    } catch (err: any) {
+      lastErr = err instanceof Error ? err : new Error(String(err));
+      try { if (fs.existsSync(opts.outPath)) fs.unlinkSync(opts.outPath); } catch { /* ignore */ }
+      if (!(err instanceof MediaQualityError) || attempt >= maxQcAttempts) break;
+      console.warn(`[ExplainNarration] QC fail attempt ${attempt}/${maxQcAttempts}: ${lastErr.message}`);
     }
-    const result = await opts.voicebox.getTaskResult(task.id);
-    if (!result?.audioPath) throw new Error('配音完成但未返回音频');
-    await downloadAudio(result.audioPath, opts.outPath);
-  });
-  return opts.outPath;
+  }
+  throw lastErr || new Error('讲解旁白生成失败');
 }

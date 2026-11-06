@@ -16,6 +16,21 @@ import {
 } from './explainExportQueue';
 import type { ExplainExportQuality } from './explainExport';
 import type { MoocJobConfig, MoocJobService } from './moocJobService';
+import { qcExplainAnimationMp4, qcSpeechAudio } from '../utils/mediaQuality';
+
+/** Reject frozen/broken exports (and optional bad narration) before inserting into MOOC. */
+async function assertInsertMediaOk(videoPath: string, audioPath: string | null): Promise<void> {
+  const motion = await qcExplainAnimationMp4({ filePath: videoPath });
+  if (!motion.ok) {
+    throw new Error(motion.reasons.join('；') || '讲解画面质检未通过');
+  }
+  if (audioPath && fs.existsSync(audioPath)) {
+    const audio = await qcSpeechAudio({ filePath: audioPath, minDurationSec: 0.8 });
+    if (!audio.ok) {
+      throw new Error(audio.reasons.join('；') || '讲解旁白质检未通过');
+    }
+  }
+}
 
 export interface ExplainInsertClip {
   afterPage: number;
@@ -309,28 +324,34 @@ export async function runMoocExplainInsert(opts: {
       ? Number(p.insertAfterPage)
       : (Number(p.pageEnd) || Number(p.pageStart) || 0);
 
-    // Reuse existing export
+    // Reuse existing export only if it still passes visual/audio QC
+    const tryReuse = async (candidate: string): Promise<boolean> => {
+      try {
+        await assertInsertMediaOk(candidate, audioPath);
+        if (candidate === outPath) explainJobs.updateJob(child.id, { video_path: outPath });
+        inserts.push({
+          afterPage,
+          videoPath: candidate,
+          title: p.title || child.name,
+          explainJobId: child.id,
+          audioPath,
+        });
+        return true;
+      } catch (err: any) {
+        console.warn(`[MOOC-Explain] reuse QC fail ${child.id}:`, err?.message || err);
+        try { if (fs.existsSync(candidate)) fs.unlinkSync(candidate); } catch { /* ignore */ }
+        if (child.video_path === candidate) {
+          try { explainJobs.updateJob(child.id, { video_path: null as any }); } catch { /* ignore */ }
+        }
+        return false;
+      }
+    };
+
     if (child.video_path && fs.existsSync(child.video_path)) {
       const preferred = fs.existsSync(outPath) ? outPath : child.video_path;
-      inserts.push({
-        afterPage,
-        videoPath: preferred,
-        title: p.title || child.name,
-        explainJobId: child.id,
-        audioPath,
-      });
-      continue;
-    }
-    if (fs.existsSync(outPath)) {
-      explainJobs.updateJob(child.id, { video_path: outPath });
-      inserts.push({
-        afterPage,
-        videoPath: outPath,
-        title: p.title || child.name,
-        explainJobId: child.id,
-        audioPath,
-      });
-      continue;
+      if (await tryReuse(preferred)) continue;
+    } else if (fs.existsSync(outPath)) {
+      if (await tryReuse(outPath)) continue;
     }
 
     opts.onProgress?.('explain_gen', 88, `导出讲解动画：${p.title || child.name}`);
@@ -363,6 +384,7 @@ export async function runMoocExplainInsert(opts: {
         failed += 1;
         continue;
       }
+      await assertInsertMediaOk(videoPath, audioPath);
       inserts.push({
         afterPage,
         videoPath,

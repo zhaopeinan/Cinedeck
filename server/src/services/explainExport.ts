@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { HYPERFRAMES_IMAGE } from './hyperframeRender';
+import { assertExplainAnimationMp4Ok, assertSpeechAudioOk } from '../utils/mediaQuality';
 
 export type ExplainExportQuality = '720p' | '1080p' | '1440p';
 
@@ -344,13 +345,35 @@ export async function exportExplainHtmlToMp4(opts: {
 
   // Even if docker was SIGKILL'd at the end, accept a usable MP4 (false-negative timeout).
   const ok = await isUsableMp4(outPath, Math.min(3, Math.max(2, seconds * 0.5)));
-  if (ok) {
-    if (r.code !== 0) {
-      opts.onLog?.(`docker exited ${r.code} but MP4 is usable → treat as success`);
-    }
-    opts.onLog?.(`export ok → ${outPath}`);
-    return;
+  if (!ok) {
+    throw new Error(`导出 MP4 失败：${summarizeExportFailure(r.stdout, r.stderr, r.timedOut)}`);
+  }
+  if (r.code !== 0) {
+    opts.onLog?.(`docker exited ${r.code} but MP4 is usable → treat as success`);
   }
 
-  throw new Error(`导出 MP4 失败：${summarizeExportFailure(r.stdout, r.stderr, r.timedOut)}`);
+  // Narration wav QC (if present)
+  if (opts.audioPath && fs.existsSync(opts.audioPath)) {
+    try {
+      await assertSpeechAudioOk({ filePath: opts.audioPath, minDurationSec: 0.8 });
+    } catch (e: any) {
+      throw new Error(`讲解旁白质检失败：${e?.message || e}`);
+    }
+  }
+
+  // Motion QC: catch frozen/overlapped initial-frame exports before they enter MOOC.
+  try {
+    const motion = await assertExplainAnimationMp4Ok({
+      filePath: outPath,
+      durationSec: seconds,
+    });
+    opts.onLog?.(
+      `motion qc ok psnr mid=${motion.scores.midPsnr.toFixed(1)}dB end=${motion.scores.endPsnr.toFixed(1)}dB`,
+    );
+  } catch (e: any) {
+    try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch { /* ignore */ }
+    throw new Error(`讲解动画画面质检失败：${e?.message || e}`);
+  }
+
+  opts.onLog?.(`export ok → ${outPath}`);
 }

@@ -9,8 +9,38 @@ import {
   setActivePage,
   updateDubbingProgress,
 } from './dubbingProgress';
-import { invalidateSlideMediaCache } from '../utils/mediaCache';
+import { invalidateSlideMediaCache, projectDirFromId, slideAudioCachePath } from '../utils/mediaCache';
 import { ensureVoiceboxRunningForAudio } from './avatarWorker';
+import {
+  MediaQualityError,
+  assertSpeechAudioOk,
+  downloadVoiceboxAudio,
+  probeAudioDurationSec,
+} from '../utils/mediaQuality';
+
+/** Download Voicebox result, run speech QC, return accepted local path + probed duration. */
+async function acceptDubbingAudio(opts: {
+  projectId: string;
+  pageIndex: number;
+  audioUrl: string;
+  text: string;
+  expectedDurationSec?: number | null;
+  reportedDuration?: number | null;
+}): Promise<{ localPath: string; durationSec: number }> {
+  const projectDir = projectDirFromId(opts.projectId);
+  const localPath = slideAudioCachePath(projectDir, opts.pageIndex, opts.audioUrl);
+  await downloadVoiceboxAudio(opts.audioUrl, localPath);
+  const qc = await assertSpeechAudioOk({
+    filePath: localPath,
+    text: opts.text,
+    expectedDurationSec: opts.expectedDurationSec,
+  });
+  // Prefer probed duration over Voicebox metadata (metadata can lie)
+  const durationSec = qc.durationSec
+    || Number(opts.reportedDuration)
+    || await probeAudioDurationSec(localPath);
+  return { localPath, durationSec };
+}
 
 /**
  * Build a detailed error log string from a thrown error (typically axios error
@@ -112,75 +142,61 @@ export async function generateAllInBackground(
       projectService.updateSlide(projectId, slide.page_index, { dubbing_status: 'generating', dubbing_error: null });
       appendDubbingLog(projectId, `开始第 ${pageNo} 页（约 ${charCount} 字，分块≤${maxChunkChars}）`, 'info');
 
-      const task = await voicebox.generateDubbing({
-        text: slide.note_content,
-        voiceId,
-        modelId,
-        language: 'zh-CN',
-        maxChunkChars,
-        instruct: '语速平稳，吐字清晰，不要越说越快。',
-      });
-
-      console.log(`[Dubbing] Slide ${slide.page_index}: generation started (task ${task.id})`);
-      appendDubbingLog(projectId, `第 ${pageNo} 页任务已提交（task ${task.id}）`, 'info');
-
-      let completed = false;
-      let attempts = 0;
-      while (!completed && attempts < maxAttempts) {
-        if (isDubbingCancelled(projectId)) {
+      const maxQcAttempts = 3;
+      let slideDone = false;
+      let lastQcError = '';
+      for (let qcAttempt = 1; qcAttempt <= maxQcAttempts && !slideDone; qcAttempt++) {
+        if (isDubbingCancelled(projectId) || cancelled) {
           cancelled = true;
-          appendDubbingLog(projectId, `第 ${pageNo} 页生成过程中被取消`, 'warn');
-          completed = true;
           break;
         }
-
-        const checkSlide = projectService.getSlide(projectId, slide.page_index) as any;
-        if (checkSlide?.dubbing_status !== 'generating') {
-          cancelled = true;
-          appendDubbingLog(projectId, `第 ${pageNo} 页状态已变更，停止等待`, 'warn');
-          completed = true;
-          break;
+        if (qcAttempt > 1) {
+          appendDubbingLog(
+            projectId,
+            `第 ${pageNo} 页配音质检未通过，自动重试 ${qcAttempt - 1}/${maxQcAttempts - 1}：${lastQcError.slice(0, 120)}`,
+            'warn',
+          );
         }
 
-        let status;
-        try {
-          status = await voicebox.getTaskStatus(task.id);
-        } catch (statErr: any) {
-          const errLog = buildDubbingErrorLog(statErr, {
-            slidePageIndex: slide.page_index,
-            voiceId,
-            modelId,
-            textPreview: (slide.note_content || '').slice(0, 100),
-          });
-          projectService.updateSlide(projectId, slide.page_index, {
-            dubbing_status: 'failed',
-            dubbing_error: `[查询状态失败] ${errLog}`,
-          });
-          failedCount++;
-          updateDubbingProgress(projectId, { failedCount, completedCount });
-          appendDubbingLog(projectId, `第 ${pageNo} 页查询状态失败: ${statErr.message}`, 'error');
-          completed = true;
-          break;
-        }
+        const task = await voicebox.generateDubbing({
+          text: slide.note_content,
+          voiceId,
+          modelId,
+          language: 'zh-CN',
+          maxChunkChars,
+          instruct: '语速平稳，吐字清晰，不要越说越快。',
+        });
 
-        if (status.status === 'succeeded') {
+        console.log(`[Dubbing] Slide ${slide.page_index}: generation started (task ${task.id}, qc=${qcAttempt})`);
+        appendDubbingLog(projectId, `第 ${pageNo} 页任务已提交（task ${task.id}）`, 'info');
+
+        let completed = false;
+        let attempts = 0;
+        let resultAudio: string | null = null;
+        let resultDuration: number | null = null;
+        while (!completed && attempts < maxAttempts) {
+          if (isDubbingCancelled(projectId)) {
+            cancelled = true;
+            appendDubbingLog(projectId, `第 ${pageNo} 页生成过程中被取消`, 'warn');
+            completed = true;
+            slideDone = true;
+            break;
+          }
+
+          const checkSlide = projectService.getSlide(projectId, slide.page_index) as any;
+          if (checkSlide?.dubbing_status !== 'generating') {
+            cancelled = true;
+            appendDubbingLog(projectId, `第 ${pageNo} 页状态已变更，停止等待`, 'warn');
+            completed = true;
+            slideDone = true;
+            break;
+          }
+
+          let status;
           try {
-            const result = await voicebox.getTaskResult(task.id);
-            projectService.updateSlide(projectId, slide.page_index, {
-              dubbing_status: 'generated',
-              dubbing_audio_path: result.audioPath,
-              dubbing_duration: result.duration,
-              dubbing_version: (slide.dubbing_version || 0) + 1,
-              dubbing_error: null,
-            });
-            invalidateSlideMediaCache(projectId, slide.page_index);
-            completedCount++;
-            const dur = result.duration?.toFixed(1) || '?';
-            updateDubbingProgress(projectId, { completedCount, failedCount });
-            appendDubbingLog(projectId, `第 ${pageNo} 页完成，时长 ${dur}s`, 'success');
-            console.log(`[Dubbing] Slide ${slide.page_index}: completed (${dur}s)`);
-          } catch (resultErr: any) {
-            const errLog = buildDubbingErrorLog(resultErr, {
+            status = await voicebox.getTaskStatus(task.id);
+          } catch (statErr: any) {
+            const errLog = buildDubbingErrorLog(statErr, {
               slidePageIndex: slide.page_index,
               voiceId,
               modelId,
@@ -188,47 +204,127 @@ export async function generateAllInBackground(
             });
             projectService.updateSlide(projectId, slide.page_index, {
               dubbing_status: 'failed',
-              dubbing_error: `[获取结果失败] ${errLog}`,
+              dubbing_error: `[查询状态失败] ${errLog}`,
             });
             failedCount++;
             updateDubbingProgress(projectId, { failedCount, completedCount });
-            appendDubbingLog(projectId, `第 ${pageNo} 页获取结果失败: ${resultErr.message}`, 'error');
+            appendDubbingLog(projectId, `第 ${pageNo} 页查询状态失败: ${statErr.message}`, 'error');
+            completed = true;
+            slideDone = true;
+            break;
           }
-          completed = true;
-        } else if (status.status === 'failed') {
-          const errLog = buildDubbingErrorLog(new Error(status.error || 'Voicebox 返回 failed 状态'), {
-            slidePageIndex: slide.page_index,
-            voiceId,
-            modelId,
-            textPreview: (slide.note_content || '').slice(0, 100),
-          });
+
+          if (status.status === 'succeeded') {
+            try {
+              const result = await voicebox.getTaskResult(task.id);
+              resultAudio = result.audioPath;
+              resultDuration = Number(result.duration) || null;
+            } catch (resultErr: any) {
+              const errLog = buildDubbingErrorLog(resultErr, {
+                slidePageIndex: slide.page_index,
+                voiceId,
+                modelId,
+                textPreview: (slide.note_content || '').slice(0, 100),
+              });
+              projectService.updateSlide(projectId, slide.page_index, {
+                dubbing_status: 'failed',
+                dubbing_error: `[获取结果失败] ${errLog}`,
+              });
+              failedCount++;
+              updateDubbingProgress(projectId, { failedCount, completedCount });
+              appendDubbingLog(projectId, `第 ${pageNo} 页获取结果失败: ${resultErr.message}`, 'error');
+              slideDone = true;
+            }
+            completed = true;
+          } else if (status.status === 'failed') {
+            const errLog = buildDubbingErrorLog(new Error(status.error || 'Voicebox 返回 failed 状态'), {
+              slidePageIndex: slide.page_index,
+              voiceId,
+              modelId,
+              textPreview: (slide.note_content || '').slice(0, 100),
+            });
+            projectService.updateSlide(projectId, slide.page_index, {
+              dubbing_status: 'failed',
+              dubbing_error: errLog,
+            });
+            failedCount++;
+            updateDubbingProgress(projectId, { failedCount, completedCount });
+            appendDubbingLog(projectId, `第 ${pageNo} 页失败: ${status.error || 'Voicebox failed'}`, 'error');
+            completed = true;
+            slideDone = true;
+          } else {
+            await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+            attempts++;
+            const waitSeconds = attempts * (pollIntervalMs / 1000);
+            if (attempts === 1 || attempts % 5 === 0) {
+              appendDubbingLog(projectId, `第 ${pageNo} 页仍在合成中，已等待 ${waitSeconds}s`, 'info');
+            }
+          }
+        }
+
+        if (slideDone) break;
+
+        if (!completed) {
+          try { await voicebox.cancelTask(task.id); } catch { /* ignore */ }
           projectService.updateSlide(projectId, slide.page_index, {
             dubbing_status: 'failed',
-            dubbing_error: errLog,
+            dubbing_error: `[超时] [页面 ${pageNo}] 配音生成超时（等待 ${attempts * pollIntervalMs / 1000} 秒，上限 ${timeoutSeconds} 秒后未完成）。任务ID: ${task.id}。可能原因：Voicebox 服务处理过慢或卡死。可在系统配置中调大超时时间。`,
           });
           failedCount++;
           updateDubbingProgress(projectId, { failedCount, completedCount });
-          appendDubbingLog(projectId, `第 ${pageNo} 页失败: ${status.error || 'Voicebox failed'}`, 'error');
-          completed = true;
-        } else {
-          await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
-          attempts++;
-          const waitSeconds = attempts * (pollIntervalMs / 1000);
-          if (attempts === 1 || attempts % 5 === 0) {
-            appendDubbingLog(projectId, `第 ${pageNo} 页仍在合成中，已等待 ${waitSeconds}s`, 'info');
+          appendDubbingLog(projectId, `第 ${pageNo} 页超时（>${timeoutSeconds}s）`, 'error');
+          slideDone = true;
+          break;
+        }
+
+        if (!resultAudio) break;
+
+        try {
+          invalidateSlideMediaCache(projectId, slide.page_index);
+          const acceptedAudio = await acceptDubbingAudio({
+            projectId,
+            pageIndex: slide.page_index,
+            audioUrl: resultAudio,
+            text: slide.note_content || '',
+            expectedDurationSec: Number(slide.estimated_duration) || null,
+            reportedDuration: resultDuration,
+          });
+          projectService.updateSlide(projectId, slide.page_index, {
+            dubbing_status: 'generated',
+            dubbing_audio_path: resultAudio,
+            dubbing_duration: acceptedAudio.durationSec,
+            dubbing_version: (slide.dubbing_version || 0) + qcAttempt,
+            dubbing_error: null,
+          });
+          completedCount++;
+          updateDubbingProgress(projectId, { completedCount, failedCount });
+          appendDubbingLog(
+            projectId,
+            `第 ${pageNo} 页完成，时长 ${acceptedAudio.durationSec.toFixed(1)}s（已质检）`,
+            'success',
+          );
+          console.log(`[Dubbing] Slide ${slide.page_index}: completed (${acceptedAudio.durationSec.toFixed(1)}s, qc ok)`);
+          slideDone = true;
+        } catch (qcErr: any) {
+          lastQcError = qcErr?.message || String(qcErr);
+          console.warn(`[Dubbing] Slide ${slide.page_index}: QC fail attempt ${qcAttempt}: ${lastQcError}`);
+          if (!(qcErr instanceof MediaQualityError) || qcAttempt >= maxQcAttempts) {
+            const errLog = buildDubbingErrorLog(qcErr, {
+              slidePageIndex: slide.page_index,
+              voiceId,
+              modelId,
+              textPreview: (slide.note_content || '').slice(0, 100),
+            });
+            projectService.updateSlide(projectId, slide.page_index, {
+              dubbing_status: 'failed',
+              dubbing_error: `[配音质检失败] ${errLog}`,
+            });
+            failedCount++;
+            updateDubbingProgress(projectId, { failedCount, completedCount });
+            appendDubbingLog(projectId, `第 ${pageNo} 页质检失败: ${lastQcError.slice(0, 160)}`, 'error');
+            slideDone = true;
           }
         }
-      }
-
-      if (!completed) {
-        try { await voicebox.cancelTask(task.id); } catch { /* ignore */ }
-        projectService.updateSlide(projectId, slide.page_index, {
-          dubbing_status: 'failed',
-          dubbing_error: `[超时] [页面 ${pageNo}] 配音生成超时（等待 ${attempts * pollIntervalMs / 1000} 秒，上限 ${timeoutSeconds} 秒后未完成）。任务ID: ${task.id}。可能原因：Voicebox 服务处理过慢或卡死。可在系统配置中调大超时时间。`,
-        });
-        failedCount++;
-        updateDubbingProgress(projectId, { failedCount, completedCount });
-        appendDubbingLog(projectId, `第 ${pageNo} 页超时（>${timeoutSeconds}s）`, 'error');
       }
     } catch (error: any) {
       const errLog = buildDubbingErrorLog(error, {
@@ -354,19 +450,28 @@ export async function generateSingleInBackground(
       if (status.status === 'succeeded') {
         try {
           const result = await voicebox.getTaskResult(task.id);
+          invalidateSlideMediaCache(projectId, pageIndex);
+          const acceptedAudio = await acceptDubbingAudio({
+            projectId,
+            pageIndex,
+            audioUrl: result.audioPath,
+            text: slide.note_content || '',
+            expectedDurationSec: Number(slide.estimated_duration) || null,
+            reportedDuration: Number(result.duration) || null,
+          });
           projectService.updateSlide(projectId, pageIndex, {
             dubbing_status: 'generated',
             dubbing_audio_path: result.audioPath,
-            dubbing_duration: result.duration,
+            dubbing_duration: acceptedAudio.durationSec,
             dubbing_version: (slide.dubbing_version || 0) + 1,
             dubbing_error: null,
           });
-          invalidateSlideMediaCache(projectId, pageIndex);
-          const dur = result.duration?.toFixed(1) || '?';
-          appendDubbingLog(projectId, `第 ${pageNo} 页完成，时长 ${dur}s`, 'success');
+          const dur = acceptedAudio.durationSec.toFixed(1);
+          appendDubbingLog(projectId, `第 ${pageNo} 页完成，时长 ${dur}s（已质检）`, 'success');
           console.log(`[Dubbing] Slide ${pageIndex}: completed`);
           finishDubbingProgress(projectId, { completedCount: 1, failedCount: 0 });
         } catch (resultErr: any) {
+          const prefix = resultErr instanceof MediaQualityError ? '[配音质检失败] ' : '[获取结果失败] ';
           const errLog = buildDubbingErrorLog(resultErr, {
             slidePageIndex: pageIndex,
             voiceId,
@@ -375,9 +480,9 @@ export async function generateSingleInBackground(
           });
           projectService.updateSlide(projectId, pageIndex, {
             dubbing_status: 'failed',
-            dubbing_error: `[获取结果失败] ${errLog}`,
+            dubbing_error: `${prefix}${errLog}`,
           });
-          appendDubbingLog(projectId, `第 ${pageNo} 页获取结果失败: ${resultErr.message}`, 'error');
+          appendDubbingLog(projectId, `第 ${pageNo} 页失败: ${resultErr.message}`, 'error');
           console.error(`[Dubbing] Slide ${pageIndex}: get result failed - ${resultErr.message}`);
           finishDubbingProgress(projectId, { completedCount: 0, failedCount: 1 });
         }

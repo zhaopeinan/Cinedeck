@@ -156,6 +156,45 @@ async function main() {
 
     process.stdout.write(`record seek-mode animTotal=${animTotal}s frames=${total} fps=${fps}\n`);
 
+    // Preflight motion QC: seek start/mid/end and compare via ffmpeg PSNR.
+    // JPEG byte-diff is unreliable; frozen decks still look "different" at byte level.
+    {
+      const shotPath = async (sec, name) => {
+        await seekTo(page, sec, animTotal);
+        const file = path.join(frameDir, `_pre_${name}.png`);
+        await page.screenshot({ path: file, type: 'png' });
+        return file;
+      };
+      const p0 = await shotPath(Math.min(0.35, animTotal * 0.02), 't0');
+      const pMid = await shotPath(animTotal * 0.45, 'mid');
+      const pEnd = await shotPath(Math.max(0.5, animTotal * 0.88), 'end');
+      const psnrOf = (a, b) => new Promise((resolve) => {
+        const child = spawn('ffmpeg', ['-v', 'info', '-i', a, '-i', b, '-lavfi', 'psnr', '-f', 'null', '-'], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stderr = '';
+        child.stderr.on('data', (d) => { stderr += d.toString(); });
+        child.on('close', () => {
+          const m = stderr.match(/average:([inf\d.]+)/i);
+          if (!m) return resolve(0);
+          if (/^inf$/i.test(m[1])) return resolve(99);
+          const n = Number(m[1]);
+          resolve(Number.isFinite(n) ? n : 0);
+        });
+      });
+      const mid = await psnrOf(p0, pMid);
+      const end = await psnrOf(p0, pEnd);
+      process.stdout.write(`motion preflight psnr mid=${mid.toFixed(1)}dB end=${end.toFixed(1)}dB\n`);
+      for (const f of [p0, pMid, pEnd]) {
+        try { fs.unlinkSync(f); } catch { /* ignore */ }
+      }
+      if (mid >= 28 && end >= 28) {
+        throw new Error(
+          `讲解动画画面几乎无变化（PSNR mid=${mid.toFixed(1)}dB, end=${end.toFixed(1)}dB）：疑似 seek 失效或卡在初始叠字帧`,
+        );
+      }
+    }
+
     for (let i = 0; i < total; i++) {
       // Map export timeline onto animation timeline (clamp to end)
       const timeSec = Math.min(animTotal - 0.001, (i / Math.max(1, total - 1)) * animTotal);
