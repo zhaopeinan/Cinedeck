@@ -17,19 +17,30 @@ import {
 import type { ExplainExportQuality } from './explainExport';
 import type { MoocJobConfig, MoocJobService } from './moocJobService';
 import { qcExplainAnimationMp4, qcSpeechAudio } from '../utils/mediaQuality';
+import { markExplainMediaQc } from './explainInsertRepair';
 
 /** Reject frozen/broken exports (and optional bad narration) before inserting into MOOC. */
-async function assertInsertMediaOk(videoPath: string, audioPath: string | null): Promise<void> {
+async function assertInsertMediaOk(
+  explainJobs: ExplainJobService,
+  explainJobId: string,
+  videoPath: string,
+  audioPath: string | null,
+): Promise<void> {
   const motion = await qcExplainAnimationMp4({ filePath: videoPath });
   if (!motion.ok) {
-    throw new Error(motion.reasons.join('；') || '讲解画面质检未通过');
+    const reason = motion.reasons.join('；') || '讲解画面质检未通过';
+    markExplainMediaQc(explainJobs, explainJobId, { ok: false, reason, path: videoPath });
+    throw new Error(reason);
   }
   if (audioPath && fs.existsSync(audioPath)) {
     const audio = await qcSpeechAudio({ filePath: audioPath, minDurationSec: 0.8 });
     if (!audio.ok) {
-      throw new Error(audio.reasons.join('；') || '讲解旁白质检未通过');
+      const reason = audio.reasons.join('；') || '讲解旁白质检未通过';
+      markExplainMediaQc(explainJobs, explainJobId, { ok: false, reason, path: videoPath });
+      throw new Error(reason);
     }
   }
+  markExplainMediaQc(explainJobs, explainJobId, { ok: true, reason: 'ok', path: videoPath });
 }
 
 export interface ExplainInsertClip {
@@ -327,7 +338,7 @@ export async function runMoocExplainInsert(opts: {
     // Reuse existing export only if it still passes visual/audio QC
     const tryReuse = async (candidate: string): Promise<boolean> => {
       try {
-        await assertInsertMediaOk(candidate, audioPath);
+        await assertInsertMediaOk(explainJobs, child.id, candidate, audioPath);
         if (candidate === outPath) explainJobs.updateJob(child.id, { video_path: outPath });
         inserts.push({
           afterPage,
@@ -381,10 +392,14 @@ export async function runMoocExplainInsert(opts: {
         ? outPath
         : (explainJobs.getJob(child.id)?.video_path || null);
       if (!videoPath || !fs.existsSync(videoPath)) {
+        markExplainMediaQc(explainJobs, child.id, {
+          ok: false,
+          reason: ej?.error || ej?.message || '导出失败或无成品',
+        });
         failed += 1;
         continue;
       }
-      await assertInsertMediaOk(videoPath, audioPath);
+      await assertInsertMediaOk(explainJobs, child.id, videoPath, audioPath);
       inserts.push({
         afterPage,
         videoPath,
@@ -394,6 +409,12 @@ export async function runMoocExplainInsert(opts: {
       });
     } catch (err: any) {
       console.warn(`[MOOC-Explain] export failed for ${child.id}:`, err?.message || err);
+      try {
+        markExplainMediaQc(explainJobs, child.id, {
+          ok: false,
+          reason: String(err?.message || err).slice(0, 400),
+        });
+      } catch { /* ignore */ }
       failed += 1;
     }
   }

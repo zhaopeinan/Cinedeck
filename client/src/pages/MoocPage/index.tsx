@@ -436,7 +436,32 @@ const MoocPage: React.FC = () => {
     }
   }, [detailOpen, loadJobDetail]);
 
+  const repairExplainChild = useCallback(async (
+    child: any,
+    mode: 'reexport' | 'regenerate',
+  ) => {
+    const moocId = detailIdRef.current;
+    if (!moocId) return;
+    setRetryingExplainId(child.id);
+    try {
+      const res = await moocApi.repairExplainChild(moocId, child.id, mode);
+      message.success(res.data.data?.message || `已开始修复：${child.title || '知识点'}`);
+      await loadJobDetail(moocId, { silent: true });
+      await refreshJobs();
+    } catch (e: any) {
+      message.error(e.response?.data?.error?.message || '修复失败');
+    } finally {
+      setRetryingExplainId(null);
+    }
+  }, [loadJobDetail, refreshJobs]);
+
   const retryExplainChild = useCallback(async (childId: string, title?: string) => {
+    const child = (detailJob?.explain?.children || []).find((c: any) => c.id === childId);
+    if (child?.canRepair || child?.qcStatus === 'failed') {
+      const mode = (child.status === 'completed' && child.hasFinal) ? 'reexport' : 'regenerate';
+      await repairExplainChild(child, mode);
+      return;
+    }
     setRetryingExplainId(childId);
     try {
       await explainApi.retryJob(childId);
@@ -449,14 +474,14 @@ const MoocPage: React.FC = () => {
     } finally {
       setRetryingExplainId(null);
     }
-  }, [loadJobDetail, refreshJobs]);
+  }, [detailJob, loadJobDetail, refreshJobs, repairExplainChild]);
 
   const retryAllFailedExplain = useCallback(async () => {
     const failed = (detailJob?.explain?.children || []).filter(
-      (c: any) => c.status === 'failed' || c.status === 'cancelled',
+      (c: any) => c.status === 'failed' || c.status === 'cancelled' || c.canRepair || c.qcStatus === 'failed',
     );
     if (!failed.length) {
-      message.info('没有失败的知识点');
+      message.info('没有失败或质检未通过的知识点');
       return;
     }
     setRetryingExplainId('__all__');
@@ -464,13 +489,14 @@ const MoocPage: React.FC = () => {
       let ok = 0;
       for (const c of failed) {
         try {
-          await explainApi.retryJob(c.id);
+          const mode = (c.status === 'completed' && c.hasFinal) ? 'reexport' : 'regenerate';
+          await moocApi.repairExplainChild(detailIdRef.current!, c.id, mode);
           ok += 1;
         } catch {
           // continue others
         }
       }
-      message.success(`已重新排队 ${ok}/${failed.length} 个失败知识点`);
+      message.success(`已开始修复 ${ok}/${failed.length} 个知识点（通过后自动补进成片）`);
       const openId = detailIdRef.current;
       if (openId) await loadJobDetail(openId, { silent: true });
       await refreshJobs();
@@ -1746,14 +1772,14 @@ const MoocPage: React.FC = () => {
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
                   <Title level={5} style={{ margin: 0 }}>知识点讲解</Title>
-                  {!!detailJob.explain.stats?.failed && (
+                  {!!((detailJob.explain.stats?.failed || 0) + (detailJob.explain.stats?.qcFailed || 0)) && (
                     <Button
                       size="small"
                       icon={<ReloadOutlined />}
                       loading={retryingExplainId === '__all__'}
                       onClick={() => void retryAllFailedExplain()}
                     >
-                      重试全部失败
+                      修复全部未通过
                     </Button>
                   )}
                 </div>
@@ -1769,6 +1795,12 @@ const MoocPage: React.FC = () => {
                   )}
                   {!!detailJob.explain.stats?.failed && (
                     <Tag color="error">失败 {detailJob.explain.stats.failed}</Tag>
+                  )}
+                  {!!detailJob.explain.stats?.qcFailed && (
+                    <Tag color="warning">未通过 {detailJob.explain.stats.qcFailed}</Tag>
+                  )}
+                  {!!detailJob.explain.stats?.repairing && (
+                    <Tag color="processing">修复中 {detailJob.explain.stats.repairing}</Tag>
                   )}
                   {!!detailJob.explain.stats?.retrying && (
                     <Tag color="warning">重试 {detailJob.explain.stats.retrying}</Tag>
@@ -1799,7 +1831,7 @@ const MoocPage: React.FC = () => {
                       dataIndex: 'title',
                       ellipsis: true,
                       render: (t: string, row: any) => (
-                        <Tooltip title={row.error || row.message || row.name || t}>
+                        <Tooltip title={row.qcReason || row.error || row.message || row.name || t}>
                           <span>{t || '-'}</span>
                         </Tooltip>
                       ),
@@ -1807,33 +1839,42 @@ const MoocPage: React.FC = () => {
                     {
                       title: '状态',
                       dataIndex: 'status',
-                      width: 88,
-                      render: (s: string, row: any) => (
-                        <Tooltip title={row.error || row.message || undefined}>
-                          <Tag
-                            color={
-                              s === 'completed' ? 'success'
-                                : s === 'running' ? 'processing'
-                                  : s === 'failed' || s === 'cancelled' ? 'error'
-                                    : 'default'
-                            }
-                            style={{ margin: 0 }}
-                          >
-                            {s === 'completed' ? '完成'
-                              : s === 'running' ? '进行中'
-                                : s === 'queued' ? (row.message?.includes('自动重试') || row.message?.includes('手动重新') ? '重试中' : '排队')
-                                  : s === 'failed' ? '失败'
-                                    : s === 'cancelled' ? '取消'
-                                      : s}
-                          </Tag>
-                        </Tooltip>
-                      ),
+                      width: 100,
+                      render: (s: string, row: any) => {
+                        const tip = row.qcReason || row.error || row.message || undefined;
+                        if (row.qcStatus === 'repairing') {
+                          return <Tooltip title={tip}><Tag color="processing" style={{ margin: 0 }}>修复中</Tag></Tooltip>;
+                        }
+                        if (row.qcStatus === 'failed') {
+                          return <Tooltip title={tip}><Tag color="warning" style={{ margin: 0 }}>未通过</Tag></Tooltip>;
+                        }
+                        return (
+                          <Tooltip title={tip}>
+                            <Tag
+                              color={
+                                s === 'completed' ? 'success'
+                                  : s === 'running' ? 'processing'
+                                    : s === 'failed' || s === 'cancelled' ? 'error'
+                                      : 'default'
+                              }
+                              style={{ margin: 0 }}
+                            >
+                              {s === 'completed' ? (row.inInserts ? '已入片' : '完成')
+                                : s === 'running' ? '进行中'
+                                  : s === 'queued' ? (row.message?.includes('自动重试') || row.message?.includes('手动重新') || row.message?.includes('重新生成') ? '重试中' : '排队')
+                                    : s === 'failed' ? '失败'
+                                      : s === 'cancelled' ? '取消'
+                                        : s}
+                            </Tag>
+                          </Tooltip>
+                        );
+                      },
                     },
                     {
                       title: '进度',
                       width: 72,
                       render: (_: any, row: any) => (
-                        row.status === 'running' || row.status === 'queued'
+                        row.status === 'running' || row.status === 'queued' || row.qcStatus === 'repairing'
                           ? `${row.progress || 0}%`
                           : (row.durationLabel || '-')
                       ),
@@ -1848,7 +1889,7 @@ const MoocPage: React.FC = () => {
                     {
                       title: '',
                       key: 'actions',
-                      width: 96,
+                      width: 148,
                       render: (_: any, row: any) => (
                         <Space size={0} wrap>
                           {(row.hasFinal || row.hasSample) && (
@@ -1867,18 +1908,34 @@ const MoocPage: React.FC = () => {
                               预览
                             </Button>
                           )}
-                          {(row.status === 'failed' || row.status === 'cancelled') && (
-                            <Button
-                              type="link"
-                              size="small"
-                              icon={<ReloadOutlined />}
-                              style={{ padding: '0 4px' }}
-                              loading={retryingExplainId === row.id}
-                              disabled={retryingExplainId === '__all__'}
-                              onClick={() => void retryExplainChild(row.id, row.title)}
-                            >
-                              重试
-                            </Button>
+                          {row.canRepair && row.qcStatus !== 'repairing' && (
+                            <>
+                              {row.status === 'completed' && row.hasFinal && (
+                                <Button
+                                  type="link"
+                                  size="small"
+                                  icon={<ReloadOutlined />}
+                                  style={{ padding: '0 4px' }}
+                                  loading={retryingExplainId === row.id}
+                                  disabled={retryingExplainId === '__all__'}
+                                  onClick={() => void repairExplainChild(row, 'reexport')}
+                                >
+                                  重导
+                                </Button>
+                              )}
+                              <Button
+                                type="link"
+                                size="small"
+                                danger={row.qcStatus === 'failed' || row.status === 'failed'}
+                                icon={<ReloadOutlined />}
+                                style={{ padding: '0 4px' }}
+                                loading={retryingExplainId === row.id}
+                                disabled={retryingExplainId === '__all__'}
+                                onClick={() => void repairExplainChild(row, 'regenerate')}
+                              >
+                                {row.status === 'completed' ? '重生' : '重试'}
+                              </Button>
+                            </>
                           )}
                         </Space>
                       ),

@@ -368,6 +368,46 @@ export class MoocJobService {
     return false;
   }
 
+  /**
+   * Re-compose only: keep explain_inserts.json, roll checkpoint to explain_ready.
+   * Used after repairing a single knowledge-point insert.
+   */
+  queueRecomposeOnly(
+    id: string,
+    userId: string,
+    opts?: { message?: string },
+  ): MoocJobRow | null {
+    const job = this.getJob(id);
+    if (!job || job.user_id !== userId) return null;
+    if (job.status === 'running' || job.status === 'queued') return null;
+    if (!job.project_id) return null;
+    const p = this.db.prepare('SELECT id, file_path FROM projects WHERE id = ?').get(job.project_id) as
+      { id: string; file_path?: string } | undefined;
+    if (!p?.file_path) return null;
+    const insertsPath = path.join(path.dirname(p.file_path), 'explain_inserts.json');
+    if (!fs.existsSync(insertsPath)) return null;
+
+    const cfg: any = { ...this.parseConfig(job) };
+    cfg.enableExplainInsert = true;
+    delete cfg.avatarOptimizeKeepExplain;
+    if (Array.isArray(cfg.stageLog)) {
+      cfg.stageLog = cfg.stageLog.filter((x: any) => x?.id !== 'compose');
+    }
+
+    return this.updateJob(id, {
+      status: 'queued',
+      stage: 'queued',
+      progress: 88,
+      checkpoint: 'explain_ready',
+      message: opts?.message || '插片已更新，排队重新合成成片',
+      error: null,
+      failed_stage: null,
+      retry_count: 0,
+      finished_at: null,
+      config_json: JSON.stringify(cfg),
+    });
+  }
+
   /** Resume from checkpoint (keep project). */
   queueResume(id: string, userId: string): MoocJobRow | null {
     const job = this.getJob(id);

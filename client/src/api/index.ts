@@ -649,6 +649,13 @@ export const moocApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 180000,
     }),
+  /** Repair one explain child then auto recompose */
+  repairExplainChild: (moocId: string, childId: string, mode: 'reexport' | 'regenerate' = 'reexport') =>
+    apiClient.post<ApiResponse<{ started: boolean; mode: string; message: string }>>(
+      `/mooc/jobs/${moocId}/explain/${childId}/repair`,
+      { mode },
+      { timeout: 60000 },
+    ),
   getPptDownloadUrl: (id: string) => withToken(`/api/v1/mooc/jobs/${id}/ppt`),
   /** 下载用户提交的原始 PPTX */
   downloadPpt: async (id: string, filenameHint?: string) => {

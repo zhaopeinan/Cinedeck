@@ -11,6 +11,9 @@ import { PptParserService } from '../services/pptParser';
 import { buildMoocProgressDetail } from '../services/moocProgressDetail';
 import type { ExplainBatchService } from '../services/explainBatchService';
 import type { ExplainJobService } from '../services/explainJobService';
+import type { VideoComposerService } from '../services/videoComposer';
+import type Database from 'better-sqlite3';
+import { repairExplainChildForMooc } from '../services/explainInsertRepair';
 
 const PREVIEW_DIR = path.join(getMoocUploadDir(), 'previews');
 fs.mkdirSync(PREVIEW_DIR, { recursive: true });
@@ -141,9 +144,15 @@ export function createMoocRouter(
   pptParser: PptParserService,
   explainBatches?: ExplainBatchService,
   explainJobs?: ExplainJobService,
+  extras?: {
+    videoComposer?: VideoComposerService;
+    db?: Database.Database;
+  },
 ): Router {
   const router = Router();
   const progressExtras = { explainBatches, explainJobs };
+  const videoComposer = extras?.videoComposer;
+  const db = extras?.db;
 
   /**
    * Upload PPTX and render real slide images for layout preview.
@@ -773,6 +782,43 @@ export function createMoocRouter(
       data: serializeJob(updated, projectService, { ...progressExtras, detail: true }),
       error: null,
     });
+  });
+
+  /**
+   * Repair one explain child (QC-failed / export-skipped / generation-failed):
+   * mode=reexport | regenerate → QC → patch inserts → recompose MOOC.
+   */
+  router.post('/jobs/:id/explain/:childId/repair', async (req: Request, res: Response) => {
+    if (!explainJobs || !explainBatches || !videoComposer || !db) {
+      return res.status(503).json({
+        success: false, data: null,
+        error: { code: '503', message: '讲解修复服务未就绪' },
+      });
+    }
+    const modeRaw = String(req.body?.mode || 'reexport');
+    const mode = modeRaw === 'regenerate' ? 'regenerate' : 'reexport';
+    try {
+      const result = await repairExplainChildForMooc({
+        moocJobId: String(req.params.id),
+        childId: String(req.params.childId),
+        userId: getUserId(req),
+        mode,
+        moocJobs,
+        explainJobs,
+        batches: explainBatches,
+        projectService,
+        videoComposer,
+        db,
+      });
+      res.json({ success: true, data: result, error: null });
+    } catch (err: any) {
+      const code = err?.code === '404' || err?.code === '400' ? err.code : '500';
+      const status = code === '404' ? 404 : code === '400' ? 400 : 500;
+      res.status(status).json({
+        success: false, data: null,
+        error: { code: String(code), message: err?.message || '修复失败' },
+      });
+    }
   });
 
   /**

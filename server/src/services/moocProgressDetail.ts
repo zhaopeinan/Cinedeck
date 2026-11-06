@@ -2,7 +2,15 @@
  * Build rich progress payload for MOOC job list/detail UI.
  */
 import fs from 'fs';
+import path from 'path';
 import type { MoocJobConfig, MoocJobRow, MoocCheckpoint } from './moocJobService';
+
+function pathDirnameSafe(p: string) {
+  return path.dirname(p);
+}
+function pathJoinSafe(...parts: string[]) {
+  return path.join(...parts);
+}
 import { STAGE_LABEL_CN } from './moocJobService';
 import type { ExplainBatchService } from './explainBatchService';
 import {
@@ -63,7 +71,9 @@ function shortTitle(name: string): string {
   return (parts[parts.length - 1] || name || '').slice(0, 40);
 }
 
-function childPublic(c: ExplainJobRow) {
+function childPublic(c: ExplainJobRow, extras?: {
+  insertedIds?: Set<string>;
+}) {
   const cfg = (() => {
     try { return JSON.parse(c.config_json || '{}'); } catch { return {}; }
   })();
@@ -75,6 +85,35 @@ function childPublic(c: ExplainJobRow) {
   const elapsedSec = startedAt && !finishedAt ? secBetween(startedAt, null) : durationSec;
   const hasFinal = !!(c.final_path && fs.existsSync(c.final_path));
   const hasSample = !!(c.sample_path && fs.existsSync(c.sample_path));
+  const hasVideo = !!(c.video_path && fs.existsSync(c.video_path));
+  const mediaQc = cfg.mediaQc && typeof cfg.mediaQc === 'object' ? cfg.mediaQc : null;
+  const repair = cfg.repair && typeof cfg.repair === 'object' ? cfg.repair : null;
+  const inInserts = !!(extras?.insertedIds && extras.insertedIds.has(c.id));
+
+  let qcStatus: 'ok' | 'failed' | 'pending' | 'repairing' | null = null;
+  let qcReason: string | null = null;
+  if (repair?.status === 'running') {
+    qcStatus = 'repairing';
+    qcReason = repair.mode === 'regenerate' ? '正在重新生成…' : '正在重新导出…';
+  } else if (mediaQc && mediaQc.ok === false) {
+    qcStatus = 'failed';
+    qcReason = String(mediaQc.reason || '质检未通过');
+  } else if (mediaQc && mediaQc.ok === true) {
+    qcStatus = 'ok';
+  } else if (c.status === 'completed' && hasFinal && !inInserts) {
+    // Completed HTML but not in final inserts — likely export/QC soft-skip
+    qcStatus = 'failed';
+    qcReason = '未进入成片（导出失败或质检未通过）';
+  } else if (c.status === 'completed' && inInserts) {
+    qcStatus = 'ok';
+  } else if (c.status === 'completed') {
+    qcStatus = 'pending';
+  }
+
+  const canRepair = c.status === 'failed' || c.status === 'cancelled'
+    || qcStatus === 'failed'
+    || (c.status === 'completed' && hasFinal && !inInserts);
+
   return {
     id: c.id,
     title: shortTitle(c.name),
@@ -84,11 +123,17 @@ function childPublic(c: ExplainJobRow) {
     stageLabel: EXPLAIN_STAGE_LABEL[c.stage] || c.stage,
     progress: c.progress || 0,
     message: c.message,
-    error: c.error,
+    error: c.error || (qcStatus === 'failed' ? qcReason : null),
     retryCount: Number(cfg.retryCount || 0),
     maxRetries: Number(cfg.maxRetries != null ? cfg.maxRetries : 3),
     hasFinal,
     hasSample,
+    hasVideo,
+    inInserts,
+    qcStatus,
+    qcReason,
+    canRepair,
+    repairStatus: repair?.status || null,
     startedAt,
     finishedAt,
     updatedAt: c.updated_at,
@@ -162,13 +207,30 @@ export function buildMoocProgressDetail(opts: {
   if (enableExplain && batchId && opts.explainBatches) {
     const batch = opts.explainBatches.get(batchId);
     const children = opts.explainBatches.listChildJobs(batchId);
+    const insertedIds = new Set<string>();
+    try {
+      const project = job.project_id ? opts.projectService.getProject(job.project_id) as any : null;
+      if (project?.file_path) {
+        const insertsPath = pathJoinSafe(pathDirnameSafe(project.file_path), 'explain_inserts.json');
+        if (fs.existsSync(insertsPath)) {
+          const raw = JSON.parse(fs.readFileSync(insertsPath, 'utf8'));
+          for (const c of (Array.isArray(raw.inserts) ? raw.inserts : [])) {
+            if (c?.explainJobId) insertedIds.add(String(c.explainJobId));
+          }
+        }
+      }
+    } catch { /* ignore */ }
+
+    const childRows = children.map((c) => childPublic(c, { insertedIds }));
     const stats = {
       total: children.length,
       completed: children.filter((c) => c.status === 'completed').length,
       running: children.filter((c) => c.status === 'running').length,
       queued: children.filter((c) => c.status === 'queued').length,
       failed: children.filter((c) => c.status === 'failed' || c.status === 'cancelled').length,
-      retrying: children.filter((c) => c.status === 'queued' && /自动重试/.test(String(c.message || ''))).length,
+      qcFailed: childRows.filter((c) => c.qcStatus === 'failed').length,
+      repairing: childRows.filter((c) => c.qcStatus === 'repairing').length,
+      retrying: children.filter((c) => c.status === 'queued' && /自动重试|重新生成|重新导出/.test(String(c.message || ''))).length,
     };
     const doneDurations = children
       .filter((c) => c.status === 'completed')
@@ -193,7 +255,7 @@ export function buildMoocProgressDetail(opts: {
       avgDoneLabel: formatDuration(avgDoneSec),
       etaSec,
       etaLabel: formatDuration(etaSec),
-      children: opts.includeChildren ? children.map(childPublic) : undefined,
+      children: opts.includeChildren ? childRows : undefined,
     };
 
     // Enrich explain_gen step summary
@@ -207,6 +269,7 @@ export function buildMoocProgressDetail(opts: {
           + (stats.running ? ` · 进行中 ${stats.running}` : '')
           + (stats.queued ? ` · 排队 ${stats.queued}` : '')
           + (stats.failed ? ` · 失败 ${stats.failed}` : '')
+          + (stats.qcFailed ? ` · 质检未通过 ${stats.qcFailed}` : '')
           + (stats.retrying ? ` · 重试 ${stats.retrying}` : '')
           + (conc ? ` · 并发 ${conc}` : '');
       }
