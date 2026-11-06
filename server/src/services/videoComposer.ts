@@ -466,6 +466,67 @@ export class VideoComposerService {
   }
 
   /**
+   * Fast single-page greenscreen overlay preview for tuning chromaSimilarity.
+   * Caps duration (~8s) and caches by page + similarity tag.
+   */
+  async composeAvatarPagePreview(opts: {
+    projectId: string;
+    pageIndex: number;
+    chromaSimilarity?: number;
+    maxDurationSec?: number;
+  }): Promise<{
+    outputPath: string;
+    chromaKey: boolean;
+    chromaSimilarity: number;
+    duration: number;
+    cached: boolean;
+  }> {
+    const project = this.projectService.getProject(opts.projectId) as any;
+    if (!project) throw new Error('项目不存在');
+    const slide = this.projectService.getSlide(opts.projectId, opts.pageIndex) as any;
+    if (!slide) throw new Error('页面不存在');
+    if (!slide.image_path || !fs.existsSync(slide.image_path)) throw new Error('页面图片不存在');
+    if (!slide.avatar_video_path || !fs.existsSync(slide.avatar_video_path)) {
+      throw new Error('数字人视频不存在');
+    }
+    if (!slide.dubbing_audio_path) throw new Error('配音音频不存在');
+
+    const chromaKey = this.projectService.isAvatarRefGreenscreen(project.avatar_ref_video_id);
+    const chromaSimilarity = clampChromaSimilarity(opts.chromaSimilarity);
+    const fullDur = Math.max(
+      0.5,
+      Number(slide.dubbing_duration)
+        || await this.probeDuration(slide.avatar_video_path).catch(() => 5),
+    );
+    const maxDur = Math.max(3, Math.min(20, Number(opts.maxDurationSec) || 8));
+    const duration = Math.min(fullDur, maxDur);
+    const projectDir = path.dirname(project.file_path);
+    const previewDir = path.join(projectDir, 'avatar_preview');
+    fs.mkdirSync(previewDir, { recursive: true });
+    const tag = chromaKey ? `_gs${Math.round(chromaSimilarity * 100)}` : '_raw';
+    const outputPath = path.join(previewDir, `p${opts.pageIndex}${tag}.mp4`);
+    if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 1024) {
+      return { outputPath, chromaKey, chromaSimilarity, duration, cached: true };
+    }
+
+    const encoder = await detectVideoEncoder();
+    await this.composeSlideWithAvatar({
+      projectId: opts.projectId,
+      imagePath: slide.image_path,
+      avatarPath: slide.avatar_video_path,
+      audioPath: slide.dubbing_audio_path,
+      duration,
+      layoutJson: slide.avatar_layout_json || project.avatar_layout_json,
+      outputPath,
+      encoder,
+      jobKind: 'compose',
+      chromaKey,
+      chromaSimilarity,
+    });
+    return { outputPath, chromaKey, chromaSimilarity, duration, cached: false };
+  }
+
+  /**
    * Overlay a Duix avatar clip onto a background video (e.g. explain animation MP4).
    * Keeps background audio; uses same layout / chromakey as slide compose.
    */

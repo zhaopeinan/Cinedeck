@@ -134,7 +134,7 @@ async function main() {
   app.use('/api/v1/projects', authRequired, createOpenCutRouter(projectService, openCutAdapter, videoComposer));
   app.use('/api/v1/llm', authRequired, createLlmRouter(llmService, scriptGenerator));
   app.use('/api/v1/avatar', authRequired, createAvatarRouter(db));
-  app.use('/api/v1/projects', authRequired, createProjectAvatarRouter(projectService, db));
+  app.use('/api/v1/projects', authRequired, createProjectAvatarRouter(projectService, db, videoComposer));
   app.use('/api/v1/mooc', authRequired, createMoocRouter(moocJobs, projectService, pptParser, explainBatches, explainJobs));
   app.use('/api/v1/transcribe', authRequired, createTranscribeRouter(transcribeJobs));
   app.use('/api/v1/hyperframe', authRequired, createHyperframeRouter(hyperframeJobs, projectService));

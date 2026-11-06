@@ -8,6 +8,8 @@ import { AvatarRefVideoService } from '../services/avatarRefVideoService';
 import { generateProjectAvatars, isProjectAvatarRunning } from '../services/projectAvatarWorker';
 import { getProjectAvatarProgress } from '../services/projectAvatarProgress';
 import { requestCancel } from '../services/jobCancel';
+import type { VideoComposerService } from '../services/videoComposer';
+import { clampChromaSimilarity } from '../services/avatarComposeService';
 
 const PROJECTS_DIR = path.resolve(process.cwd(), '..', 'data', 'projects');
 /** Default PiP for ~1:1 avatar on 16:9 slide */
@@ -34,7 +36,11 @@ function parseLayout(raw: any) {
   };
 }
 
-export function createProjectAvatarRouter(projectService: ProjectService, db: Database.Database): Router {
+export function createProjectAvatarRouter(
+  projectService: ProjectService,
+  db: Database.Database,
+  videoComposer?: VideoComposerService,
+): Router {
   const router = Router();
   const refService = new AvatarRefVideoService(db);
 
@@ -288,6 +294,78 @@ export function createProjectAvatarRouter(projectService: ProjectService, db: Da
     }
     res.setHeader('Content-Type', 'video/mp4');
     fs.createReadStream(slide.avatar_video_path).pipe(res);
+  });
+
+  /** Generate a short slide+avatar chromakey compose preview for tuning greenscreen strength. */
+  router.post('/:id/avatar/pages/:pageIndex/compose-preview', async (req: Request, res: Response) => {
+    if (!videoComposer) {
+      return res.status(503).json({
+        success: false, data: null,
+        error: { code: '503', message: '合成服务未就绪' },
+      });
+    }
+    const projectId = String(req.params.id);
+    const pageIndex = parseInt(String(req.params.pageIndex), 10);
+    const project = projectService.getProject(projectId) as any;
+    if (!project) {
+      return res.status(404).json({ success: false, data: null, error: { code: '404', message: '项目不存在' } });
+    }
+    if (project.user_id && project.user_id !== getUserId(req)) {
+      return res.status(403).json({ success: false, data: null, error: { code: '403', message: '无权访问' } });
+    }
+    const chromaSimilarity = clampChromaSimilarity(
+      req.body?.chromaSimilarity ?? req.body?.chroma_similarity,
+    );
+    try {
+      const result = await videoComposer.composeAvatarPagePreview({
+        projectId,
+        pageIndex,
+        chromaSimilarity,
+      });
+      res.json({
+        success: true,
+        data: {
+          pageIndex,
+          chromaKey: result.chromaKey,
+          chromaSimilarity: result.chromaSimilarity,
+          duration: result.duration,
+          cached: result.cached,
+          videoUrl: `/api/v1/projects/${projectId}/avatar/pages/${pageIndex}/compose-preview?sim=${encodeURIComponent(String(result.chromaSimilarity))}`,
+        },
+        error: null,
+      });
+    } catch (err: any) {
+      res.status(400).json({
+        success: false, data: null,
+        error: { code: '400', message: err?.message || '合成预览失败' },
+      });
+    }
+  });
+
+  router.get('/:id/avatar/pages/:pageIndex/compose-preview', (req: Request, res: Response) => {
+    const projectId = String(req.params.id);
+    const pageIndex = parseInt(String(req.params.pageIndex), 10);
+    const project = projectService.getProject(projectId) as any;
+    if (!project) {
+      return res.status(404).json({ success: false, data: null, error: { code: '404', message: '项目不存在' } });
+    }
+    if (project.user_id && project.user_id !== getUserId(req)) {
+      return res.status(403).json({ success: false, data: null, error: { code: '403', message: '无权访问' } });
+    }
+    const chromaKey = projectService.isAvatarRefGreenscreen(project.avatar_ref_video_id);
+    const chromaSimilarity = clampChromaSimilarity(req.query.sim ?? req.query.chromaSimilarity);
+    const projectDir = path.dirname(project.file_path);
+    const tag = chromaKey ? `_gs${Math.round(chromaSimilarity * 100)}` : '_raw';
+    const filePath = path.join(projectDir, 'avatar_preview', `p${pageIndex}${tag}.mp4`);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({
+        success: false, data: null,
+        error: { code: '404', message: '请先生成合成预览' },
+      });
+    }
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Cache-Control', 'private, max-age=60');
+    fs.createReadStream(filePath).pipe(res);
   });
 
   return router;

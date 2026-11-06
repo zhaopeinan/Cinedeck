@@ -505,6 +505,29 @@ export function createMoocRouter(
     res.json({ success: true, data: serializeJob(job, projectService, progressExtras), error: null });
   });
 
+  /** Update tunable runtime config (e.g. chromaSimilarity) without restarting the job. */
+  router.patch('/jobs/:id/config', (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    const job = moocJobs.getJob(String(req.params.id));
+    if (!job || job.user_id !== userId) {
+      return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
+    }
+    const cfg: any = { ...moocJobs.parseConfig(job) };
+    const body = req.body || {};
+    if (body.chromaSimilarity != null || body.chroma_similarity != null) {
+      cfg.chromaSimilarity = clampChromaSimilarity(
+        body.chromaSimilarity ?? body.chroma_similarity,
+      );
+    }
+    moocJobs.updateJob(job.id, { config_json: JSON.stringify(cfg) });
+    const updated = moocJobs.getJob(job.id);
+    res.json({
+      success: true,
+      data: serializeJob(updated, projectService, { ...progressExtras, detail: true }),
+      error: null,
+    });
+  });
+
   /**
    * Retry / resume:
    * - body.resume !== false (default): 断点续跑，保留已完成阶段

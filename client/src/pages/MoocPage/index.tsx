@@ -145,9 +145,14 @@ const MoocPage: React.FC = () => {
     open: boolean;
     kind: 'dubbing' | 'avatar';
     projectId: string;
+    moocJobId?: string | null;
     loading?: boolean;
     pages: Array<{ pageIndex: number; duration?: number | null }>;
     pageIndex: number;
+    avatarView?: 'raw' | 'compose';
+    chromaSimilarity?: number;
+    composeUrl?: string | null;
+    composing?: boolean;
   } | null>(null);
   const pollRef = useRef<number | null>(null);
   const previewReqRef = useRef(0);
@@ -317,6 +322,8 @@ const MoocPage: React.FC = () => {
   const openStageMediaPreview = useCallback(async (
     kind: 'dubbing' | 'avatar',
     projectId: string,
+    moocJobId?: string | null,
+    chromaSimilarity?: number,
   ) => {
     if (!projectId) {
       message.warning('项目尚未创建，暂无可预览内容');
@@ -326,9 +333,14 @@ const MoocPage: React.FC = () => {
       open: true,
       kind,
       projectId,
+      moocJobId: moocJobId || null,
       loading: true,
       pages: [],
       pageIndex: 1,
+      avatarView: kind === 'avatar' ? 'compose' : 'raw',
+      chromaSimilarity: Number.isFinite(Number(chromaSimilarity)) ? Number(chromaSimilarity) : 0.28,
+      composeUrl: null,
+      composing: false,
     });
     try {
       const res = await projectApi.getSlides(projectId);
@@ -352,19 +364,60 @@ const MoocPage: React.FC = () => {
         setStageMediaPreview(null);
         return;
       }
-      setStageMediaPreview({
-        open: true,
-        kind,
-        projectId,
+      setStageMediaPreview((prev) => prev ? {
+        ...prev,
         loading: false,
         pages,
         pageIndex: pages[0].pageIndex,
-      });
+      } : null);
     } catch (e: any) {
       message.error(e.response?.data?.error?.message || '加载预览失败');
       setStageMediaPreview(null);
     }
   }, []);
+
+  const generateAvatarComposePreview = useCallback(async () => {
+    if (!stageMediaPreview || stageMediaPreview.kind !== 'avatar') return;
+    const { projectId, pageIndex, chromaSimilarity = 0.28 } = stageMediaPreview;
+    setStageMediaPreview({ ...stageMediaPreview, composing: true, avatarView: 'compose' });
+    try {
+      const res = await projectApi.composeAvatarPagePreview(projectId, pageIndex, chromaSimilarity);
+      const data = res.data.data;
+      const url = projectApi.getAvatarComposePreviewUrl(
+        projectId,
+        pageIndex,
+        data.chromaSimilarity ?? chromaSimilarity,
+      );
+      setStageMediaPreview((prev) => prev ? {
+        ...prev,
+        composing: false,
+        composeUrl: `${url}&t=${Date.now()}`,
+        chromaSimilarity: data.chromaSimilarity ?? chromaSimilarity,
+        avatarView: 'compose',
+      } : null);
+      if (data.cached) message.success('已加载缓存的合成预览');
+      else message.success('合成预览已生成（约前 8 秒）');
+    } catch (e: any) {
+      message.error(e.response?.data?.error?.message || '合成预览失败');
+      setStageMediaPreview((prev) => prev ? { ...prev, composing: false } : null);
+    }
+  }, [stageMediaPreview]);
+
+  const applyChromaToMoocJob = useCallback(async () => {
+    if (!stageMediaPreview?.moocJobId) {
+      message.warning('无法关联到当前一键任务');
+      return;
+    }
+    try {
+      await moocApi.updateJobConfig(stageMediaPreview.moocJobId, {
+        chromaSimilarity: stageMediaPreview.chromaSimilarity ?? 0.28,
+      });
+      message.success(`已应用到任务：绿幕强度 ${Math.round((stageMediaPreview.chromaSimilarity ?? 0.28) * 100)}`);
+      if (detailIdRef.current) void loadJobDetail(detailIdRef.current, { silent: true });
+    } catch (e: any) {
+      message.error(e.response?.data?.error?.message || '保存失败');
+    }
+  }, [stageMediaPreview, loadJobDetail]);
 
   const [retryingExplainId, setRetryingExplainId] = useState<string | null>(null);
 
@@ -1435,6 +1488,8 @@ const MoocPage: React.FC = () => {
                             onClick={() => void openStageMediaPreview(
                               canPreviewDubbing ? 'dubbing' : 'avatar',
                               detailJob.projectId,
+                              detailJob.id,
+                              detailJob.config?.chromaSimilarity,
                             )}
                           >
                             {canPreviewDubbing ? '预览配音' : '预览数字人'}
@@ -1722,6 +1777,7 @@ const MoocPage: React.FC = () => {
                 setStageMediaPreview({
                   ...stageMediaPreview,
                   pageIndex: stageMediaPreview.pages[idx - 1].pageIndex,
+                  composeUrl: null,
                 });
               }
             }}
@@ -1740,6 +1796,7 @@ const MoocPage: React.FC = () => {
                 setStageMediaPreview({
                   ...stageMediaPreview,
                   pageIndex: stageMediaPreview.pages[idx + 1].pageIndex,
+                  composeUrl: null,
                 });
               }
             }}
@@ -1750,7 +1807,7 @@ const MoocPage: React.FC = () => {
             关闭
           </Button>,
         ] : null}
-        width={720}
+        width={760}
         destroyOnClose
       >
         {stageMediaPreview?.loading ? (
@@ -1768,44 +1825,148 @@ const MoocPage: React.FC = () => {
                     key={p.pageIndex}
                     size="small"
                     type={p.pageIndex === stageMediaPreview.pageIndex ? 'primary' : 'default'}
-                    onClick={() => setStageMediaPreview({ ...stageMediaPreview, pageIndex: p.pageIndex })}
+                    onClick={() => setStageMediaPreview({
+                      ...stageMediaPreview,
+                      pageIndex: p.pageIndex,
+                      composeUrl: null,
+                    })}
                   >
                     {p.pageIndex}
                   </Button>
                 ))}
               </div>
             </div>
-            <div style={{
-              background: '#111',
-              borderRadius: 8,
-              overflow: 'hidden',
-              marginBottom: 12,
-              textAlign: 'center',
-            }}
-            >
-              <img
-                key={`img-${stageMediaPreview.projectId}-${stageMediaPreview.pageIndex}`}
-                src={projectApi.getSlideImageUrl(stageMediaPreview.projectId, stageMediaPreview.pageIndex)}
-                alt={`第 ${stageMediaPreview.pageIndex} 页`}
-                style={{ maxWidth: '100%', maxHeight: 360, objectFit: 'contain', display: 'block', margin: '0 auto' }}
-              />
-            </div>
+
             {stageMediaPreview.kind === 'dubbing' ? (
-              <audio
-                key={`audio-${stageMediaPreview.projectId}-${stageMediaPreview.pageIndex}`}
-                controls
-                autoPlay
-                src={projectApi.getSlideAudioUrl(stageMediaPreview.projectId, stageMediaPreview.pageIndex)}
-                style={{ width: '100%' }}
-              />
+              <>
+                <div style={{
+                  background: '#111',
+                  borderRadius: 8,
+                  overflow: 'hidden',
+                  marginBottom: 12,
+                  textAlign: 'center',
+                }}
+                >
+                  <img
+                    key={`img-${stageMediaPreview.projectId}-${stageMediaPreview.pageIndex}`}
+                    src={projectApi.getSlideImageUrl(stageMediaPreview.projectId, stageMediaPreview.pageIndex)}
+                    alt={`第 ${stageMediaPreview.pageIndex} 页`}
+                    style={{ maxWidth: '100%', maxHeight: 360, objectFit: 'contain', display: 'block', margin: '0 auto' }}
+                  />
+                </div>
+                <audio
+                  key={`audio-${stageMediaPreview.projectId}-${stageMediaPreview.pageIndex}`}
+                  controls
+                  autoPlay
+                  src={projectApi.getSlideAudioUrl(stageMediaPreview.projectId, stageMediaPreview.pageIndex)}
+                  style={{ width: '100%' }}
+                />
+              </>
             ) : (
-              <video
-                key={`video-${stageMediaPreview.projectId}-${stageMediaPreview.pageIndex}`}
-                controls
-                autoPlay
-                src={projectApi.getAvatarPageVideoUrl(stageMediaPreview.projectId, stageMediaPreview.pageIndex)}
-                style={{ width: '100%', maxHeight: 360, background: '#000', borderRadius: 8 }}
-              />
+              <>
+                <Radio.Group
+                  value={stageMediaPreview.avatarView || 'compose'}
+                  optionType="button"
+                  buttonStyle="solid"
+                  style={{ marginBottom: 12 }}
+                  onChange={(e) => setStageMediaPreview({
+                    ...stageMediaPreview,
+                    avatarView: e.target.value,
+                  })}
+                  options={[
+                    { label: '合成效果', value: 'compose' },
+                    { label: '绿幕原片', value: 'raw' },
+                  ]}
+                />
+
+                {(stageMediaPreview.avatarView || 'compose') === 'compose' ? (
+                  <div>
+                    <Alert
+                      type="info"
+                      showIcon
+                      style={{ marginBottom: 12 }}
+                      message="可调绿幕抠图强度并生成短预览（约前 8 秒），满意后点「应用到任务」供最终成片使用。"
+                    />
+                    <div style={{ marginBottom: 12 }}>
+                      <Text style={{ display: 'block', marginBottom: 4 }}>
+                        绿幕抠图强度：{Math.round((stageMediaPreview.chromaSimilarity ?? 0.28) * 100)}
+                      </Text>
+                      <Slider
+                        min={5}
+                        max={60}
+                        value={Math.round((stageMediaPreview.chromaSimilarity ?? 0.28) * 100)}
+                        onChange={(v) => setStageMediaPreview({
+                          ...stageMediaPreview,
+                          chromaSimilarity: Number(v) / 100,
+                          composeUrl: null,
+                        })}
+                        marks={{ 5: '弱', 28: '默认', 60: '强' }}
+                      />
+                      <Space wrap style={{ marginTop: 8 }}>
+                        <Button
+                          type="primary"
+                          loading={!!stageMediaPreview.composing}
+                          onClick={() => void generateAvatarComposePreview()}
+                        >
+                          生成合成预览
+                        </Button>
+                        {stageMediaPreview.moocJobId && (
+                          <Button onClick={() => void applyChromaToMoocJob()}>
+                            应用到任务
+                          </Button>
+                        )}
+                      </Space>
+                    </div>
+                    {stageMediaPreview.composing ? (
+                      <div style={{ textAlign: 'center', padding: 48 }}><Spin tip="正在合成预览…" /></div>
+                    ) : stageMediaPreview.composeUrl ? (
+                      <video
+                        key={stageMediaPreview.composeUrl}
+                        controls
+                        autoPlay
+                        src={stageMediaPreview.composeUrl}
+                        style={{ width: '100%', maxHeight: 420, background: '#000', borderRadius: 8 }}
+                      />
+                    ) : (
+                      <div style={{
+                        background: '#111',
+                        borderRadius: 8,
+                        padding: 48,
+                        textAlign: 'center',
+                        color: 'rgba(255,255,255,0.65)',
+                      }}
+                      >
+                        调整强度后点击「生成合成预览」
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <div style={{
+                      background: '#111',
+                      borderRadius: 8,
+                      overflow: 'hidden',
+                      marginBottom: 12,
+                      textAlign: 'center',
+                    }}
+                    >
+                      <img
+                        key={`img-raw-${stageMediaPreview.projectId}-${stageMediaPreview.pageIndex}`}
+                        src={projectApi.getSlideImageUrl(stageMediaPreview.projectId, stageMediaPreview.pageIndex)}
+                        alt={`第 ${stageMediaPreview.pageIndex} 页`}
+                        style={{ maxWidth: '100%', maxHeight: 240, objectFit: 'contain', display: 'block', margin: '0 auto' }}
+                      />
+                    </div>
+                    <video
+                      key={`video-raw-${stageMediaPreview.projectId}-${stageMediaPreview.pageIndex}`}
+                      controls
+                      autoPlay
+                      src={projectApi.getAvatarPageVideoUrl(stageMediaPreview.projectId, stageMediaPreview.pageIndex)}
+                      style={{ width: '100%', maxHeight: 360, background: '#000', borderRadius: 8 }}
+                    />
+                  </>
+                )}
+              </>
             )}
           </div>
         ) : null}

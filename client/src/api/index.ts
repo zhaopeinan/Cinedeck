@@ -109,6 +109,19 @@ export const projectApi = {
   getAvatarProgress: (id: string) => apiClient.get<ApiResponse<any>>(`/projects/${id}/avatar/progress`),
   getAvatarPageVideoUrl: (id: string, pageIndex: number) =>
     withToken(`/api/v1/projects/${id}/avatar/pages/${pageIndex}/video`),
+  composeAvatarPagePreview: (id: string, pageIndex: number, chromaSimilarity?: number) =>
+    apiClient.post<ApiResponse<{
+      pageIndex: number;
+      chromaKey: boolean;
+      chromaSimilarity: number;
+      duration: number;
+      cached: boolean;
+      videoUrl: string;
+    }>>(`/projects/${id}/avatar/pages/${pageIndex}/compose-preview`, {
+      chromaSimilarity,
+    }, { timeout: 300000 }),
+  getAvatarComposePreviewUrl: (id: string, pageIndex: number, chromaSimilarity: number) =>
+    withToken(`/api/v1/projects/${id}/avatar/pages/${pageIndex}/compose-preview?sim=${encodeURIComponent(String(chromaSimilarity))}`),
 
   downloadSlideAudio: async (id: string, pageIndex: number) => {
     const token = localStorage.getItem(TOKEN_KEY);
@@ -614,6 +627,8 @@ export const moocApi = {
       { params: opts?.resume === false ? { mode: 'restart' } : undefined },
     ),
   deleteJob: (id: string) => apiClient.delete<ApiResponse<any>>(`/mooc/jobs/${id}`),
+  updateJobConfig: (id: string, patch: { chromaSimilarity?: number }) =>
+    apiClient.patch<ApiResponse<any>>(`/mooc/jobs/${id}/config`, patch),
   getPptDownloadUrl: (id: string) => withToken(`/api/v1/mooc/jobs/${id}/ppt`),
   /** 下载用户提交的原始 PPTX */
   downloadPpt: async (id: string, filenameHint?: string) => {
