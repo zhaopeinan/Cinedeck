@@ -35,6 +35,19 @@ let deps: ExplainPipelineDeps | null = null;
 let pumping = false;
 let terminalHook: ((jobId: string) => void) | null = null;
 
+/** Max parallel explain jobs (LLM/TTS). Default 2; override with EXPLAIN_MAX_CONCURRENT. */
+export function getExplainMaxConcurrent(): number {
+  const n = Number(process.env.EXPLAIN_MAX_CONCURRENT || 2);
+  if (!Number.isFinite(n)) return 2;
+  return Math.max(1, Math.min(4, Math.floor(n)));
+}
+
+export function getExplainMaxRetries(): number {
+  const n = Number(process.env.EXPLAIN_MAX_RETRIES || 3);
+  if (!Number.isFinite(n)) return 3;
+  return Math.max(0, Math.min(10, Math.floor(n)));
+}
+
 export function setExplainJobTerminalHook(fn: (jobId: string) => void) {
   terminalHook = fn;
 }
@@ -43,28 +56,139 @@ function notifyTerminal(jobId: string) {
   try { terminalHook?.(jobId); } catch { /* ignore */ }
 }
 
+/**
+ * Mark failed, or auto-requeue when under retry budget.
+ * Infrastructure cancels (e.g. Voicebox "Generation cancelled") are retried;
+ * explicit user cancel is not.
+ */
+function markFailedOrRetry(jobId: string, message: string, error: string): 'retried' | 'failed' | 'cancelled' {
+  if (!deps) return 'failed';
+  const { jobs } = deps;
+  const job = jobs.getJob(jobId);
+  if (!job) return 'failed';
+
+  const userCancel = jobs.isCancelRequested(jobId)
+    || /任务已取消|用户取消|已取消/.test(error)
+    || /任务已取消|用户取消/.test(message);
+  if (userCancel) {
+    jobs.updateJob(jobId, {
+      status: 'cancelled',
+      stage: 'failed',
+      progress: 100,
+      message: '已取消',
+      error: error.slice(0, 2000),
+      finished_at: new Date().toISOString(),
+    });
+    notifyTerminal(jobId);
+    return 'cancelled';
+  }
+
+  const cfg = jobs.parseConfig(job);
+  const retryCount = Number(cfg.retryCount || 0);
+  const maxRetries = Number(cfg.maxRetries != null ? cfg.maxRetries : getExplainMaxRetries());
+  if (retryCount < maxRetries) {
+    const next = retryCount + 1;
+    let resumeFrom: 'start' | 'sample' | 'final' = 'start';
+    if (job.selected_style_id && job.sample_path && fs.existsSync(job.sample_path)) {
+      resumeFrom = 'final';
+    } else if (job.selected_style_id && job.script_json) {
+      resumeFrom = 'sample';
+    }
+    jobs.mergeConfig(jobId, {
+      retryCount: next,
+      maxRetries,
+      resumeFrom,
+      lastError: error.slice(0, 500),
+    });
+    jobs.updateJob(jobId, {
+      status: 'queued',
+      stage: 'queued',
+      progress: Math.min(30, Number(job.progress) || 0),
+      message: `自动重试 ${next}/${maxRetries}（${message}）`,
+      error: null,
+      finished_at: null,
+      cancel_requested: 0,
+    });
+    // Refresh batch progress without treating as terminal failure
+    try { terminalHook?.(jobId); } catch { /* ignore */ }
+    console.warn(`[Explain] job ${jobId.slice(0, 8)} retry ${next}/${maxRetries} from=${resumeFrom}: ${error.slice(0, 120)}`);
+    return 'retried';
+  }
+
+  jobs.updateJob(jobId, {
+    status: 'failed',
+    stage: 'failed',
+    progress: 100,
+    message,
+    error: error.slice(0, 2000),
+    finished_at: new Date().toISOString(),
+  });
+  notifyTerminal(jobId);
+  return 'failed';
+}
+
+/** Re-queue previously failed jobs that still have retry budget (e.g. after deploy). */
+export function requeueRetriableFailedExplainJobs(): number {
+  if (!deps) return 0;
+  const { jobs } = deps;
+  let n = 0;
+  for (const job of jobs.listRetriableFailed(50)) {
+    const cfg = jobs.parseConfig(job);
+    const retryCount = Number(cfg.retryCount || 0);
+    const maxRetries = Number(cfg.maxRetries != null ? cfg.maxRetries : getExplainMaxRetries());
+    let resumeFrom: 'start' | 'sample' | 'final' = 'start';
+    if (job.selected_style_id && job.sample_path && fs.existsSync(job.sample_path)) {
+      resumeFrom = 'final';
+    } else if (job.selected_style_id && job.script_json) {
+      resumeFrom = 'sample';
+    }
+    jobs.mergeConfig(job.id, {
+      retryCount: retryCount + 1,
+      maxRetries,
+      resumeFrom,
+      lastError: (job.error || '').slice(0, 500),
+    });
+    jobs.updateJob(job.id, {
+      status: 'queued',
+      stage: 'queued',
+      progress: 5,
+      message: `自动重试 ${retryCount + 1}/${maxRetries}（恢复失败任务）`,
+      error: null,
+      finished_at: null,
+      cancel_requested: 0,
+    });
+    n += 1;
+    try { terminalHook?.(job.id); } catch { /* ignore */ }
+  }
+  if (n) console.log(`[Explain] requeued ${n} failed job(s) for retry`);
+  return n;
+}
+
 export function initExplainPipeline(d: ExplainPipelineDeps) {
   deps = d;
   d.jobs.recoverStaleRunning();
+  requeueRetriableFailedExplainJobs();
   void pumpExplainQueue();
 }
 
 export function pumpExplainQueue() {
   if (!deps || pumping) return;
   pumping = true;
-  void (async () => {
-    try {
-      while (true) {
-        if (!deps) break;
-        if (deps.jobs.hasRunning()) break;
-        const job = deps.jobs.claimNextQueued();
-        if (!job) break;
-        await runExplainJob(job.id);
-      }
-    } finally {
-      pumping = false;
+  try {
+    const max = getExplainMaxConcurrent();
+    while (true) {
+      if (!deps) break;
+      const running = deps.jobs.countRunning();
+      if (running >= max) break;
+      const job = deps.jobs.claimNextQueued();
+      if (!job) break;
+      void runExplainJob(job.id).finally(() => {
+        pumpExplainQueue();
+      });
     }
-  })();
+  } finally {
+    pumping = false;
+  }
 }
 
 function extractJsonBlock(raw: string): any {
@@ -124,6 +248,34 @@ async function runExplainJob(jobId: string) {
   try {
     let job = jobs.getJob(jobId);
     if (!job) return;
+
+    // Resume after auto-retry: skip completed stages when possible
+    const resumeFrom = String(jobs.parseConfig(job).resumeFrom || '');
+    if (resumeFrom === 'final' || resumeFrom === 'sample') {
+      jobs.mergeConfig(jobId, { resumeFrom: null });
+      if (resumeFrom === 'final') {
+        jobs.updateJob(jobId, {
+          status: 'running',
+          stage: 'generating_final',
+          progress: 80,
+          message: '重试：继续生成全片…',
+          error: null,
+          finished_at: null,
+        });
+        void continueExplainAfterSampleApprove(jobId);
+        return;
+      }
+      jobs.updateJob(jobId, {
+        status: 'running',
+        stage: 'scripting',
+        progress: 45,
+        message: '重试：继续生成样片…',
+        error: null,
+        finished_at: null,
+      });
+      void continueExplainAfterStyle(jobId);
+      return;
+    }
 
     // 1) Extract topic
     jobs.updateJob(jobId, { stage: 'extracting', progress: 8, message: '整理选题…' });
@@ -228,16 +380,7 @@ ${catalog}
     // wait for user — resume via resumeExplainJob after select-style
   } catch (err: any) {
     const msg = err?.message || String(err);
-    const cancelled = /取消/.test(msg);
-    jobs.updateJob(jobId, {
-      status: cancelled ? 'cancelled' : 'failed',
-      stage: 'failed',
-      progress: 100,
-      message: cancelled ? '已取消' : '处理失败',
-      error: msg.slice(0, 2000),
-      finished_at: new Date().toISOString(),
-    });
-    notifyTerminal(jobId);
+    markFailedOrRetry(jobId, /任务已取消/.test(msg) ? '已取消' : '处理失败', msg);
   }
 }
 
@@ -390,15 +533,7 @@ nodes 4–6 个，总时长约 18–40 秒。`,
           void continueExplainAfterStyle(jobId);
           return;
         }
-        jobs.updateJob(jobId, {
-          status: 'failed',
-          stage: 'failed',
-          progress: 100,
-          message: '样片未通过 LLM 审阅',
-          error: review.reason.slice(0, 2000),
-          finished_at: new Date().toISOString(),
-        });
-        notifyTerminal(jobId);
+        markFailedOrRetry(jobId, '样片未通过 LLM 审阅', review.reason.slice(0, 2000));
         return;
       }
       jobs.updateJob(jobId, {
@@ -420,16 +555,7 @@ nodes 4–6 个，总时长约 18–40 秒。`,
     });
   } catch (err: any) {
     const msg = err?.message || String(err);
-    const cancelled = /取消/.test(msg);
-    jobs.updateJob(jobId, {
-      status: cancelled ? 'cancelled' : 'failed',
-      stage: 'failed',
-      progress: 100,
-      message: cancelled ? '已取消' : '样片生成失败',
-      error: msg.slice(0, 2000),
-      finished_at: new Date().toISOString(),
-    });
-    notifyTerminal(jobId);
+    markFailedOrRetry(jobId, /任务已取消/.test(msg) ? '已取消' : '样片生成失败', msg);
   } finally {
     pumpExplainQueue();
   }
@@ -565,15 +691,7 @@ export async function continueExplainAfterSampleApprove(jobId: string) {
     notifyTerminal(jobId);
   } catch (err: any) {
     const msg = err?.message || String(err);
-    jobs.updateJob(jobId, {
-      status: /取消/.test(msg) ? 'cancelled' : 'failed',
-      stage: 'failed',
-      progress: 100,
-      message: '全片生成失败',
-      error: msg.slice(0, 2000),
-      finished_at: new Date().toISOString(),
-    });
-    notifyTerminal(jobId);
+    markFailedOrRetry(jobId, /任务已取消/.test(msg) ? '已取消' : '全片生成失败', msg);
   } finally {
     pumpExplainQueue();
   }

@@ -291,10 +291,34 @@ export class ExplainJobService {
     return this.getJob(row.id);
   }
 
+  countRunning(): number {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS n FROM explain_jobs WHERE status = 'running'`,
+    ).get() as { n: number };
+    return Number(row?.n || 0);
+  }
+
   hasRunning(): boolean {
-    return !!this.db.prepare(
-      `SELECT id FROM explain_jobs WHERE status = 'running' LIMIT 1`,
-    ).get();
+    return this.countRunning() > 0;
+  }
+
+  /** Failed jobs that still have retry budget (config.retryCount < maxRetries). */
+  listRetriableFailed(limit = 40): ExplainJobRow[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM explain_jobs
+       WHERE status = 'failed'
+       ORDER BY updated_at ASC
+       LIMIT ?`,
+    ).all(Math.min(100, Math.max(1, limit))) as ExplainJobRow[];
+    return rows.filter((j) => {
+      const cfg = this.parseConfig(j);
+      const retryCount = Number(cfg.retryCount || 0);
+      const maxRetries = Number(
+        cfg.maxRetries != null ? cfg.maxRetries : process.env.EXPLAIN_MAX_RETRIES || 3,
+      );
+      if (!Number.isFinite(maxRetries) || maxRetries <= 0) return false;
+      return retryCount < maxRetries;
+    });
   }
 
   isCancelRequested(id: string): boolean {

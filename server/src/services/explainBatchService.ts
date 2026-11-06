@@ -280,11 +280,17 @@ export class ExplainBatchService {
     }
 
     if (batch.status === 'generating' || batch.status === 'await_points') {
+      const retrying = children.filter((j) =>
+        j.status === 'queued' && /自动重试/.test(String(j.message || '')),
+      ).length;
       return this.update(batchId, {
         status: 'generating',
         stage: 'generating',
         progress,
-        message: `生成中 ${completed}/${total} 完成` + (failed ? `，${failed} 失败` : ''),
+        message: `生成中 ${completed}/${total} 完成`
+          + (failed ? `，${failed} 失败` : '')
+          + (retrying ? `，${retrying} 重试中` : '')
+          + (active ? `，进行中 ${active}` : ''),
       });
     }
     return batch;
