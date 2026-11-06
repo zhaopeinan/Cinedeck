@@ -15,6 +15,8 @@ export type MoocJobStage =
   | 'script'
   | 'dubbing'
   | 'avatar'
+  | 'explain_points'
+  | 'explain_gen'
   | 'compose'
   | 'done'
   | 'failed';
@@ -27,6 +29,8 @@ export type MoocCheckpoint =
   | 'scripted'
   | 'dubbed'
   | 'avatar'
+  | 'explain_points'
+  | 'explain_ready'
   | 'composed';
 
 export const STAGE_LABEL_CN: Record<string, string> = {
@@ -36,6 +40,8 @@ export const STAGE_LABEL_CN: Record<string, string> = {
   script: '生成解说词',
   dubbing: '生成配音',
   avatar: '生成数字人',
+  explain_points: '分析知识点',
+  explain_gen: '生成讲解动画',
   compose: '合成视频',
   done: '已完成',
   failed: '失败',
@@ -66,6 +72,14 @@ export interface MoocJobConfig {
   pauseDuration: number;
   /** 出错后自动重试次数（不含首次），默认 5；0 表示不自动重试 */
   maxRetries: number;
+  /** 拆知识点并插入讲解动画到成片（默认关） */
+  enableExplainInsert: boolean;
+  /** 讲解动画导出清晰度 */
+  explainExportQuality: '720p' | '1080p' | '1440p';
+  /** 运行时关联的讲解专题 ID（断点续跑） */
+  explainBatchId?: string | null;
+  /** 成功插入段数 / 跳过说明（运行时写入） */
+  explainInsertSummary?: string | null;
 }
 
 export interface MoocJobRow {
@@ -112,6 +126,10 @@ const DEFAULT_CONFIG: MoocJobConfig = {
   defaultSilentPageDuration: 5,
   pauseDuration: 2,
   maxRetries: 5,
+  enableExplainInsert: false,
+  explainExportQuality: '1080p',
+  explainBatchId: null,
+  explainInsertSummary: null,
 };
 
 export class MoocJobService {

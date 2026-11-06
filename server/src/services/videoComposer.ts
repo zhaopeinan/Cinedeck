@@ -16,6 +16,13 @@ const execFileAsync = promisify(execFile);
 type TrackedJob = 'compose' | 'export';
 
 
+export interface ComposeInsertClip {
+  /** Play this clip after finishing this PPT page (0 = before first page) */
+  afterPage: number;
+  videoPath: string;
+  title?: string;
+}
+
 export interface ComposeInput {
   projectId: string;
   slides: any[];
@@ -23,6 +30,8 @@ export interface ComposeInput {
   defaultSilentPageDuration: number;
   /** 页间停顿（秒），默认 0；MOOC 等一键流程可设为 2 */
   pauseDuration?: number;
+  /** 知识点讲解动画等：按页插入到 concat 时间线 */
+  insertClips?: ComposeInsertClip[];
 }
 
 export interface ExportRenderInput {
@@ -516,6 +525,86 @@ export class VideoComposerService {
     return n;
   }
 
+  private async probeMediaSize(filePath: string): Promise<{ width: number; height: number }> {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height',
+      '-of', 'csv=p=0',
+      filePath,
+    ], { timeout: 30000 });
+    const parts = String(stdout).trim().split(/[x,]/).map((x) => parseInt(x, 10)).filter((n) => Number.isFinite(n) && n > 0);
+    if (parts.length < 2) throw new Error(`无法读取分辨率: ${filePath}`);
+    return { width: parts[0], height: parts[1] };
+  }
+
+  private async hasAudioStream(filePath: string): Promise<boolean> {
+    try {
+      const { stdout } = await execFileAsync('ffprobe', [
+        '-v', 'error',
+        '-select_streams', 'a',
+        '-show_entries', 'stream=index',
+        '-of', 'csv=p=0',
+        filePath,
+      ], { timeout: 30000 });
+      return String(stdout).trim().length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Remux an external MP4 (e.g. explain animation) into a concat-compatible
+   * mkv+pcm segment scaled/padded to the slide canvas.
+   */
+  private async remuxInsertClip(opts: {
+    projectId: string;
+    videoPath: string;
+    outPath: string;
+    targetW: number;
+    targetH: number;
+    encoder: FfmpegVideoEncoder;
+  }): Promise<number> {
+    const dur = await this.probeDuration(opts.videoPath);
+    const tw = Math.max(2, Math.floor(opts.targetW / 2) * 2);
+    const th = Math.max(2, Math.floor(opts.targetH / 2) * 2);
+    const vf =
+      `scale=${tw}:${th}:force_original_aspect_ratio=decrease,` +
+      `pad=${tw}:${th}:(ow-iw)/2:(oh-ih)/2,fps=25,format=yuv420p,setpts=PTS-STARTPTS`;
+    const timeout = this.segmentTimeoutMs(dur, 'simple');
+    const hasAudio = await this.hasAudioStream(opts.videoPath);
+    try { if (fs.existsSync(opts.outPath)) fs.unlinkSync(opts.outPath); } catch { /* ignore */ }
+
+    if (hasAudio) {
+      await this.runCmd(opts.projectId, 'compose', 'ffmpeg', [
+        '-y',
+        '-i', opts.videoPath,
+        '-filter_complex',
+        `[0:v]${vf}[v];` +
+          `[0:a]aresample=async=1:first_pts=0,aformat=sample_fmts=s16:channel_layouts=mono,apad,atrim=0:${dur.toFixed(3)},asetpts=PTS-STARTPTS[a]`,
+        '-map', '[v]', '-map', '[a]',
+        ...videoEncodeArgs(opts.encoder, { fast: dur >= 90 }),
+        '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '1',
+        '-t', String(dur),
+        opts.outPath,
+      ], { timeout });
+    } else {
+      await this.runCmd(opts.projectId, 'compose', 'ffmpeg', [
+        '-y',
+        '-i', opts.videoPath,
+        '-f', 'lavfi', '-t', String(dur), '-i', 'anullsrc=channel_layout=mono:sample_rate=48000',
+        '-filter_complex',
+        `[0:v]${vf}[v]`,
+        '-map', '[v]', '-map', '1:a',
+        ...videoEncodeArgs(opts.encoder, { fast: dur >= 90 }),
+        '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '1',
+        '-t', String(dur),
+        opts.outPath,
+      ], { timeout });
+    }
+    return dur;
+  }
+
   async composeVideo(input: ComposeInput): Promise<{ videoPath: string; openCutProject: any }> {
     const project = this.projectService.getProject(input.projectId);
     if (!project) throw new Error('项目不存在');
@@ -538,9 +627,77 @@ export class VideoComposerService {
       const segmentFiles: string[] = [];
 
       const totalPages = input.slides.length;
+      const insertClips = Array.isArray(input.insertClips) ? input.insertClips.filter((c) => c?.videoPath && fs.existsSync(c.videoPath)) : [];
+      const insertsByPage = new Map<number, ComposeInsertClip[]>();
+      for (const clip of insertClips) {
+        const key = Number.isFinite(Number(clip.afterPage)) ? Math.max(0, Math.floor(Number(clip.afterPage))) : 0;
+        const list = insertsByPage.get(key) || [];
+        list.push(clip);
+        insertsByPage.set(key, list);
+      }
+      const consumedInsertPages = new Set<number>();
+      let canvasW = 1920;
+      let canvasH = 1080;
+      const firstImage = input.slides.find((s) => s?.image_path && fs.existsSync(s.image_path))?.image_path;
+      if (firstImage) {
+        try {
+          const sz = await this.probeMediaSize(firstImage);
+          canvasW = sz.width;
+          canvasH = sz.height;
+        } catch { /* keep default */ }
+      }
+
+      const appendInsertsForPage = async (afterPage: number, refImagePath?: string) => {
+        const clips = insertsByPage.get(afterPage);
+        if (!clips?.length) return;
+        consumedInsertPages.add(afterPage);
+        let tw = canvasW;
+        let th = canvasH;
+        if (refImagePath && fs.existsSync(refImagePath)) {
+          try {
+            const sz = await this.probeMediaSize(refImagePath);
+            tw = sz.width;
+            th = sz.height;
+          } catch { /* keep canvas */ }
+        }
+        for (let ci = 0; ci < clips.length; ci++) {
+          const clip = clips[ci];
+          const outPath = path.join(segmentsDir, `explain_insert_p${afterPage}_${ci}.mkv`);
+          console.log(`[VideoComposer] Inserting explain clip after page ${afterPage}: ${path.basename(clip.videoPath)}`);
+          const dur = await this.remuxInsertClip({
+            projectId: input.projectId,
+            videoPath: clip.videoPath,
+            outPath,
+            targetW: tw,
+            targetH: th,
+            encoder,
+          });
+          segmentFiles.push(outPath);
+          timeline.tracks[0].clips.push({
+            id: `explain_${afterPage}_${ci}`,
+            start: currentTime,
+            end: currentTime + dur,
+            source: clip.videoPath,
+            title: clip.title || `知识点@${afterPage}`,
+          });
+          timeline.tracks[1].clips.push({
+            id: `explain_audio_${afterPage}_${ci}`,
+            start: currentTime,
+            end: currentTime + dur,
+            source: clip.videoPath,
+            volume: 1,
+          });
+          currentTime += dur;
+        }
+      };
 
       // Stage 1: Preparing page assets
       this.writeProgress(input.projectId, 'preparing', 0, totalPages);
+
+      // Inserts before first page (afterPage === 0)
+      if (insertsByPage.has(0)) {
+        await appendInsertsForPage(0, firstImage);
+      }
 
       for (let i = 0; i < input.slides.length; i++) {
         if (isCancelled('compose', input.projectId)) throw new JobCancelledError('视频合成已取消');
@@ -705,6 +862,19 @@ export class VideoComposerService {
           segmentFiles.push(pausePath);
           currentTime += pauseDuration;
         }
+
+        // Knowledge-point explain clips: after this page (and its pause)
+        if (insertsByPage.has(pageIndex)) {
+          await appendInsertsForPage(pageIndex, imagePath);
+        }
+      }
+
+      // Orphan inserts whose afterPage never matched a rendered slide → append at end
+      const orphanPages = [...insertsByPage.keys()]
+        .filter((p) => p > 0 && !consumedInsertPages.has(p))
+        .sort((a, b) => a - b);
+      for (const p of orphanPages) {
+        await appendInsertsForPage(p, firstImage);
       }
 
       timeline.duration = currentTime;

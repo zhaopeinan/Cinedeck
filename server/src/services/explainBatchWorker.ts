@@ -68,6 +68,11 @@ export function pumpExplainBatchQueue() {
   })();
 }
 
+/** Run PPT → knowledge-point analysis for a batch (also used by MOOC auto-insert). */
+export async function analyzeBatchNow(batchId: string): Promise<void> {
+  await runBatchAnalyze(batchId);
+}
+
 async function runBatchAnalyze(batchId: string) {
   if (!deps) return;
   const { batches, llm, genSettings } = deps;

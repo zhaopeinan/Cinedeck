@@ -383,6 +383,15 @@ export function createMoocRouter(
         || body.avatarFirstPageOnly === 'true'
         || body.avatarFirstPageOnly === true;
 
+      const enableExplainInsert = body.enable_explain_insert === '1'
+        || body.enable_explain_insert === 'true'
+        || body.enableExplainInsert === 'true'
+        || body.enableExplainInsert === true;
+      const qualityRaw = String(body.explain_export_quality || body.explainExportQuality || '1080p');
+      const explainExportQuality = (['720p', '1080p', '1440p'].includes(qualityRaw)
+        ? qualityRaw
+        : '1080p') as MoocJobConfig['explainExportQuality'];
+
       const config: MoocJobConfig = {
         targetDurationMin: Number(body.target_duration ?? body.targetDuration ?? 0) || 0,
         useExistingNote: !(body.use_existing_note === '0' || body.use_existing_note === 'false'
@@ -401,6 +410,10 @@ export function createMoocRouter(
         defaultSilentPageDuration: Number(body.default_silent_page_duration ?? body.defaultSilentPageDuration ?? 5) || 5,
         pauseDuration,
         maxRetries,
+        enableExplainInsert,
+        explainExportQuality,
+        explainBatchId: null,
+        explainInsertSummary: null,
       };
 
       const job = moocJobs.createJob({

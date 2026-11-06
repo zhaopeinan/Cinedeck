@@ -27,6 +27,8 @@ const STAGE_LABEL: Record<string, string> = {
   script: '生成解说词',
   dubbing: '生成配音',
   avatar: '生成数字人',
+  explain_points: '分析知识点',
+  explain_gen: '生成讲解动画',
   compose: '合成视频',
   done: '已完成',
   failed: '失败',
@@ -90,6 +92,10 @@ function buildMoocFormData(
   fd.append('pause_duration', String(Number.isFinite(pauseSec) ? pauseSec : 2));
   const maxRetries = Number(values.maxRetries);
   fd.append('max_retries', String(Number.isFinite(maxRetries) ? Math.max(0, Math.min(20, Math.round(maxRetries))) : 5));
+  fd.append('enable_explain_insert', values.enableExplainInsert ? '1' : '0');
+  if (values.enableExplainInsert) {
+    fd.append('explain_export_quality', String(values.explainExportQuality || '1080p'));
+  }
   return fd;
 }
 
@@ -121,6 +127,7 @@ const MoocPage: React.FC = () => {
 
   const [form] = Form.useForm();
   const enableAvatar = Form.useWatch('enableAvatar', form);
+  const enableExplainInsert = Form.useWatch('enableExplainInsert', form);
   const driveMode = Form.useWatch('avatarDriveMode', form);
   const selectedAvatarRefId = Form.useWatch('avatarRefVideoId', form);
 
@@ -299,6 +306,8 @@ const MoocPage: React.FC = () => {
       pauseDuration: 2,
       pauseEnabled: true,
       maxRetries: 5,
+      enableExplainInsert: false,
+      explainExportQuality: '1080p',
     });
 
     void (async () => {
@@ -663,7 +672,7 @@ const MoocPage: React.FC = () => {
         type="info"
         showIcon
         style={{ marginBottom: 20 }}
-        message="流水线：解析 PPT → 生成解说词 → 配音 →（可选）数字人 → 合成视频。全局一次只跑一个任务，跑完自动接下一个。"
+        message="流水线：解析 PPT → 生成解说词 → 配音 →（可选）数字人 →（可选）知识点讲解动画 → 合成视频。全局一次只跑一个任务，跑完自动接下一个。"
       />
 
       <Row gutter={[24, 24]}>
@@ -797,6 +806,26 @@ const MoocPage: React.FC = () => {
               <Form.Item label="生成数字人" name="enableAvatar" valuePropName="checked">
                 <Switch checkedChildren="开启" unCheckedChildren="跳过" />
               </Form.Item>
+
+              <Form.Item
+                label="插入知识点讲解动画"
+                name="enableExplainInsert"
+                valuePropName="checked"
+                extra="全自动拆知识点并生成动画，按页插入最终成片（耗时更长）"
+              >
+                <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+              </Form.Item>
+              {enableExplainInsert && (
+                <Form.Item label="讲解动画清晰度" name="explainExportQuality">
+                  <Select
+                    options={[
+                      { value: '720p', label: '720p' },
+                      { value: '1080p', label: '1080p' },
+                      { value: '1440p', label: '1440p' },
+                    ]}
+                  />
+                </Form.Item>
+              )}
 
               {enableAvatar && (
                 <>

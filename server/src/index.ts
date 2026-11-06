@@ -150,6 +150,8 @@ async function main() {
     voicebox,
     videoComposer,
     systemSettings,
+    explainBatches,
+    explainJobs,
   });
   initTranscribePipeline({ jobs: transcribeJobs, voicebox });
   initHyperframePipeline({
