@@ -631,37 +631,24 @@ const MoocPage: React.FC = () => {
     });
   };
 
-  const handleOptimizeExplain = (job: any) => {
-    const redo = !!job.hasExplainInsert;
-    Modal.confirm({
-      title: redo ? '重新生成知识点讲解？' : '一键优化：加入知识点讲解？',
-      content: redo
-        ? '保留配音/数字人等已有产物，重新分析知识点、生成讲解动画并重合成成片。'
-        : '保留配音/数字人等已有产物，只补知识点讲解动画并重新合成成片（不会从头重跑）。',
-      okText: redo ? '重新优化' : '开始优化',
-      onOk: async () => {
-        try {
-          await moocApi.optimizeExplain(job.id);
-          message.success('已排队：补知识点讲解并重合成');
-          await refreshJobs();
-        } catch (e: any) {
-          message.error(e.response?.data?.error?.message || '优化失败');
-        }
-      },
-    });
-  };
+  const [optimizeJob, setOptimizeJob] = useState<any | null>(null);
+  const [optimizeSubmitting, setOptimizeSubmitting] = useState(false);
+  const [optimizePhoto, setOptimizePhoto] = useState<File | null>(null);
+  const [optimizeForm] = Form.useForm();
+  const optimizeChangeAvatar = Form.useWatch('changeAvatar', optimizeForm);
+  const optimizeAddExplain = Form.useWatch('addExplain', optimizeForm);
+  const optimizeDriveMode = Form.useWatch('avatarDriveMode', optimizeForm);
 
-  const [avatarOptimizeJob, setAvatarOptimizeJob] = useState<any | null>(null);
-  const [avatarOptimizeSubmitting, setAvatarOptimizeSubmitting] = useState(false);
-  const [avatarOptimizePhoto, setAvatarOptimizePhoto] = useState<File | null>(null);
-  const [avatarOptimizeForm] = Form.useForm();
-
-  const openAvatarOptimize = (job: any) => {
-    setAvatarOptimizeJob(job);
-    setAvatarOptimizePhoto(null);
+  const openOptimize = (job: any, preset?: { changeAvatar?: boolean; addExplain?: boolean }) => {
+    setOptimizeJob(job);
+    setOptimizePhoto(null);
     void loadRefs();
     const cfg = job.config || {};
-    avatarOptimizeForm.setFieldsValue({
+    const hasExplain = !!job.hasExplainInsert;
+    optimizeForm.setFieldsValue({
+      changeAvatar: preset?.changeAvatar ?? false,
+      addExplain: preset?.addExplain ?? !hasExplain,
+      explainExportQuality: cfg.explainExportQuality || '1080p',
       avatarDriveMode: cfg.avatarDriveMode || 'video',
       avatarRefVideoId: cfg.avatarRefVideoId || undefined,
       chromaSimilarity: Number(cfg.chromaSimilarity ?? 0.28),
@@ -669,40 +656,59 @@ const MoocPage: React.FC = () => {
     });
   };
 
-  const submitAvatarOptimize = async () => {
-    if (!avatarOptimizeJob) return;
+  const submitOptimize = async () => {
+    if (!optimizeJob) return;
     try {
-      const values = await avatarOptimizeForm.validateFields();
-      if (values.avatarDriveMode === 'photo' && !avatarOptimizePhoto && !avatarOptimizeJob.config?.hasAvatarPhoto) {
-        message.warning('请上传数字人静照');
+      const values = await optimizeForm.validateFields();
+      const changeAvatar = !!values.changeAvatar;
+      const addExplain = !!values.addExplain;
+      if (!changeAvatar && !addExplain) {
+        message.warning('请至少勾选一项优化内容');
         return;
       }
-      if (values.avatarDriveMode === 'video' && !values.avatarRefVideoId) {
-        message.warning('请选择参考视频');
-        return;
+      if (changeAvatar) {
+        if (values.avatarDriveMode === 'photo' && !optimizePhoto && !optimizeJob.config?.hasAvatarPhoto) {
+          message.warning('请上传数字人静照');
+          return;
+        }
+        if (values.avatarDriveMode === 'video' && !values.avatarRefVideoId) {
+          message.warning('请选择参考视频');
+          return;
+        }
       }
-      setAvatarOptimizeSubmitting(true);
+      setOptimizeSubmitting(true);
       const fd = new FormData();
-      fd.append('avatar_drive_mode', values.avatarDriveMode || 'video');
-      if (values.avatarRefVideoId) fd.append('avatar_ref_video_id', values.avatarRefVideoId);
-      if (avatarOptimizePhoto) fd.append('photo', avatarOptimizePhoto);
-      const chroma = Number(values.chromaSimilarity);
-      fd.append(
-        'chroma_similarity',
-        String(Number.isFinite(chroma) ? Math.min(0.6, Math.max(0.05, chroma)) : 0.28),
-      );
-      if (values.avatarFirstPageOnly) fd.append('avatar_first_page_only', '1');
-      const layout = avatarOptimizeJob.config?.avatarLayout || DEFAULT_AVATAR_LAYOUT;
-      fd.append('avatar_layout', JSON.stringify(layout));
-      await moocApi.optimizeAvatar(avatarOptimizeJob.id, fd);
-      message.success('已排队：更换数字人并重合成');
-      setAvatarOptimizeJob(null);
+      fd.append('change_avatar', changeAvatar ? '1' : '0');
+      fd.append('add_explain', addExplain ? '1' : '0');
+      if (addExplain) {
+        fd.append('explain_export_quality', values.explainExportQuality || '1080p');
+      }
+      if (changeAvatar) {
+        fd.append('avatar_drive_mode', values.avatarDriveMode || 'video');
+        if (values.avatarRefVideoId) fd.append('avatar_ref_video_id', values.avatarRefVideoId);
+        if (optimizePhoto) fd.append('photo', optimizePhoto);
+        const chroma = Number(values.chromaSimilarity);
+        fd.append(
+          'chroma_similarity',
+          String(Number.isFinite(chroma) ? Math.min(0.6, Math.max(0.05, chroma)) : 0.28),
+        );
+        if (values.avatarFirstPageOnly) fd.append('avatar_first_page_only', '1');
+        const layout = optimizeJob.config?.avatarLayout || DEFAULT_AVATAR_LAYOUT;
+        fd.append('avatar_layout', JSON.stringify(layout));
+      }
+      await moocApi.optimize(optimizeJob.id, fd);
+      const parts = [
+        changeAvatar ? '更换数字人' : null,
+        addExplain ? (optimizeJob.hasExplainInsert ? '重做讲解' : '加讲解') : null,
+      ].filter(Boolean);
+      message.success(`已排队：${parts.join(' + ')}并重合成`);
+      setOptimizeJob(null);
       await refreshJobs();
     } catch (e: any) {
       if (e?.errorFields) return;
-      message.error(e.response?.data?.error?.message || '更换数字人失败');
+      message.error(e.response?.data?.error?.message || '成片优化失败');
     } finally {
-      setAvatarOptimizeSubmitting(false);
+      setOptimizeSubmitting(false);
     }
   };
 
@@ -967,24 +973,14 @@ const MoocPage: React.FC = () => {
               </Button>
             </>
           )}
-          {r.canOptimizeExplain && (
+          {(r.canOptimizeExplain || r.canOptimizeAvatar) && (
             <Button
               size="small"
               type="link"
               icon={<ThunderboltOutlined />}
-              onClick={() => handleOptimizeExplain(r)}
+              onClick={() => openOptimize(r)}
             >
-              {r.hasExplainInsert ? '重做讲解' : '加讲解'}
-            </Button>
-          )}
-          {r.canOptimizeAvatar && (
-            <Button
-              size="small"
-              type="link"
-              icon={<UserOutlined />}
-              onClick={() => openAvatarOptimize(r)}
-            >
-              换数字人
+              优化成片
             </Button>
           )}
           {(r.status === 'queued' || r.status === 'running') && (
@@ -1533,48 +1529,81 @@ const MoocPage: React.FC = () => {
       </Modal>
 
       <Modal
-        open={!!avatarOptimizeJob}
-        title={avatarOptimizeJob
-          ? `更换数字人 · ${truncateText(avatarOptimizeJob.name || avatarOptimizeJob.fileName || '', 24)}`
-          : '更换数字人'}
+        open={!!optimizeJob}
+        title={optimizeJob
+          ? `优化成片 · ${truncateText(optimizeJob.name || optimizeJob.fileName || '', 24)}`
+          : '优化成片'}
         onCancel={() => {
-          if (avatarOptimizeSubmitting) return;
-          setAvatarOptimizeJob(null);
-          setAvatarOptimizePhoto(null);
+          if (optimizeSubmitting) return;
+          setOptimizeJob(null);
+          setOptimizePhoto(null);
         }}
-        onOk={() => void submitAvatarOptimize()}
-        okText="开始更换"
-        confirmLoading={avatarOptimizeSubmitting}
-        width={640}
+        onOk={() => void submitOptimize()}
+        okText="开始优化"
+        confirmLoading={optimizeSubmitting}
+        width={680}
         destroyOnClose
       >
         <Alert
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message="保留配音等已有产物；若已有知识点讲解，会用新数字人重叠插片后重合成，不会重跑讲解 HTML。"
+          message="保留配音等已有产物。可只换数字人、只加讲解，或两项一起做。"
+          description={
+            optimizeJob?.hasExplainInsert
+              ? '若同时勾选两项：会用新数字人重新生成知识点讲解（不沿用旧插片）。仅换数字人时，会保留讲解 HTML 并重叠新数字人。'
+              : '勾选「加讲解」后会分析知识点、生成讲解动画并重合成。'
+          }
         />
-        <Form form={avatarOptimizeForm} layout="vertical">
-          <Form.Item label="驱动方式" name="avatarDriveMode" rules={[{ required: true }]}>
-            <Radio.Group optionType="button" buttonStyle="solid">
-              <Radio.Button value="video">参考视频</Radio.Button>
-              <Radio.Button value="photo">静照</Radio.Button>
-            </Radio.Group>
+        <Form form={optimizeForm} layout="vertical">
+          <Form.Item name="changeAvatar" valuePropName="checked" style={{ marginBottom: 8 }}>
+            <Checkbox>
+              <Space size={6}>
+                <UserOutlined />
+                更换数字人
+              </Space>
+            </Checkbox>
           </Form.Item>
-          <Form.Item noStyle shouldUpdate={(a, b) => a.avatarDriveMode !== b.avatarDriveMode}>
-            {() => (
-              avatarOptimizeForm.getFieldValue('avatarDriveMode') === 'photo' ? (
+          <Form.Item name="addExplain" valuePropName="checked" style={{ marginBottom: 16 }}>
+            <Checkbox>
+              <Space size={6}>
+                <ThunderboltOutlined />
+                {optimizeJob?.hasExplainInsert ? '重做知识点讲解' : '加知识点讲解'}
+              </Space>
+            </Checkbox>
+          </Form.Item>
+
+          {optimizeAddExplain ? (
+            <Form.Item label="讲解导出清晰度" name="explainExportQuality" style={{ marginBottom: 16 }}>
+              <Radio.Group optionType="button" buttonStyle="solid">
+                <Radio.Button value="720p">720p</Radio.Button>
+                <Radio.Button value="1080p">1080p</Radio.Button>
+                <Radio.Button value="1440p">1440p</Radio.Button>
+              </Radio.Group>
+            </Form.Item>
+          ) : null}
+
+          {optimizeChangeAvatar ? (
+            <>
+              <Divider style={{ margin: '8px 0 16px' }}>数字人设置</Divider>
+              <Form.Item label="驱动方式" name="avatarDriveMode" rules={[{ required: true }]}>
+                <Radio.Group optionType="button" buttonStyle="solid">
+                  <Radio.Button value="video">参考视频</Radio.Button>
+                  <Radio.Button value="photo">静照</Radio.Button>
+                </Radio.Group>
+              </Form.Item>
+              {optimizeDriveMode === 'photo' ? (
                 <Form.Item label="静照" required>
                   <Upload
                     accept="image/*"
                     maxCount={1}
                     showUploadList={false}
-                    beforeUpload={(f) => { setAvatarOptimizePhoto(f); return false; }}
+                    beforeUpload={(f) => { setOptimizePhoto(f); return false; }}
                   >
                     <Button icon={<PlusOutlined />}>
-                      {avatarOptimizePhoto
-                        ? avatarOptimizePhoto.name
-                        : (avatarOptimizeJob?.config?.hasAvatarPhoto ? '重新上传（可沿用原静照）' : '上传照片')}
+                      {optimizePhoto
+                        ? optimizePhoto.name
+                        : (optimizeJob?.config?.hasAvatarPhoto ? '重新上传（可沿用原静照）' : '上传照片')}
                     </Button>
                   </Upload>
                 </Form.Item>
@@ -1587,28 +1616,28 @@ const MoocPage: React.FC = () => {
                   <AvatarRefLibraryPanel
                     mode="select"
                     refs={refs}
-                    selectedId={avatarOptimizeForm.getFieldValue('avatarRefVideoId') || null}
-                    onSelect={(id) => { avatarOptimizeForm.setFieldValue('avatarRefVideoId', id); }}
+                    selectedId={optimizeForm.getFieldValue('avatarRefVideoId') || null}
+                    onSelect={(id) => { optimizeForm.setFieldValue('avatarRefVideoId', id); }}
                   />
                 </Form.Item>
-              )
-            )}
-          </Form.Item>
-          <Form.Item
-            label="绿幕抠图强度"
-            name="chromaSimilarity"
-            tooltip="仅绿幕参考视频生效"
-          >
-            <Slider
-              min={0.05}
-              max={0.6}
-              step={0.01}
-              marks={{ 0.05: '弱', 0.28: '默认', 0.6: '强' }}
-            />
-          </Form.Item>
-          <Form.Item name="avatarFirstPageOnly" valuePropName="checked">
-            <Checkbox>仅第 1 页生成数字人</Checkbox>
-          </Form.Item>
+              )}
+              <Form.Item
+                label="绿幕抠图强度"
+                name="chromaSimilarity"
+                tooltip="仅绿幕参考视频生效"
+              >
+                <Slider
+                  min={0.05}
+                  max={0.6}
+                  step={0.01}
+                  marks={{ 0.05: '弱', 0.28: '默认', 0.6: '强' }}
+                />
+              </Form.Item>
+              <Form.Item name="avatarFirstPageOnly" valuePropName="checked">
+                <Checkbox>仅第 1 页生成数字人</Checkbox>
+              </Form.Item>
+            </>
+          ) : null}
         </Form>
       </Modal>
 

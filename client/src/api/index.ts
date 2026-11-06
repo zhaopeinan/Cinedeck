@@ -643,6 +643,12 @@ export const moocApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 180000,
     }),
+  /** Unified finished-job optimize: change avatar and/or add/redo explain */
+  optimize: (id: string, formData: FormData) =>
+    apiClient.post<ApiResponse<any>>(`/mooc/jobs/${id}/optimize`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 180000,
+    }),
   getPptDownloadUrl: (id: string) => withToken(`/api/v1/mooc/jobs/${id}/ppt`),
   /** 下载用户提交的原始 PPTX */
   downloadPpt: async (id: string, filenameHint?: string) => {

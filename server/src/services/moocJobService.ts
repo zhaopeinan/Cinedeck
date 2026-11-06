@@ -463,6 +463,42 @@ export class MoocJobService {
     userId: string,
     avatarPatch: Partial<MoocJobConfig>,
   ): MoocJobRow | null {
+    return this.queueOptimize(id, userId, {
+      changeAvatar: true,
+      addExplain: false,
+      avatarPatch,
+    });
+  }
+
+  /**
+   * Unified post-finish optimize: change avatar and/or (re)generate explain inserts.
+   * - explain only → checkpoint avatar
+   * - avatar only → checkpoint dubbed; keep existing explain HTML and re-overlay if present
+   * - both → checkpoint dubbed; fresh explain after new avatar (no keep-explain)
+   */
+  queueOptimize(
+    id: string,
+    userId: string,
+    opts: {
+      changeAvatar?: boolean;
+      addExplain?: boolean;
+      avatarPatch?: Partial<MoocJobConfig>;
+      explainExportQuality?: '720p' | '1080p' | '1440p';
+    },
+  ): MoocJobRow | null {
+    const changeAvatar = !!opts.changeAvatar;
+    const addExplain = !!opts.addExplain;
+    if (!changeAvatar && !addExplain) return null;
+
+    if (changeAvatar && addExplain) {
+      // Combined path below
+    } else if (addExplain && !changeAvatar) {
+      return this.queueOptimizeExplain(id, userId, {
+        explainExportQuality: opts.explainExportQuality,
+        force: true,
+      });
+    }
+
     const job = this.getJob(id);
     if (!job || job.user_id !== userId) return null;
     if (job.status === 'running' || job.status === 'queued') return null;
@@ -472,23 +508,46 @@ export class MoocJobService {
     if (!p) return null;
     if (!fs.existsSync(job.file_path)) return null;
 
-    const cfg: any = { ...this.parseConfig(job), ...avatarPatch };
+    const cfg: any = { ...this.parseConfig(job), ...(opts.avatarPatch || {}) };
     cfg.enableAvatar = true;
+
+    // Fresh explain when user asked to add/redo; otherwise keep+reoverlay if inserts exist
     let keepExplain = false;
-    try {
-      if (p.file_path) {
-        const insertsPath = path.join(path.dirname(p.file_path), 'explain_inserts.json');
-        keepExplain = !!(cfg.enableExplainInsert && fs.existsSync(insertsPath));
+    if (addExplain) {
+      cfg.enableExplainInsert = true;
+      if (opts.explainExportQuality && ['720p', '1080p', '1440p'].includes(opts.explainExportQuality)) {
+        cfg.explainExportQuality = opts.explainExportQuality;
+      } else if (!cfg.explainExportQuality) {
+        cfg.explainExportQuality = '1080p';
       }
-    } catch { /* ignore */ }
-    cfg.avatarOptimizeKeepExplain = keepExplain;
-    if (Array.isArray(cfg.stageLog)) {
-      cfg.stageLog = cfg.stageLog.filter((x: any) =>
-        x?.id !== 'avatar' && x?.id !== 'compose'
-        && !(keepExplain && (x?.id === 'explain_gen')));
+      cfg.explainBatchId = null;
+      cfg.explainInsertSummary = null;
+      cfg.avatarOptimizeKeepExplain = false;
+      try {
+        if (p.file_path) {
+          const insertsPath = path.join(path.dirname(p.file_path), 'explain_inserts.json');
+          if (fs.existsSync(insertsPath)) fs.unlinkSync(insertsPath);
+        }
+      } catch { /* ignore */ }
+    } else {
+      try {
+        if (p.file_path) {
+          const insertsPath = path.join(path.dirname(p.file_path), 'explain_inserts.json');
+          keepExplain = !!(cfg.enableExplainInsert && fs.existsSync(insertsPath));
+        }
+      } catch { /* ignore */ }
+      cfg.avatarOptimizeKeepExplain = keepExplain;
     }
 
-    // Reset slide avatar so worker regenerates with new ref/photo/layout
+    if (Array.isArray(cfg.stageLog)) {
+      cfg.stageLog = cfg.stageLog.filter((x: any) => {
+        if (x?.id === 'avatar' || x?.id === 'compose') return false;
+        if (addExplain && (x?.id === 'explain_points' || x?.id === 'explain_gen')) return false;
+        if (!addExplain && keepExplain && x?.id === 'explain_gen') return false;
+        return true;
+      });
+    }
+
     try {
       this.db.prepare(`
         UPDATE slides
@@ -504,14 +563,21 @@ export class MoocJobService {
       console.warn('[MOOC] reset slide avatars failed:', err?.message || err);
     }
 
+    let message: string;
+    if (addExplain) {
+      message = '成片优化：排队更换数字人、生成知识点讲解并重合成';
+    } else if (keepExplain) {
+      message = '更换数字人：排队重跑数字人、重叠讲解插片并重合成';
+    } else {
+      message = '更换数字人：排队重跑数字人并重合成';
+    }
+
     return this.updateJob(id, {
       status: 'queued',
       stage: 'queued',
       progress: 70,
       checkpoint: 'dubbed',
-      message: keepExplain
-        ? '更换数字人：排队重跑数字人、重叠讲解插片并重合成'
-        : '更换数字人：排队重跑数字人并重合成',
+      message,
       error: null,
       failed_stage: null,
       retry_count: 0,

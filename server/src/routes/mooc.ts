@@ -559,11 +559,131 @@ export function createMoocRouter(
     });
   });
 
-  /**
-   * Replace avatar on a finished job: keep dubbing (+ optional explain HTML),
-   * regenerate digital human, re-overlay inserts if any, then re-compose.
-   */
-  router.post('/jobs/:id/optimize-avatar', (req, res, next) => {
+  function parseBoolFlag(v: any): boolean {
+    return v === true || v === 1 || v === '1' || v === 'true' || v === 'yes' || v === 'on';
+  }
+
+  function handleOptimizeMultipart(req: Request, res: Response, defaults?: { changeAvatar?: boolean; addExplain?: boolean }) {
+    const userId = getUserId(req);
+    const job = moocJobs.getJob(String(req.params.id));
+    if (!job || job.user_id !== userId) {
+      return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
+    }
+    if (job.status === 'running' || job.status === 'queued') {
+      return res.status(400).json({
+        success: false, data: null,
+        error: { code: '400', message: '任务进行中，无法优化' },
+      });
+    }
+    const body = req.body || {};
+    const files = req.files as { [field: string]: Express.Multer.File[] } | undefined;
+    const photoFile = files?.photo?.[0];
+
+    const changeAvatar = body.change_avatar != null || body.changeAvatar != null || body.do_avatar != null
+      ? parseBoolFlag(body.change_avatar ?? body.changeAvatar ?? body.do_avatar)
+      : (defaults?.changeAvatar ?? true);
+    const addExplain = body.add_explain != null || body.addExplain != null || body.do_explain != null
+      ? parseBoolFlag(body.add_explain ?? body.addExplain ?? body.do_explain)
+      : (defaults?.addExplain ?? false);
+
+    if (!changeAvatar && !addExplain) {
+      return res.status(400).json({
+        success: false, data: null,
+        error: { code: '400', message: '请至少选择「更换数字人」或「加讲解」之一' },
+      });
+    }
+
+    let avatarPatch: Partial<MoocJobConfig> | undefined;
+    if (changeAvatar) {
+      const driveMode = (body.avatar_drive_mode || body.avatarDriveMode || 'video') as 'photo' | 'video';
+      if (driveMode === 'photo' && !photoFile) {
+        const cfg0 = moocJobs.parseConfig(job);
+        if (!cfg0.avatarPhotoPath || !fs.existsSync(cfg0.avatarPhotoPath)) {
+          return res.status(400).json({
+            success: false, data: null,
+            error: { code: '4001', message: '静照模式请上传数字人照片' },
+          });
+        }
+      }
+      if (driveMode === 'video' && !(body.avatar_ref_video_id || body.avatarRefVideoId)) {
+        return res.status(400).json({
+          success: false, data: null,
+          error: { code: '4001', message: '视频模式请选择参考视频' },
+        });
+      }
+
+      let avatarPageIndexes: number[] | null = null;
+      const pagesRaw = body.avatar_page_indexes ?? body.avatarPageIndexes;
+      if (pagesRaw != null && pagesRaw !== '' && pagesRaw !== 'all') {
+        try {
+          const parsed = typeof pagesRaw === 'string' ? JSON.parse(pagesRaw) : pagesRaw;
+          if (Array.isArray(parsed)) {
+            avatarPageIndexes = parsed.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n) && n >= 1);
+            if (!avatarPageIndexes.length) avatarPageIndexes = null;
+          }
+        } catch { avatarPageIndexes = null; }
+      }
+      const avatarFirstPageOnly = parseBoolFlag(body.avatar_first_page_only)
+        || parseBoolFlag(body.avatarFirstPageOnly);
+
+      let avatarLayout = moocJobs.parseConfig(job).avatarLayout || { x: 0.72, y: 0.52, w: 0.25, h: 0.444 };
+      const layoutRaw = body.avatar_layout ?? body.avatarLayout;
+      if (layoutRaw) {
+        try {
+          const src = typeof layoutRaw === 'string' ? JSON.parse(layoutRaw) : layoutRaw;
+          const x = Number(src?.x); const y = Number(src?.y);
+          const w = Number(src?.w); const h = Number(src?.h);
+          if ([x, y, w, h].every((n) => Number.isFinite(n))) {
+            avatarLayout = {
+              x: Math.min(0.95, Math.max(0, x)),
+              y: Math.min(0.95, Math.max(0, y)),
+              w: Math.min(1, Math.max(0.05, w)),
+              h: Math.min(1, Math.max(0.05, h)),
+            };
+          }
+        } catch { /* keep */ }
+      }
+
+      avatarPatch = {
+        enableAvatar: true,
+        avatarDriveMode: driveMode === 'photo' ? 'photo' : 'video',
+        avatarRefVideoId: body.avatar_ref_video_id || body.avatarRefVideoId || null,
+        avatarPhotoPath: photoFile?.path || moocJobs.parseConfig(job).avatarPhotoPath || null,
+        avatarPageIndexes: avatarFirstPageOnly ? [1] : avatarPageIndexes,
+        avatarFirstPageOnly,
+        avatarLayout,
+        chromaSimilarity: clampChromaSimilarity(
+          body.chroma_similarity ?? body.chromaSimilarity ?? moocJobs.parseConfig(job).chromaSimilarity,
+        ),
+      };
+    }
+
+    const qualityRaw = String(body.explain_export_quality || body.explainExportQuality || '');
+    const explainExportQuality = (['720p', '1080p', '1440p'].includes(qualityRaw)
+      ? qualityRaw
+      : undefined) as '720p' | '1080p' | '1440p' | undefined;
+
+    const updated = moocJobs.queueOptimize(job.id, userId, {
+      changeAvatar,
+      addExplain,
+      avatarPatch,
+      explainExportQuality,
+    });
+    if (!updated) {
+      return res.status(400).json({
+        success: false, data: null,
+        error: { code: '400', message: '无法优化（需保留项目产物）' },
+      });
+    }
+    pumpMoocQueue();
+    res.json({
+      success: true,
+      data: serializeJob(updated, projectService, progressExtras),
+      error: null,
+    });
+  }
+
+  const optimizeUpload = (req: Request, res: Response, next: () => void) => {
     upload.fields([{ name: 'photo', maxCount: 1 }])(req, res, (err) => {
       if (err) {
         return res.status(400).json({
@@ -573,97 +693,22 @@ export function createMoocRouter(
       }
       next();
     });
-  }, (req: Request, res: Response) => {
-    const userId = getUserId(req);
-    const job = moocJobs.getJob(String(req.params.id));
-    if (!job || job.user_id !== userId) {
-      return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
-    }
-    if (job.status === 'running' || job.status === 'queued') {
-      return res.status(400).json({
-        success: false, data: null,
-        error: { code: '400', message: '任务进行中，无法更换数字人' },
-      });
-    }
-    const body = req.body || {};
-    const files = req.files as { [field: string]: Express.Multer.File[] } | undefined;
-    const photoFile = files?.photo?.[0];
-    const driveMode = (body.avatar_drive_mode || body.avatarDriveMode || 'video') as 'photo' | 'video';
-    if (driveMode === 'photo' && !photoFile) {
-      const cfg0 = moocJobs.parseConfig(job);
-      if (!cfg0.avatarPhotoPath || !fs.existsSync(cfg0.avatarPhotoPath)) {
-        return res.status(400).json({
-          success: false, data: null,
-          error: { code: '4001', message: '静照模式请上传数字人照片' },
-        });
-      }
-    }
-    if (driveMode === 'video' && !(body.avatar_ref_video_id || body.avatarRefVideoId)) {
-      return res.status(400).json({
-        success: false, data: null,
-        error: { code: '4001', message: '视频模式请选择参考视频' },
-      });
-    }
+  };
 
-    let avatarPageIndexes: number[] | null = null;
-    const pagesRaw = body.avatar_page_indexes ?? body.avatarPageIndexes;
-    if (pagesRaw != null && pagesRaw !== '' && pagesRaw !== 'all') {
-      try {
-        const parsed = typeof pagesRaw === 'string' ? JSON.parse(pagesRaw) : pagesRaw;
-        if (Array.isArray(parsed)) {
-          avatarPageIndexes = parsed.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n) && n >= 1);
-          if (!avatarPageIndexes.length) avatarPageIndexes = null;
-        }
-      } catch { avatarPageIndexes = null; }
-    }
-    const avatarFirstPageOnly = body.avatar_first_page_only === '1'
-      || body.avatar_first_page_only === 'true'
-      || body.avatarFirstPageOnly === true;
+  /**
+   * Unified finished-job optimize: change avatar and/or add/redo explain inserts.
+   * Multipart: change_avatar, add_explain, avatar_*, explain_export_quality, photo?
+   */
+  router.post('/jobs/:id/optimize', optimizeUpload, (req, res) => {
+    handleOptimizeMultipart(req, res, { changeAvatar: false, addExplain: false });
+  });
 
-    let avatarLayout = moocJobs.parseConfig(job).avatarLayout || { x: 0.72, y: 0.52, w: 0.25, h: 0.444 };
-    const layoutRaw = body.avatar_layout ?? body.avatarLayout;
-    if (layoutRaw) {
-      try {
-        const src = typeof layoutRaw === 'string' ? JSON.parse(layoutRaw) : layoutRaw;
-        const x = Number(src?.x); const y = Number(src?.y);
-        const w = Number(src?.w); const h = Number(src?.h);
-        if ([x, y, w, h].every((n) => Number.isFinite(n))) {
-          avatarLayout = {
-            x: Math.min(0.95, Math.max(0, x)),
-            y: Math.min(0.95, Math.max(0, y)),
-            w: Math.min(1, Math.max(0.05, w)),
-            h: Math.min(1, Math.max(0.05, h)),
-          };
-        }
-      } catch { /* keep */ }
-    }
-
-    const patch: Partial<MoocJobConfig> = {
-      enableAvatar: true,
-      avatarDriveMode: driveMode === 'photo' ? 'photo' : 'video',
-      avatarRefVideoId: body.avatar_ref_video_id || body.avatarRefVideoId || null,
-      avatarPhotoPath: photoFile?.path || moocJobs.parseConfig(job).avatarPhotoPath || null,
-      avatarPageIndexes: avatarFirstPageOnly ? [1] : avatarPageIndexes,
-      avatarFirstPageOnly,
-      avatarLayout,
-      chromaSimilarity: clampChromaSimilarity(
-        body.chroma_similarity ?? body.chromaSimilarity ?? moocJobs.parseConfig(job).chromaSimilarity,
-      ),
-    };
-
-    const updated = moocJobs.queueOptimizeAvatar(job.id, userId, patch);
-    if (!updated) {
-      return res.status(400).json({
-        success: false, data: null,
-        error: { code: '400', message: '无法更换数字人（需保留项目产物）' },
-      });
-    }
-    pumpMoocQueue();
-    res.json({
-      success: true,
-      data: serializeJob(updated, projectService, progressExtras),
-      error: null,
-    });
+  /**
+   * Replace avatar on a finished job (legacy). Prefer POST /optimize with change_avatar=1.
+   * Body may also set add_explain=1 to combine.
+   */
+  router.post('/jobs/:id/optimize-avatar', optimizeUpload, (req, res) => {
+    handleOptimizeMultipart(req, res, { changeAvatar: true, addExplain: false });
   });
 
   /** Batch optimize multiple finished jobs. */
