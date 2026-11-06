@@ -244,7 +244,12 @@ export async function synthesizeExplainNarration(opts: {
   if (!opts.modelId) throw new Error('请选择配音模型');
 
   await ensureVoiceboxRunningForAudio();
+  const ttsWaitStarted = Date.now();
   await withVoiceboxGpu('explain:narration', async () => {
+    try {
+      const { noteExplainTtsWait } = await import('./explainConcurrency');
+      noteExplainTtsWait(Date.now() - ttsWaitStarted);
+    } catch { /* ignore */ }
     const task = await opts.voicebox.generateDubbing({
       text,
       voiceId: opts.voiceId,

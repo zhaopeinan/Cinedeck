@@ -298,6 +298,13 @@ export class ExplainJobService {
     return Number(row?.n || 0);
   }
 
+  countQueued(): number {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS n FROM explain_jobs WHERE status = 'queued'`,
+    ).get() as { n: number };
+    return Number(row?.n || 0);
+  }
+
   hasRunning(): boolean {
     return this.countRunning() > 0;
   }

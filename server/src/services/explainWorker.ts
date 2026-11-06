@@ -19,6 +19,14 @@ import {
   injectNarrationAudio,
   synthesizeExplainNarration,
 } from './explainNarration';
+import {
+  evaluateExplainConcurrency,
+  getExplainConcurrencyStatus,
+  getExplainMaxConcurrent,
+  noteExplainJobFinished,
+} from './explainConcurrency';
+
+export { getExplainMaxConcurrent, getExplainConcurrencyStatus };
 
 export interface ExplainPipelineDeps {
   jobs: ExplainJobService;
@@ -34,13 +42,6 @@ function genSettingsFor(userId: string): ExplainGenSettings {
 let deps: ExplainPipelineDeps | null = null;
 let pumping = false;
 let terminalHook: ((jobId: string) => void) | null = null;
-
-/** Max parallel explain jobs (LLM/TTS). Default 2; override with EXPLAIN_MAX_CONCURRENT. */
-export function getExplainMaxConcurrent(): number {
-  const n = Number(process.env.EXPLAIN_MAX_CONCURRENT || 2);
-  if (!Number.isFinite(n)) return 2;
-  return Math.max(1, Math.min(4, Math.floor(n)));
-}
 
 export function getExplainMaxRetries(): number {
   const n = Number(process.env.EXPLAIN_MAX_RETRIES || 3);
@@ -79,6 +80,7 @@ function markFailedOrRetry(jobId: string, message: string, error: string): 'retr
       error: error.slice(0, 2000),
       finished_at: new Date().toISOString(),
     });
+    noteExplainJobFinished(false);
     notifyTerminal(jobId);
     return 'cancelled';
   }
@@ -111,6 +113,7 @@ function markFailedOrRetry(jobId: string, message: string, error: string): 'retr
     });
     // Refresh batch progress without treating as terminal failure
     try { terminalHook?.(jobId); } catch { /* ignore */ }
+    noteExplainJobFinished(false);
     console.warn(`[Explain] job ${jobId.slice(0, 8)} retry ${next}/${maxRetries} from=${resumeFrom}: ${error.slice(0, 120)}`);
     return 'retried';
   }
@@ -123,6 +126,7 @@ function markFailedOrRetry(jobId: string, message: string, error: string): 'retr
     error: error.slice(0, 2000),
     finished_at: new Date().toISOString(),
   });
+  noteExplainJobFinished(false);
   notifyTerminal(jobId);
   return 'failed';
 }
@@ -175,10 +179,11 @@ export function pumpExplainQueue() {
   if (!deps || pumping) return;
   pumping = true;
   try {
-    const max = getExplainMaxConcurrent();
     while (true) {
       if (!deps) break;
       const running = deps.jobs.countRunning();
+      const queued = deps.jobs.countQueued();
+      const max = evaluateExplainConcurrency({ queuedHint: queued, runningHint: running });
       if (running >= max) break;
       const job = deps.jobs.claimNextQueued();
       if (!job) break;
@@ -688,6 +693,7 @@ export async function continueExplainAfterSampleApprove(jobId: string) {
       sample_path: null,
       finished_at: new Date().toISOString(),
     });
+    noteExplainJobFinished(true);
     notifyTerminal(jobId);
   } catch (err: any) {
     const msg = err?.message || String(err);
