@@ -390,6 +390,65 @@ export class MoocJobService {
     });
   }
 
+  /**
+   * Optimize a finished job by adding knowledge-point explain inserts, then re-compose.
+   * Keeps project + earlier artifacts (parse/script/dubbing/avatar); rolls checkpoint back to avatar.
+   */
+  queueOptimizeExplain(
+    id: string,
+    userId: string,
+    opts?: { explainExportQuality?: '720p' | '1080p' | '1440p'; force?: boolean },
+  ): MoocJobRow | null {
+    const job = this.getJob(id);
+    if (!job || job.user_id !== userId) return null;
+    if (job.status === 'running' || job.status === 'queued') return null;
+    if (!job.project_id) return null;
+    const p = this.db.prepare('SELECT id FROM projects WHERE id = ?').get(job.project_id);
+    if (!p) return null;
+    if (!fs.existsSync(job.file_path)) return null;
+
+    const cfg: any = { ...this.parseConfig(job) };
+    const already = !!cfg.enableExplainInsert && !!cfg.explainInsertSummary;
+    if (already && !opts?.force) {
+      // Still allow — caller may want to regenerate; force defaults true for optimize endpoint
+    }
+    cfg.enableExplainInsert = true;
+    if (opts?.explainExportQuality && ['720p', '1080p', '1440p'].includes(opts.explainExportQuality)) {
+      cfg.explainExportQuality = opts.explainExportQuality;
+    } else if (!cfg.explainExportQuality) {
+      cfg.explainExportQuality = '1080p';
+    }
+    // Fresh explain batch / inserts
+    cfg.explainBatchId = null;
+    cfg.explainInsertSummary = null;
+    if (Array.isArray(cfg.stageLog)) {
+      cfg.stageLog = cfg.stageLog.filter((x: any) =>
+        x?.id !== 'explain_points' && x?.id !== 'explain_gen' && x?.id !== 'compose');
+    }
+    try {
+      const proj = this.db.prepare('SELECT file_path FROM projects WHERE id = ?').get(job.project_id) as
+        { file_path?: string } | undefined;
+      if (proj?.file_path) {
+        const insertsPath = path.join(path.dirname(proj.file_path), 'explain_inserts.json');
+        if (fs.existsSync(insertsPath)) fs.unlinkSync(insertsPath);
+      }
+    } catch { /* ignore */ }
+
+    // Roll back past explain+compose so worker re-enters those stages only
+    return this.updateJob(id, {
+      status: 'queued',
+      stage: 'queued',
+      progress: 70,
+      checkpoint: 'avatar',
+      message: '一键优化：排队补知识点讲解并重新合成',
+      error: null,
+      failed_stage: null,
+      retry_count: 0,
+      finished_at: null,
+      config_json: JSON.stringify(cfg),
+    });
+  }
+
   /** Full restart from scratch (new project). */
   queueRestart(id: string, userId: string): MoocJobRow | null {
     const job = this.getJob(id);

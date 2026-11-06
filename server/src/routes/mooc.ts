@@ -90,6 +90,12 @@ function serializeJob(
     config: safeConfig,
     project,
     pptAvailable: !!(job.file_path && fs.existsSync(job.file_path)),
+    /** Finished/failed job with project can add explain inserts then re-compose */
+    canOptimizeExplain: !!(
+      job.project_id
+      && (job.status === 'success' || job.status === 'failed' || job.status === 'cancelled')
+    ),
+    hasExplainInsert: !!(config.enableExplainInsert && (config.explainInsertSummary || config.explainBatchId)),
     createdAt: job.created_at,
     updatedAt: job.updated_at,
     startedAt: job.started_at,
@@ -503,6 +509,91 @@ export function createMoocRouter(
       return res.json({ success: true, data: serializeJob(updated, projectService, progressExtras), error: null });
     }
     res.json({ success: true, data: serializeJob(job, projectService, progressExtras), error: null });
+  });
+
+  /**
+   * One-click optimize: keep existing PPT/dubbing/avatar, generate knowledge-point
+   * explain inserts, then re-compose the final video.
+   */
+  router.post('/jobs/:id/optimize-explain', (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    const job = moocJobs.getJob(String(req.params.id));
+    if (!job || job.user_id !== userId) {
+      return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
+    }
+    if (job.status === 'running' || job.status === 'queued') {
+      return res.status(400).json({
+        success: false, data: null,
+        error: { code: '400', message: '任务进行中，无法优化' },
+      });
+    }
+    if (job.status !== 'success' && job.status !== 'failed' && job.status !== 'cancelled') {
+      return res.status(400).json({
+        success: false, data: null,
+        error: { code: '400', message: '仅已完成或失败的任务可优化' },
+      });
+    }
+    const qualityRaw = String(req.body?.explainExportQuality || req.body?.explain_export_quality || '');
+    const quality = (['720p', '1080p', '1440p'].includes(qualityRaw)
+      ? qualityRaw
+      : undefined) as '720p' | '1080p' | '1440p' | undefined;
+    const updated = moocJobs.queueOptimizeExplain(job.id, userId, {
+      explainExportQuality: quality,
+      force: true,
+    });
+    if (!updated) {
+      return res.status(400).json({
+        success: false, data: null,
+        error: { code: '400', message: '无法优化（需保留项目产物；若原文件丢失请重跑）' },
+      });
+    }
+    pumpMoocQueue();
+    res.json({
+      success: true,
+      data: serializeJob(updated, projectService, progressExtras),
+      error: null,
+    });
+  });
+
+  /** Batch optimize multiple finished jobs. */
+  router.post('/jobs/optimize-explain', (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+    if (!ids.length) {
+      return res.status(400).json({
+        success: false, data: null,
+        error: { code: '400', message: '请提供任务 id 列表' },
+      });
+    }
+    const qualityRaw = String(req.body?.explainExportQuality || req.body?.explain_export_quality || '');
+    const quality = (['720p', '1080p', '1440p'].includes(qualityRaw)
+      ? qualityRaw
+      : undefined) as '720p' | '1080p' | '1440p' | undefined;
+    const results: any[] = [];
+    let ok = 0;
+    for (const id of ids.slice(0, 50)) {
+      const job = moocJobs.getJob(id);
+      if (!job || job.user_id !== userId) {
+        results.push({ id, ok: false, error: '不存在' });
+        continue;
+      }
+      const updated = moocJobs.queueOptimizeExplain(id, userId, {
+        explainExportQuality: quality,
+        force: true,
+      });
+      if (!updated) {
+        results.push({ id, ok: false, error: '无法优化' });
+        continue;
+      }
+      ok += 1;
+      results.push({ id, ok: true, job: serializeJob(updated, projectService, progressExtras) });
+    }
+    if (ok) pumpMoocQueue();
+    res.json({
+      success: true,
+      data: { ok, total: ids.length, results },
+      error: null,
+    });
   });
 
   /** Update tunable runtime config (e.g. chromaSimilarity) without restarting the job. */

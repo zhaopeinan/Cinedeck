@@ -6,7 +6,7 @@ import {
 } from 'antd';
 import {
   CloudUploadOutlined, DeleteOutlined, DownloadOutlined, ExclamationCircleOutlined, ExpandOutlined,
-  EyeOutlined, PlayCircleOutlined, PlusOutlined,
+  EyeOutlined, PlayCircleOutlined, PlusOutlined, ThunderboltOutlined,
   ProfileOutlined, ReloadOutlined, RocketOutlined, StopOutlined,
 } from '@ant-design/icons';
 import { explainApi, moocApi, projectApi, videoApi, voiceboxApi } from '../../api';
@@ -631,6 +631,55 @@ const MoocPage: React.FC = () => {
     });
   };
 
+  const handleOptimizeExplain = (job: any) => {
+    const redo = !!job.hasExplainInsert;
+    Modal.confirm({
+      title: redo ? '重新生成知识点讲解？' : '一键优化：加入知识点讲解？',
+      content: redo
+        ? '保留配音/数字人等已有产物，重新分析知识点、生成讲解动画并重合成成片。'
+        : '保留配音/数字人等已有产物，只补知识点讲解动画并重新合成成片（不会从头重跑）。',
+      okText: redo ? '重新优化' : '开始优化',
+      onOk: async () => {
+        try {
+          await moocApi.optimizeExplain(job.id);
+          message.success('已排队：补知识点讲解并重合成');
+          await refreshJobs();
+        } catch (e: any) {
+          message.error(e.response?.data?.error?.message || '优化失败');
+        }
+      },
+    });
+  };
+
+  const handleOptimizeExplainBatch = () => {
+    const candidates = jobs.filter((j) => j.canOptimizeExplain || (
+      j.projectId && (j.status === 'success' || j.status === 'failed' || j.status === 'cancelled')
+    ));
+    const fresh = candidates.filter((j) => !j.hasExplainInsert);
+    const list = fresh.length ? fresh : candidates;
+    if (!list.length) {
+      message.info('没有可优化的已完成任务');
+      return;
+    }
+    Modal.confirm({
+      title: `批量一键优化（${list.length} 个）？`,
+      content: fresh.length
+        ? `将为 ${fresh.length} 个尚未加讲解的任务补知识点动画并重合成；保留原有配音/数字人。`
+        : `将重新为 ${list.length} 个任务生成知识点讲解并重合成。`,
+      okText: '批量优化',
+      onOk: async () => {
+        try {
+          const res = await moocApi.optimizeExplainBatch(list.map((j) => j.id));
+          const data = res.data.data;
+          message.success(`已排队优化 ${data?.ok || 0}/${data?.total || list.length} 个任务`);
+          await refreshJobs();
+        } catch (e: any) {
+          message.error(e.response?.data?.error?.message || '批量优化失败');
+        }
+      },
+    });
+  };
+
   const columns = [
     {
       title: '任务',
@@ -803,7 +852,7 @@ const MoocPage: React.FC = () => {
     {
       title: '操作',
       key: 'actions',
-      width: 320,
+      width: 360,
       fixed: 'right' as const,
       render: (_: any, r: any) => (
         <Space size={4} wrap>
@@ -862,6 +911,16 @@ const MoocPage: React.FC = () => {
                 项目
               </Button>
             </>
+          )}
+          {r.canOptimizeExplain && (
+            <Button
+              size="small"
+              type="link"
+              icon={<ThunderboltOutlined />}
+              onClick={() => handleOptimizeExplain(r)}
+            >
+              {r.hasExplainInsert ? '重做讲解' : '加讲解'}
+            </Button>
           )}
           {(r.status === 'queued' || r.status === 'running') && (
             <Button
@@ -1345,6 +1404,13 @@ const MoocPage: React.FC = () => {
                   {queueInfo.hasRunning ? '有任务运行中' : '空闲'}
                   {typeof queueInfo.queuedCount === 'number' ? ` · 排队 ${queueInfo.queuedCount}` : ''}
                 </Text>
+                <Button
+                  size="small"
+                  icon={<ThunderboltOutlined />}
+                  onClick={() => handleOptimizeExplainBatch()}
+                >
+                  批量加讲解
+                </Button>
                 <Button size="small" icon={<ReloadOutlined />} onClick={() => refreshJobs()}>刷新</Button>
               </Space>
             }

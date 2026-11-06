@@ -629,6 +629,14 @@ export const moocApi = {
   deleteJob: (id: string) => apiClient.delete<ApiResponse<any>>(`/mooc/jobs/${id}`),
   updateJobConfig: (id: string, patch: { chromaSimilarity?: number }) =>
     apiClient.patch<ApiResponse<any>>(`/mooc/jobs/${id}/config`, patch),
+  /** Keep existing artifacts; generate knowledge-point inserts and re-compose */
+  optimizeExplain: (id: string, opts?: { explainExportQuality?: '720p' | '1080p' | '1440p' }) =>
+    apiClient.post<ApiResponse<any>>(`/mooc/jobs/${id}/optimize-explain`, opts || {}),
+  optimizeExplainBatch: (ids: string[], opts?: { explainExportQuality?: '720p' | '1080p' | '1440p' }) =>
+    apiClient.post<ApiResponse<{ ok: number; total: number; results: any[] }>>(
+      '/mooc/jobs/optimize-explain',
+      { ids, ...opts },
+    ),
   getPptDownloadUrl: (id: string) => withToken(`/api/v1/mooc/jobs/${id}/ppt`),
   /** 下载用户提交的原始 PPTX */
   downloadPpt: async (id: string, filenameHint?: string) => {
