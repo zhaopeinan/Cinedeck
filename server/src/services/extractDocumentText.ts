@@ -33,10 +33,23 @@ export async function extractDocumentText(filePath: string, fileName: string): P
   throw new Error(`暂不支持 ${ext || '该'} 格式，请上传 .pptx / .txt / .md，或直接粘贴选题`);
 }
 
-async function extractPptxText(filePath: string): Promise<string> {
+export type ExtractedSlidePage = {
+  page: number;
+  text: string;
+  notes: string;
+};
+
+export type ExtractedPptxDocument = {
+  totalPages: number;
+  pages: ExtractedSlidePage[];
+  /** Flat outline text with 【第N页】 markers for LLM / legacy callers */
+  text: string;
+};
+
+async function runPptxExtract(filePath: string): Promise<ExtractedPptxDocument> {
   const safePath = filePath.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   const script = `
-import json, sys
+import json
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
@@ -71,35 +84,76 @@ for i, slide in enumerate(prs.slides, 1):
     except Exception:
         pass
     body = "\\n".join(parts).strip()
-    if body or note:
-        block = f"【第{i}页】"
-        if body:
-            block += "\\n" + body
-        if note:
-            block += "\\n备注：" + note
-        pages.append(block)
+    pages.append({"page": i, "text": body, "notes": note})
 
-text = "\\n\\n".join(pages).strip()
-print(json.dumps({"ok": True, "pages": len(prs.slides), "text": text}, ensure_ascii=False))
+print(json.dumps({"ok": True, "totalPages": len(prs.slides), "pages": pages}, ensure_ascii=False))
 `;
-  try {
-    const { stdout } = await execFileAsync('python3', ['-c', script], {
-      timeout: 120000,
-      maxBuffer: 20 * 1024 * 1024,
+  const { stdout } = await execFileAsync('python3', ['-c', script], {
+    timeout: 120000,
+    maxBuffer: 20 * 1024 * 1024,
+  });
+  const result = JSON.parse(stdout.trim());
+  const pages: ExtractedSlidePage[] = Array.isArray(result.pages)
+    ? result.pages.map((p: any) => ({
+      page: Number(p.page) || 0,
+      text: String(p.text || '').trim(),
+      notes: String(p.notes || '').trim(),
+    })).filter((p: ExtractedSlidePage) => p.page > 0)
+    : [];
+  const blocks = pages
+    .filter((p) => p.text || p.notes)
+    .map((p) => {
+      let block = `【第${p.page}页】`;
+      if (p.text) block += `\n${p.text}`;
+      if (p.notes) block += `\n备注：${p.notes}`;
+      return block;
     });
-    const result = JSON.parse(stdout.trim());
-    const text = String(result.text || '').trim();
-    if (!text || text.length < 8) {
-      throw new Error('未能从 PPT 中提取到可用文字（可能全是图片页）。请粘贴选题摘要后再试');
-    }
-    // Cap for LLM context
-    const capped = text.length > 35000
-      ? `${text.slice(0, 35000)}\n\n…（已截断，共 ${result.pages} 页）`
-      : text;
-    return `课件共 ${result.pages} 页，内容大纲如下：\n\n${capped}`;
+  const text = blocks.join('\n\n').trim();
+  if (!text || text.length < 8) {
+    throw new Error('未能从 PPT 中提取到可用文字（可能全是图片页）。请粘贴选题摘要后再试');
+  }
+  const capped = text.length > 35000
+    ? `${text.slice(0, 35000)}\n\n…（已截断，共 ${result.totalPages} 页）`
+    : text;
+  return {
+    totalPages: Number(result.totalPages) || pages.length,
+    pages,
+    text: `课件共 ${result.totalPages} 页，内容大纲如下：\n\n${capped}`,
+  };
+}
+
+/** Structured PPTX extract (per-page) for batch knowledge-point clustering. */
+export async function extractPptxDocument(filePath: string): Promise<ExtractedPptxDocument> {
+  try {
+    return await runPptxExtract(filePath);
   } catch (err: any) {
     if (err?.message && /未能从 PPT|暂不支持/.test(err.message)) throw err;
     const detail = err?.stderr || err?.message || String(err);
     throw new Error(`PPTX 解析失败：${String(detail).slice(0, 400)}`);
   }
+}
+
+async function extractPptxText(filePath: string): Promise<string> {
+  const doc = await extractPptxDocument(filePath);
+  return doc.text;
+}
+
+/** Slice page blocks from a stored topic outline for one knowledge cluster. */
+export function sliceTopicByPageRange(
+  topicText: string,
+  pageStart: number,
+  pageEnd: number,
+): string {
+  const lo = Math.min(pageStart, pageEnd);
+  const hi = Math.max(pageStart, pageEnd);
+  const parts: string[] = [];
+  const re = /【第\s*(\d+)\s*页】([\s\S]*?)(?=【第\s*\d+\s*页】|$)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(topicText)) !== null) {
+    const n = Number(m[1]);
+    if (n >= lo && n <= hi) {
+      parts.push(`【第${n}页】${m[2]}`.trim());
+    }
+  }
+  return parts.join('\n\n').trim();
 }

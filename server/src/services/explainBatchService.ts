@@ -24,7 +24,16 @@ export interface ExplainKnowledgePoint {
   title: string;
   coreQuestion: string;
   summary: string;
+  /** Human-readable range, e.g. "第 2–4 页" */
   sourcePages?: string;
+  /** Inclusive page cluster covered by this animation */
+  pageStart?: number;
+  pageEnd?: number;
+  /**
+   * Suggested insertion: play this animation after finishing this PPT page
+   * (typically = pageEnd). 0 means before the first slide.
+   */
+  insertAfterPage?: number;
   priority?: number;
   selected?: boolean;
   jobId?: string | null;
@@ -300,14 +309,34 @@ export class ExplainBatchService {
       selectedVoiceId: batch.selected_voice_id,
       selectedModelId: batch.selected_model_id,
       subtitles: !!batch.subtitles,
-      knowledgePoints: points.map((p) => ({
-        ...p,
-        jobId: p.jobId || null,
-        jobStatus: p.jobId ? childMap.get(p.jobId)?.status || null : null,
-        jobProgress: p.jobId ? childMap.get(p.jobId)?.progress ?? null : null,
-        jobMessage: p.jobId ? childMap.get(p.jobId)?.message || null : null,
-        hasFinal: !!(p.jobId && childMap.get(p.jobId)?.final_path),
-      })),
+      knowledgePoints: points.map((p) => {
+        const pageStart = Number(p.pageStart) || undefined;
+        const pageEnd = Number(p.pageEnd) || pageStart;
+        const insertAfterPage = Number.isFinite(Number(p.insertAfterPage))
+          ? Number(p.insertAfterPage)
+          : (pageEnd || undefined);
+        const sourcePages = p.sourcePages
+          || (pageStart && pageEnd
+            ? (pageStart === pageEnd ? `第 ${pageStart} 页` : `第 ${pageStart}–${pageEnd} 页`)
+            : undefined);
+        return {
+          ...p,
+          pageStart,
+          pageEnd,
+          insertAfterPage,
+          sourcePages,
+          insertHint: insertAfterPage != null
+            ? (insertAfterPage <= 0
+              ? '建议插入：课件开头（第 1 页之前）'
+              : `建议插入：讲完第 ${insertAfterPage} 页之后`)
+            : null,
+          jobId: p.jobId || null,
+          jobStatus: p.jobId ? childMap.get(p.jobId)?.status || null : null,
+          jobProgress: p.jobId ? childMap.get(p.jobId)?.progress ?? null : null,
+          jobMessage: p.jobId ? childMap.get(p.jobId)?.message || null : null,
+          hasFinal: !!(p.jobId && childMap.get(p.jobId)?.final_path),
+        };
+      }),
       childCount: children.length,
       completedCount: children.filter((j) => j.status === 'completed').length,
       failedCount: children.filter((j) => j.status === 'failed' || j.status === 'cancelled').length,

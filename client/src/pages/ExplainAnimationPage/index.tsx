@@ -611,10 +611,28 @@ const ExplainAnimationPage: React.FC = () => {
                 onRemove={() => setFile(null)}
                 fileList={file ? [{ uid: '1', name: file.name, status: 'done' as const }] : []}
               >
-                <p className="ant-upload-text">也可上传 .pptx / .txt / .md</p>
-                <p className="ant-upload-hint">PPT 会自动抽取每页正文与备注作为选题</p>
+                <p className="ant-upload-text">也可上传 .txt / .md（单题）</p>
+                <p className="ant-upload-hint">整份 PPT 要拆成多个动画，请用右侧「PPT 专题批量」</p>
               </Dragger>
             </div>
+            {file && /\.pptx?$/i.test(file.name) && (
+              <Alert
+                type="warning"
+                showIcon
+                style={{ marginTop: 12 }}
+                message="检测到 PPT：单题模式只会生成 1 个动画"
+                description="若要按页聚类生成多个独立动画并标注插入位置，请切换到「PPT 专题批量」。"
+                action={
+                  <Button size="small" type="primary" onClick={() => {
+                    setBatchFile(file);
+                    setFile(null);
+                    setTab('batch');
+                  }}>
+                    改用专题批量
+                  </Button>
+                }
+              />
+            )}
             <Button
               type="primary"
               icon={<RocketOutlined />}
@@ -931,7 +949,7 @@ const ExplainAnimationPage: React.FC = () => {
                       type="info"
                       showIcon
                       style={{ marginBottom: 12 }}
-                      message="创建专题时选定一套音色；之后风格由 LLM 自动选，样片由 LLM 审阅，无需逐步确认。"
+                      message="按页分析并聚类成多个独立动画（例如第 2–4 页一个单元），并给出建议插入位置；音色专题统一，风格/样片自动处理。"
                     />
                     <Dragger
                       multiple={false}
@@ -1061,7 +1079,11 @@ const ExplainAnimationPage: React.FC = () => {
                                     <Space align="start">
                                       <Checkbox value={p.id} />
                                       <div>
-                                        <Text strong>{p.title}</Text>
+                                        <Space wrap style={{ marginBottom: 4 }}>
+                                          <Text strong>{p.title}</Text>
+                                          {p.sourcePages && <Tag color="blue">{p.sourcePages}</Tag>}
+                                          {p.insertHint && <Tag color="purple">{p.insertHint}</Tag>}
+                                        </Space>
                                         {p.coreQuestion && (
                                           <Paragraph type="secondary" style={{ margin: '4px 0' }}>
                                             {p.coreQuestion}
@@ -1074,7 +1096,6 @@ const ExplainAnimationPage: React.FC = () => {
                                               {(STATUS_TAG[p.jobStatus] || {}).text || p.jobStatus}
                                             </Tag>
                                           )}
-                                          {p.sourcePages && <Tag>{p.sourcePages}</Tag>}
                                           {p.hasFinal && p.jobId && (
                                             <Button
                                               type="link"
