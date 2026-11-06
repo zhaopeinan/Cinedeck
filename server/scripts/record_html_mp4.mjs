@@ -185,12 +185,41 @@ async function main() {
       const mid = await psnrOf(p0, pMid);
       const end = await psnrOf(p0, pEnd);
       process.stdout.write(`motion preflight psnr mid=${mid.toFixed(1)}dB end=${end.toFixed(1)}dB\n`);
+
+      // DOM occupancy: starfield/background can change enough to pass PSNR while
+      // content nodes stay opacity=0 because seek missed currentTime/updateElements.
+      await seekTo(page, animTotal * 0.45, animTotal);
+      const visible = await page.evaluate(() => {
+        const skip = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'HEAD', 'HTML', 'BR']);
+        let n = 0;
+        for (const el of document.body.querySelectorAll('*')) {
+          if (skip.has(el.tagName)) continue;
+          if (el.id === 'player' || el.closest?.('#player')) continue;
+          const st = window.getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden') continue;
+          const op = parseFloat(st.opacity || '0');
+          if (!(op > 0.18)) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width < 36 || r.height < 18) continue;
+          // Prefer mid-canvas content; ignore tiny corner chrome
+          if (r.top < 8 && r.left < 8 && r.width < 420 && r.height < 120) continue;
+          n += 1;
+        }
+        return n;
+      });
+      process.stdout.write(`motion preflight visibleNodes@mid=${visible}\n`);
+
       for (const f of [p0, pMid, pEnd]) {
         try { fs.unlinkSync(f); } catch { /* ignore */ }
       }
       if (mid >= 28 && end >= 28) {
         throw new Error(
           `讲解动画画面几乎无变化（PSNR mid=${mid.toFixed(1)}dB, end=${end.toFixed(1)}dB）：疑似 seek 失效或卡在初始叠字帧`,
+        );
+      }
+      if (visible < 3) {
+        throw new Error(
+          `讲解动画中段可见内容过少（visibleNodes=${visible}）：疑似 seek 未驱动 currentTime/updateElements，导出将是空白片`,
         );
       }
     }
