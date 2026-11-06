@@ -139,8 +139,8 @@ const MoocPage: React.FC = () => {
     id: string;
     title: string;
     kind: 'final' | 'sample';
+    fullscreen?: boolean;
   } | null>(null);
-  const explainPreviewRef = useRef<HTMLDivElement | null>(null);
   const pollRef = useRef<number | null>(null);
   const previewReqRef = useRef(0);
 
@@ -1506,7 +1506,7 @@ const MoocPage: React.FC = () => {
       </Drawer>
 
       <Modal
-        open={!!explainPreview?.open}
+        open={!!explainPreview?.open && !explainPreview?.fullscreen}
         title={explainPreview
           ? `${explainPreview.kind === 'final' ? '全片预览' : '样片预览'} · ${truncateText(explainPreview.title, 24)}`
           : '预览'}
@@ -1528,10 +1528,9 @@ const MoocPage: React.FC = () => {
             key="fs"
             icon={<ExpandOutlined />}
             onClick={() => {
-              const el = explainPreviewRef.current;
-              if (!el) return;
-              if (document.fullscreenElement) void document.exitFullscreen();
-              else void el.requestFullscreen?.();
+              if (!explainPreview) return;
+              // Ant Design Modal 使用 transform，浏览器原生 Fullscreen API 会失败，改用页面级遮罩
+              setExplainPreview({ ...explainPreview, fullscreen: true });
             }}
           >
             全屏
@@ -1544,8 +1543,8 @@ const MoocPage: React.FC = () => {
         destroyOnClose
         styles={{ body: { paddingTop: 12 } }}
       >
-        {explainPreview && (
-          <div ref={explainPreviewRef} style={{ background: '#000', borderRadius: 8, overflow: 'hidden' }}>
+        {explainPreview && !explainPreview.fullscreen && (
+          <div style={{ background: '#000', borderRadius: 8, overflow: 'hidden' }}>
             <iframe
               title={explainPreview.kind === 'final' ? 'explain-final' : 'explain-sample'}
               src={explainPreview.kind === 'final'
@@ -1563,6 +1562,58 @@ const MoocPage: React.FC = () => {
           </div>
         )}
       </Modal>
+
+      {explainPreview?.fullscreen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 3000,
+            background: '#000',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '10px 16px',
+            background: 'rgba(0,0,0,0.85)',
+            color: '#fff',
+            gap: 12,
+          }}
+          >
+            <Text style={{ color: '#fff' }} ellipsis>
+              {explainPreview.kind === 'final' ? '全片' : '样片'} · {explainPreview.title}
+            </Text>
+            <Space>
+              <Button
+                size="small"
+                onClick={() => setExplainPreview({ ...explainPreview, fullscreen: false })}
+              >
+                退出全屏
+              </Button>
+              <Button size="small" type="primary" onClick={() => setExplainPreview(null)}>
+                关闭
+              </Button>
+            </Space>
+          </div>
+          <iframe
+            title={explainPreview.kind === 'final' ? 'explain-final-fs' : 'explain-sample-fs'}
+            src={explainPreview.kind === 'final'
+              ? explainApi.finalUrl(explainPreview.id)
+              : explainApi.sampleUrl(explainPreview.id)}
+            style={{
+              flex: 1,
+              width: '100%',
+              border: 'none',
+              background: '#000',
+            }}
+            allow="fullscreen; autoplay"
+          />
+        </div>
+      )}
     </div>
   );
 };
