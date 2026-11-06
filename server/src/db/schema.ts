@@ -172,7 +172,11 @@ export function initDatabase(dbPath?: string): Database.Database {
   const existingConcurrency = db.prepare("SELECT key FROM system_settings WHERE key = ?").get('dubbing_concurrency');
   if (!existingConcurrency) {
     db.prepare("INSERT INTO system_settings (key, value, description, updated_at) VALUES (?, ?, ?, ?)")
-      .run('dubbing_concurrency', '3', '配音并发生成数（同时提交到 Voicebox 的页数）。默认 3，建议 1–3；过高可能占满 GPU 显存。', new Date().toISOString());
+      .run('dubbing_concurrency', '1', '配音并发生成数（同时提交到 Voicebox 的页数）。默认 1，可按机器能力调到最多 6。', new Date().toISOString());
+  } else {
+    db.prepare(
+      `UPDATE system_settings SET description = ? WHERE key = 'dubbing_concurrency'`,
+    ).run('配音并发生成数（同时提交到 Voicebox 的页数）。默认 1，可按机器能力调到最多 6。');
   }
   const existingMaxChunk = db.prepare("SELECT key FROM system_settings WHERE key = ?").get('dubbing_max_chunk_chars');
   if (!existingMaxChunk) {

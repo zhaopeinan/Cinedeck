@@ -23,6 +23,7 @@ import {
   evaluateExplainConcurrency,
   getExplainConcurrencyStatus,
   getExplainMaxConcurrent,
+  noteExplainGenStage,
   noteExplainJobFinished,
 } from './explainConcurrency';
 
@@ -408,6 +409,7 @@ export async function continueExplainAfterStyle(jobId: string) {
     } catch { /* regenerate */ }
     if (!script || !Array.isArray(script.nodes) || script.nodes.length < 2) {
       jobs.updateJob(jobId, { stage: 'scripting', progress: 45, message: '撰写极简分镜…' });
+      const tScript = Date.now();
       const scriptRaw = await llm.chat(
         [
           {
@@ -452,6 +454,7 @@ nodes 4–6 个，总时长约 18–40 秒。`,
           reasoningEffort: genSettingsFor(job.user_id).reasoningEffort,
         },
       );
+      noteExplainGenStage('scripting', Date.now() - tScript);
       script = extractJsonBlock(scriptRaw);
       jobs.updateJob(jobId, { script_json: JSON.stringify(script) });
     }
@@ -463,6 +466,7 @@ nodes 4–6 个，总时长约 18–40 秒。`,
     });
 
     const sampleSubtitles = jobs.getSubtitles(job);
+    const tSample = Date.now();
     let sampleHtml = await generateHtmlAnimation({
       llm,
       llmOpts: llmChatOpts(llm, job.user_id),
@@ -475,6 +479,7 @@ nodes 4–6 个，总时长约 18–40 秒。`,
       durationHint: '约 18–22 秒可循环播放',
       gen: genSettingsFor(job.user_id),
     });
+    noteExplainGenStage('generating_sample', Date.now() - tSample);
     sampleHtml = applySubtitlePreference(sampleHtml, sampleSubtitles);
 
     const workDir = job.work_dir || path.join(path.resolve(process.cwd(), '..', 'data', 'explain-jobs'), job.id);
@@ -642,6 +647,7 @@ export async function continueExplainAfterSampleApprove(jobId: string) {
     });
 
     const finalSubtitles = jobs.getSubtitles(job);
+    const tFinal = Date.now();
     let finalHtml = await generateHtmlAnimation({
       llm,
       llmOpts: llmChatOpts(llm, job.user_id),
@@ -654,6 +660,7 @@ export async function continueExplainAfterSampleApprove(jobId: string) {
       durationHint: '按内容完整展开，通常 40–90 秒，可循环',
       gen: genSettingsFor(job.user_id),
     });
+    noteExplainGenStage('generating_final', Date.now() - tFinal);
     finalHtml = applySubtitlePreference(finalHtml, finalSubtitles);
 
     const workDir = job.work_dir!;

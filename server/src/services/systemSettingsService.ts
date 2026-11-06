@@ -11,7 +11,7 @@ export class SystemSettingsService {
   /** Default values used when a key is missing from the DB. */
   private static DEFAULTS: Record<string, { value: string; description: string }> = {
     dubbing_timeout_seconds: { value: '1000', description: '单页配音生成超时时间（秒），默认 1000 秒。超时后该页标记为失败。' },
-    dubbing_concurrency: { value: '3', description: '配音并发生成数（同时提交到 Voicebox 的页数）。默认 3，建议 1–3；过高可能占满 GPU 显存。' },
+    dubbing_concurrency: { value: '1', description: '配音并发生成数（同时提交到 Voicebox 的页数）。默认 1，可按机器能力调到最多 6。' },
     // Qwen3-TTS 长单次生成约 30s 后会越说越快；Voicebox 按句切分可稳住语速。建议 100–200。
     dubbing_max_chunk_chars: { value: '150', description: '配音文本分块最大字数（传给 Voicebox）。越小语速越稳、耗时略增。建议 100–200；最小 100。' },
   };
@@ -68,10 +68,10 @@ export class SystemSettingsService {
     return this.getNumber('dubbing_timeout_seconds', 1000);
   }
 
-  /** Convenience: get dubbing concurrency (clamped 1–8). */
+  /** Convenience: get dubbing concurrency (clamped 1–6；默认 1). */
   getDubbingConcurrency(): number {
-    const n = this.getNumber('dubbing_concurrency', 3);
-    return Math.max(1, Math.min(8, Math.floor(n)));
+    const n = this.getNumber('dubbing_concurrency', 1);
+    return Math.max(1, Math.min(6, Math.floor(n)));
   }
 
   /** Convenience: max chars per TTS chunk (clamped 100–5000, Voicebox bounds). */
