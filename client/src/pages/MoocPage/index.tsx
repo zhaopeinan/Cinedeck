@@ -9,7 +9,7 @@ import {
   EyeOutlined, PlayCircleOutlined, PlusOutlined,
   ProfileOutlined, ReloadOutlined, RocketOutlined, StopOutlined,
 } from '@ant-design/icons';
-import { explainApi, moocApi, videoApi, voiceboxApi } from '../../api';
+import { explainApi, moocApi, projectApi, videoApi, voiceboxApi } from '../../api';
 import AvatarPipEditor from '../../components/AvatarPipEditor';
 import { ModelSelectField, VoiceSelectField } from '../../components/voicebox';
 import { AvatarRefLibraryPanel, useAvatarRefs } from '../../components/avatar';
@@ -140,6 +140,14 @@ const MoocPage: React.FC = () => {
     title: string;
     kind: 'final' | 'sample';
     fullscreen?: boolean;
+  } | null>(null);
+  const [stageMediaPreview, setStageMediaPreview] = useState<{
+    open: boolean;
+    kind: 'dubbing' | 'avatar';
+    projectId: string;
+    loading?: boolean;
+    pages: Array<{ pageIndex: number; duration?: number | null }>;
+    pageIndex: number;
   } | null>(null);
   const pollRef = useRef<number | null>(null);
   const previewReqRef = useRef(0);
@@ -305,6 +313,58 @@ const MoocPage: React.FC = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [explainPreview?.fullscreen]);
+
+  const openStageMediaPreview = useCallback(async (
+    kind: 'dubbing' | 'avatar',
+    projectId: string,
+  ) => {
+    if (!projectId) {
+      message.warning('项目尚未创建，暂无可预览内容');
+      return;
+    }
+    setStageMediaPreview({
+      open: true,
+      kind,
+      projectId,
+      loading: true,
+      pages: [],
+      pageIndex: 1,
+    });
+    try {
+      const res = await projectApi.getSlides(projectId);
+      const slides = res.data.data || [];
+      const pages = slides
+        .filter((s: any) => {
+          if (kind === 'dubbing') {
+            return (s.dubbingStatus || s.dubbing_status) === 'generated'
+              && !!(s.dubbingAudioPath || s.dubbing_audio_path);
+          }
+          return (s.avatarStatus || s.avatar_status) === 'generated'
+            && !!(s.avatarVideoPath || s.avatar_video_path);
+        })
+        .map((s: any) => ({
+          pageIndex: Number(s.pageIndex ?? s.page_index),
+          duration: s.dubbingDuration ?? s.dubbing_duration ?? null,
+        }))
+        .filter((p: any) => Number.isFinite(p.pageIndex) && p.pageIndex > 0);
+      if (!pages.length) {
+        message.info(kind === 'dubbing' ? '还没有可预览的配音' : '还没有可预览的数字人视频');
+        setStageMediaPreview(null);
+        return;
+      }
+      setStageMediaPreview({
+        open: true,
+        kind,
+        projectId,
+        loading: false,
+        pages,
+        pageIndex: pages[0].pageIndex,
+      });
+    } catch (e: any) {
+      message.error(e.response?.data?.error?.message || '加载预览失败');
+      setStageMediaPreview(null);
+    }
+  }, []);
 
   const [retryingExplainId, setRetryingExplainId] = useState<string | null>(null);
 
@@ -1354,14 +1414,34 @@ const MoocPage: React.FC = () => {
                     s.durationLabel || null,
                     s.summary || null,
                   ].filter(Boolean);
+                  const canPreviewDubbing = s.id === 'dubbing'
+                    && (s.status === 'done' || s.status === 'running')
+                    && !!detailJob.projectId;
+                  const canPreviewAvatar = s.id === 'avatar'
+                    && (s.status === 'done' || s.status === 'running')
+                    && !!detailJob.projectId;
                   return {
                     title: s.label,
                     status: statusMap[s.status] || 'wait',
-                    description: bits.length ? (
-                      <span style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>
-                        {bits.join(' · ')}
-                      </span>
-                    ) : undefined,
+                    description: (
+                      <div style={{ fontSize: 12, color: 'rgba(0,0,0,0.45)' }}>
+                        {bits.length ? <div>{bits.join(' · ')}</div> : null}
+                        {(canPreviewDubbing || canPreviewAvatar) && (
+                          <Button
+                            type="link"
+                            size="small"
+                            icon={<EyeOutlined />}
+                            style={{ padding: 0, height: 'auto', marginTop: bits.length ? 2 : 0 }}
+                            onClick={() => void openStageMediaPreview(
+                              canPreviewDubbing ? 'dubbing' : 'avatar',
+                              detailJob.projectId,
+                            )}
+                          >
+                            {canPreviewDubbing ? '预览配音' : '预览数字人'}
+                          </Button>
+                        )}
+                      </div>
+                    ),
                   };
                 })}
               />
@@ -1625,6 +1705,111 @@ const MoocPage: React.FC = () => {
           />
         </div>
       )}
+
+      <Modal
+        open={!!stageMediaPreview?.open}
+        title={stageMediaPreview
+          ? `${stageMediaPreview.kind === 'dubbing' ? '配音预览' : '数字人预览'} · 第 ${stageMediaPreview.pageIndex} 页`
+          : '预览'}
+        onCancel={() => setStageMediaPreview(null)}
+        footer={stageMediaPreview ? [
+          <Button
+            key="prev"
+            disabled={stageMediaPreview.pages.findIndex((p) => p.pageIndex === stageMediaPreview.pageIndex) <= 0}
+            onClick={() => {
+              const idx = stageMediaPreview.pages.findIndex((p) => p.pageIndex === stageMediaPreview.pageIndex);
+              if (idx > 0) {
+                setStageMediaPreview({
+                  ...stageMediaPreview,
+                  pageIndex: stageMediaPreview.pages[idx - 1].pageIndex,
+                });
+              }
+            }}
+          >
+            上一页
+          </Button>,
+          <Button
+            key="next"
+            disabled={
+              stageMediaPreview.pages.findIndex((p) => p.pageIndex === stageMediaPreview.pageIndex)
+              >= stageMediaPreview.pages.length - 1
+            }
+            onClick={() => {
+              const idx = stageMediaPreview.pages.findIndex((p) => p.pageIndex === stageMediaPreview.pageIndex);
+              if (idx >= 0 && idx < stageMediaPreview.pages.length - 1) {
+                setStageMediaPreview({
+                  ...stageMediaPreview,
+                  pageIndex: stageMediaPreview.pages[idx + 1].pageIndex,
+                });
+              }
+            }}
+          >
+            下一页
+          </Button>,
+          <Button key="close" type="primary" onClick={() => setStageMediaPreview(null)}>
+            关闭
+          </Button>,
+        ] : null}
+        width={720}
+        destroyOnClose
+      >
+        {stageMediaPreview?.loading ? (
+          <div style={{ textAlign: 'center', padding: 48 }}><Spin /></div>
+        ) : stageMediaPreview ? (
+          <div>
+            <div style={{ marginBottom: 12 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                共 {stageMediaPreview.pages.length} 页可预览
+                {stageMediaPreview.kind === 'dubbing' ? '（配音）' : '（数字人）'}
+              </Text>
+              <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {stageMediaPreview.pages.map((p) => (
+                  <Button
+                    key={p.pageIndex}
+                    size="small"
+                    type={p.pageIndex === stageMediaPreview.pageIndex ? 'primary' : 'default'}
+                    onClick={() => setStageMediaPreview({ ...stageMediaPreview, pageIndex: p.pageIndex })}
+                  >
+                    {p.pageIndex}
+                  </Button>
+                ))}
+              </div>
+            </div>
+            <div style={{
+              background: '#111',
+              borderRadius: 8,
+              overflow: 'hidden',
+              marginBottom: 12,
+              textAlign: 'center',
+            }}
+            >
+              <img
+                key={`img-${stageMediaPreview.projectId}-${stageMediaPreview.pageIndex}`}
+                src={projectApi.getSlideImageUrl(stageMediaPreview.projectId, stageMediaPreview.pageIndex)}
+                alt={`第 ${stageMediaPreview.pageIndex} 页`}
+                style={{ maxWidth: '100%', maxHeight: 360, objectFit: 'contain', display: 'block', margin: '0 auto' }}
+              />
+            </div>
+            {stageMediaPreview.kind === 'dubbing' ? (
+              <audio
+                key={`audio-${stageMediaPreview.projectId}-${stageMediaPreview.pageIndex}`}
+                controls
+                autoPlay
+                src={projectApi.getSlideAudioUrl(stageMediaPreview.projectId, stageMediaPreview.pageIndex)}
+                style={{ width: '100%' }}
+              />
+            ) : (
+              <video
+                key={`video-${stageMediaPreview.projectId}-${stageMediaPreview.pageIndex}`}
+                controls
+                autoPlay
+                src={projectApi.getAvatarPageVideoUrl(stageMediaPreview.projectId, stageMediaPreview.pageIndex)}
+                style={{ width: '100%', maxHeight: 360, background: '#000', borderRadius: 8 }}
+              />
+            )}
+          </div>
+        ) : null}
+      </Modal>
     </div>
   );
 };
