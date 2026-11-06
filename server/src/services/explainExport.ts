@@ -160,7 +160,8 @@ export function prepareExplainHtmlForRecording(html: string): string {
   // Preview iframe keeps the original HTML; only the recording copy gets this CSS.
   const hidePlayerCss = `
 <style id="explain-hide-player-chrome">
-#player, #playBtn, #playIcon, #track, #fill, #knob, #chapter, #time,
+#player, #player *, #playBtn, #playIcon, #track, #fill, #knob, #chapter, #time,
+#chapterLabel, #timeLabel, #progressTrack, #progressFill,
 #controls, #controlBar, #control-bar, #scrubber, #progress,
 .player-bar, .playback-bar, .play-bar, .controls-bar,
 [data-explain-player], [aria-label="播放/暂停"], [aria-label="播放"], [aria-label="暂停"] {
@@ -170,6 +171,7 @@ export function prepareExplainHtmlForRecording(html: string): string {
   pointer-events: none !important;
   width: 0 !important;
   height: 0 !important;
+  max-height: 0 !important;
   overflow: hidden !important;
 }
 </style>`;
@@ -185,10 +187,16 @@ export function prepareExplainHtmlForRecording(html: string): string {
 window.__explainRec = {
   seek: function(sec){
     try {
-      if (typeof t === 'number') t = Math.max(0, sec);
       if (typeof playing !== 'undefined') playing = false;
       if (typeof lastTs !== 'undefined') lastTs = 0;
+      // Some decks use seconds in t; others use milliseconds in elapsed (TOTAL>1000).
+      if (typeof t === 'number') t = Math.max(0, sec);
+      if (typeof elapsed === 'number') {
+        var scale = (typeof TOTAL === 'number' && TOTAL > 1000) ? 1000 : 1;
+        elapsed = Math.max(0, sec * scale);
+      }
       if (typeof updateUI === 'function') updateUI();
+      if (typeof applyTimeline === 'function' && typeof elapsed === 'number') applyTimeline(elapsed, true);
       if (typeof render === 'function' && typeof t === 'number') render(t);
     } catch (e) {}
   },
@@ -197,19 +205,27 @@ window.__explainRec = {
   },
   total: function(){
     try {
-      if (typeof TOTAL === 'number' && TOTAL > 0) return TOTAL;
+      if (typeof TOTAL === 'number' && TOTAL > 0) {
+        return TOTAL > 1000 ? TOTAL / 1000 : TOTAL;
+      }
     } catch (e) {}
     return 0;
   }
 };
 `;
-  // Prefer inject inside the main IIFE after timeline vars so it closes over t/playing.
-  if (/\bvar\s+t\s*=\s*0\s*;/.test(out) && !out.includes('window.__explainRec')) {
-    out = out.replace(/\bvar\s+t\s*=\s*0\s*;/, (m) => `${m}\n${bridge}`);
-  } else if (!out.includes('window.__explainRec')) {
-    const snip = `<script>${bridge}</script>`;
-    if (/<\/body>/i.test(out)) out = out.replace(/<\/body>/i, `${snip}</body>`);
-    else out = `${out}\n${snip}`;
+  // Prefer inject inside the main IIFE after timeline vars so it closes over t/elapsed/playing.
+  if (!out.includes('window.__explainRec')) {
+    if (/\bvar\s+t\s*=\s*0\s*;/.test(out)) {
+      out = out.replace(/\bvar\s+t\s*=\s*0\s*;/, (m) => `${m}\n${bridge}`);
+    } else if (/\bvar\s+elapsed\s*=\s*0\s*;/.test(out)) {
+      out = out.replace(/\bvar\s+elapsed\s*=\s*0\s*;/, (m) => `${m}\n${bridge}`);
+    } else if (/\bvar\s+playing\s*=\s*(true|false)\s*;/.test(out)) {
+      out = out.replace(/\bvar\s+playing\s*=\s*(true|false)\s*;/, (m) => `${m}\n${bridge}`);
+    } else {
+      const snip = `<script>${bridge}</script>`;
+      if (/<\/body>/i.test(out)) out = out.replace(/<\/body>/i, `${snip}</body>`);
+      else out = `${out}\n${snip}`;
+    }
   }
   return out;
 }

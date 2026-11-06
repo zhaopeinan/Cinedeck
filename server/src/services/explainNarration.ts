@@ -87,6 +87,7 @@ export function applySubtitlePreference(html: string, enabled: boolean): string 
 /** Sync script for injected <audio id="explain-narration"> with page play/pause UI. */
 export function buildNarrationSyncScript(): string {
   // Handles LLM players that use a single #playBtn toggle (not separate .play/.pause).
+  // Icon path formats vary a lot across generated HTML — prefer toggle + broad heuristics.
   return `<script id="explain-narration-sync">
 (function(){
   var a=document.getElementById('explain-narration');
@@ -105,10 +106,10 @@ export function buildNarrationSyncScript(): string {
     var icon = document.getElementById('playIcon');
     if(!icon) return null;
     var h = String(icon.innerHTML || '');
-    // triangle play icon => animation paused
-    if (/M8\\s+5v14l11/i.test(h)) return false;
+    // triangle / play chevron => animation paused
+    if (/L19\\s+12\\s+L8|M8\\s+5v14l11|M8\\s+5\\s+L19|polygon|play/i.test(h) && !/H10|H17|M6\\s+5|M7\\s+5|M14\\s+5/i.test(h)) return false;
     // two-bar pause icon => animation playing
-    if (/M6\\s+5h4v14|M14\\s+5h4v14/i.test(h)) return true;
+    if (/M6\\s+5h4v14|M14\\s+5h4v14|M7\\s+5\\s*H10|M14\\s+5\\s*H17|H10\\s*V19|H17\\s*V19/i.test(h)) return true;
     return null;
   }
 
@@ -127,7 +128,7 @@ export function buildNarrationSyncScript(): string {
   }
 
   function seekAudioFromTimeLabel(){
-    var el = document.getElementById('time');
+    var el = document.getElementById('time') || document.getElementById('timeLabel');
     if (!el || !isFinite(a.duration) || a.duration <= 0) return;
     var m = String(el.textContent || '').match(/(\\d+):(\\d+)/);
     if (!m) return;
@@ -141,9 +142,17 @@ export function buildNarrationSyncScript(): string {
   document.addEventListener('click', function(ev){
     var t = ev.target;
     if (!t || !t.closest) return;
-    // Single toggle used by讲解动画 HTML（#playBtn）
+    // Single toggle (#playBtn may be div/button). Keep audio in lockstep with page toggle.
     if (t.closest('#playBtn,[data-play-toggle],.play-toggle,button[aria-label*=\"播放\"],button[aria-label*=\"Play\"],button[aria-label*=\"暂停\"],button[aria-label*=\"Pause\"]')) {
-      setTimeout(syncFromUi, 0);
+      setTimeout(function(){
+        var playing = iconLooksPlaying();
+        if (playing == null) {
+          // Page toggled playing; mirror by inverting current audio state
+          syncPlay(!!a.paused);
+        } else {
+          syncPlay(playing);
+        }
+      }, 0);
       return;
     }
     if (t.closest('[data-play],.play,button.play,#btn-play')) syncPlay(true);
@@ -154,11 +163,10 @@ export function buildNarrationSyncScript(): string {
     document.addEventListener(evt, function(ev){
       var t = ev.target;
       if (!t || !t.closest) return;
-      if (t.closest('#track,#knob,#fill')) setTimeout(seekAudioFromTimeLabel, 0);
+      if (t.closest('#track,#knob,#fill,#progressTrack,#progressFill')) setTimeout(seekAudioFromTimeLabel, 0);
     }, true);
   });
 
-  // Catch icon updates / loop resets while playing
   var icon = document.getElementById('playIcon');
   if (icon && typeof MutationObserver !== 'undefined') {
     try {
@@ -171,9 +179,9 @@ export function buildNarrationSyncScript(): string {
 
   function boot(){
     setTimeout(function(){
-      syncFromUi();
-      // If UI already playing (common) but icon heuristic failed, still try autoplay
-      if (iconLooksPlaying() !== false && a.paused) a.play().catch(function(){});
+      var playing = iconLooksPlaying();
+      if (playing === false) syncPlay(false);
+      else a.play().catch(function(){});
     }, 350);
   }
   if (document.readyState === 'complete') boot();

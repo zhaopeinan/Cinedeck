@@ -74,6 +74,7 @@ const ExplainAnimationPage: React.FC = () => {
   const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
   const [exportQuality, setExportQuality] = useState<'720p' | '1080p' | '1440p'>('1080p');
   const [exporting, setExporting] = useState(false);
+  const [exportingChildId, setExportingChildId] = useState<string | null>(null);
   const sampleAudioRef = useRef<HTMLAudioElement | null>(null);
   const finalPreviewRef = useRef<HTMLDivElement | null>(null);
   const samplePreviewRef = useRef<HTMLDivElement | null>(null);
@@ -1097,14 +1098,19 @@ const ExplainAnimationPage: React.FC = () => {
                                             </Tag>
                                           )}
                                           {p.hasFinal && p.jobId && (
-                                            <Button
-                                              type="link"
-                                              size="small"
-                                              href={explainApi.finalUrl(p.jobId)}
-                                              target="_blank"
-                                            >
-                                              打开全片
-                                            </Button>
+                                            <Space size={4} wrap>
+                                              <Button
+                                                type="link"
+                                                size="small"
+                                                href={explainApi.finalUrl(p.jobId)}
+                                                target="_blank"
+                                              >
+                                                打开全片
+                                              </Button>
+                                              <Text type="secondary" style={{ fontSize: 12 }}>
+                                                导出请在下方「子任务进度」中选择清晰度
+                                              </Text>
+                                            </Space>
                                           )}
                                         </div>
                                       </div>
@@ -1132,16 +1138,10 @@ const ExplainAnimationPage: React.FC = () => {
                             <List
                               dataSource={batchDetail.children}
                               renderItem={(c: any) => (
-                                <List.Item
-                                  actions={c.hasFinal ? [
-                                    <Button key="open" type="link" href={explainApi.finalUrl(c.id)} target="_blank">
-                                      全片
-                                    </Button>,
-                                  ] : undefined}
-                                >
+                                <List.Item>
                                   <List.Item.Meta
                                     title={
-                                      <Space>
+                                      <Space wrap>
                                         <Text>{c.name}</Text>
                                         <Tag color={(STATUS_TAG[c.status] || {}).color}>
                                           {(STATUS_TAG[c.status] || {}).text || c.status}
@@ -1149,9 +1149,79 @@ const ExplainAnimationPage: React.FC = () => {
                                       </Space>
                                     }
                                     description={
-                                      <Space direction="vertical" size={0} style={{ width: '100%' }}>
+                                      <Space direction="vertical" size={4} style={{ width: '100%' }}>
                                         <Text type="secondary" style={{ fontSize: 12 }}>{c.message}</Text>
                                         <Progress percent={c.progress || 0} size="small" />
+                                        {c.hasFinal && (
+                                          <Space wrap>
+                                            <Button
+                                              size="small"
+                                              href={explainApi.finalUrl(c.id)}
+                                              target="_blank"
+                                            >
+                                              打开全片
+                                            </Button>
+                                            <Select
+                                              size="small"
+                                              value={exportQuality}
+                                              style={{ width: 150 }}
+                                              onChange={(v) => setExportQuality(v)}
+                                              options={[
+                                                { value: '720p', label: '720p' },
+                                                { value: '1080p', label: '1080p' },
+                                                { value: '1440p', label: '1440p' },
+                                              ]}
+                                            />
+                                            <Button
+                                              size="small"
+                                              type="primary"
+                                              icon={<DownloadOutlined />}
+                                              loading={
+                                                exportingChildId === c.id
+                                                || ['queued', 'running'].includes(String(c.exportInfo?.status || ''))
+                                              }
+                                              onClick={async () => {
+                                                setExportingChildId(c.id);
+                                                try {
+                                                  const res = await explainApi.exportVideo(c.id, exportQuality);
+                                                  if (!res.data?.success) {
+                                                    throw new Error(res.data?.error?.message || '导出失败');
+                                                  }
+                                                  message.success('已加入导出队列（成片不含进度条）');
+                                                  if (activeBatchId) await loadBatchDetail(activeBatchId);
+                                                } catch (e: any) {
+                                                  message.error(e?.response?.data?.error?.message || e?.message || '导出失败');
+                                                } finally {
+                                                  setExportingChildId(null);
+                                                }
+                                              }}
+                                            >
+                                              {c.exportInfo?.status === 'queued'
+                                                ? '排队中…'
+                                                : c.exportInfo?.status === 'running'
+                                                  ? (c.exportInfo?.progress != null
+                                                    ? `导出中 ${c.exportInfo.progress}%`
+                                                    : '导出中…')
+                                                  : '导出 MP4'}
+                                            </Button>
+                                            {c.hasVideo && (
+                                              <Button
+                                                size="small"
+                                                href={explainApi.videoUrl(c.id)}
+                                                target="_blank"
+                                                icon={<DownloadOutlined />}
+                                              >
+                                                下载 MP4
+                                              </Button>
+                                            )}
+                                          </Space>
+                                        )}
+                                        {c.exportInfo?.status === 'failed' && c.exportInfo?.error && (
+                                          <Alert type="error" showIcon message={c.exportInfo.error} />
+                                        )}
+                                        {c.exportInfo?.status === 'done' && c.hasVideo && (
+                                          <Alert type="success" showIcon message="MP4 已就绪" />
+                                        )}
                                       </Space>
                                     }
                                   />
