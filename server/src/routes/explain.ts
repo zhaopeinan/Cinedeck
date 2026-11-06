@@ -344,11 +344,17 @@ export function createExplainRouter(
     // Clear corrupted binary topic so worker re-extracts from source file
     const topic = String(job.topic_text || '');
     const badTopic = topic.includes('[Content_Types].xml') || /^PK[\x03\x04]/.test(topic);
+    // Manual retry resets auto-retry budget so another failure can still auto-retry
+    jobs.mergeConfig(job.id, {
+      retryCount: 0,
+      resumeFrom: 'start',
+      lastError: null,
+    });
     jobs.updateJob(job.id, {
       status: 'queued',
       stage: 'queued',
       progress: 0,
-      message: '已重新排队',
+      message: '已手动重新排队',
       error: null,
       cancel_requested: 0,
       finished_at: null,
