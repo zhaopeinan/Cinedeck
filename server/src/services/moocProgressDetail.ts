@@ -73,6 +73,8 @@ function shortTitle(name: string): string {
 
 function childPublic(c: ExplainJobRow, extras?: {
   insertedIds?: Set<string>;
+  /** Parent MOOC still generating HTML — missing inserts is normal, not a QC fail. */
+  explainStillGenerating?: boolean;
 }) {
   const cfg = (() => {
     try { return JSON.parse(c.config_json || '{}'); } catch { return {}; }
@@ -89,6 +91,7 @@ function childPublic(c: ExplainJobRow, extras?: {
   const mediaQc = cfg.mediaQc && typeof cfg.mediaQc === 'object' ? cfg.mediaQc : null;
   const repair = cfg.repair && typeof cfg.repair === 'object' ? cfg.repair : null;
   const inInserts = !!(extras?.insertedIds && extras.insertedIds.has(c.id));
+  const explainStillGenerating = !!extras?.explainStillGenerating;
 
   let qcStatus: 'ok' | 'failed' | 'pending' | 'repairing' | null = null;
   let qcReason: string | null = null;
@@ -100,19 +103,24 @@ function childPublic(c: ExplainJobRow, extras?: {
     qcReason = String(mediaQc.reason || '质检未通过');
   } else if (mediaQc && mediaQc.ok === true) {
     qcStatus = 'ok';
-  } else if (c.status === 'completed' && hasFinal && !inInserts) {
-    // Completed HTML but not in final inserts — likely export/QC soft-skip
-    qcStatus = 'failed';
-    qcReason = '未进入成片（导出失败或质检未通过）';
   } else if (c.status === 'completed' && inInserts) {
     qcStatus = 'ok';
+  } else if (c.status === 'completed' && hasFinal && !inInserts) {
+    if (explainStillGenerating) {
+      // HTML finished early while siblings still run; export/insert happens after the batch.
+      qcStatus = 'pending';
+      qcReason = 'HTML 已完成，等待整批导出插片';
+    } else {
+      qcStatus = 'failed';
+      qcReason = '未进入成片（导出失败或质检未通过）';
+    }
   } else if (c.status === 'completed') {
     qcStatus = 'pending';
   }
 
   const canRepair = c.status === 'failed' || c.status === 'cancelled'
     || qcStatus === 'failed'
-    || (c.status === 'completed' && hasFinal && !inInserts);
+    || (c.status === 'completed' && hasFinal && !inInserts && !explainStillGenerating);
 
   return {
     id: c.id,
@@ -221,7 +229,9 @@ export function buildMoocProgressDetail(opts: {
       }
     } catch { /* ignore */ }
 
-    const childRows = children.map((c) => childPublic(c, { insertedIds }));
+    const explainStillGenerating = job.status === 'running'
+      && (job.stage === 'explain_gen' || job.stage === 'explain_points' || job.stage === 'explain');
+    const childRows = children.map((c) => childPublic(c, { insertedIds, explainStillGenerating }));
     const stats = {
       total: children.length,
       completed: children.filter((c) => c.status === 'completed').length,
