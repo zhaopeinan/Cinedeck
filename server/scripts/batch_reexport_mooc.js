@@ -88,9 +88,14 @@ async function waitUntil(pred, timeoutMs, intervalMs=2500){
     console.log(`\n==== [${i+1}/${targets.length}] ${child.name} ====`);
     if (!child.final_path || !fs.existsSync(child.final_path)) { console.log('skip no final'); continue; }
     const finalDir = path.dirname(child.final_path);
+    // Keep previous export until the new one succeeds (avoid leaving inserts broken).
+    const prevExports = {};
     for (const q of ['720p','1080p','1440p']) {
       const f = path.join(finalDir, `export_${q}.mp4`);
-      try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {}
+      if (fs.existsSync(f)) {
+        const bak = f + '.bak';
+        try { fs.renameSync(f, bak); prevExports[q] = bak; } catch {}
+      }
     }
     // wipe stale avatar cache for this child so force rebuild
     const avDir = path.join(projectDir, 'explain_avatars');
@@ -118,6 +123,9 @@ async function waitUntil(pred, timeoutMs, intervalMs=2500){
       : (explainJobs.getJob(child.id)?.video_path || null);
     if (!videoPath || !fs.existsSync(videoPath)) {
       console.log('EXPORT FAIL', ej?.status, ej?.error || ej?.message);
+      for (const [q, bak] of Object.entries(prevExports)) {
+        try { if (fs.existsSync(bak)) fs.renameSync(bak, path.join(finalDir, `export_${q}.mp4`)); } catch {}
+      }
       markExplainMediaQc(explainJobs, child.id, { ok:false, reason: String(ej?.error || '导出失败').slice(0,300) });
       continue;
     }
@@ -132,6 +140,9 @@ async function waitUntil(pred, timeoutMs, intervalMs=2500){
     }
     markExplainMediaQc(explainJobs, child.id, { ok:true, reason:'ok', path: videoPath });
     explainJobs.updateJob(child.id, { video_path: videoPath, message: '批量重导质检通过' });
+    for (const bak of Object.values(prevExports)) {
+      try { if (fs.existsSync(bak)) fs.unlinkSync(bak); } catch {}
+    }
     console.log('export ok size', fs.statSync(videoPath).size);
 
     const prev = byId.get(child.id) || {};

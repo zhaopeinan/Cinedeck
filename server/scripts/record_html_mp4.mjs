@@ -191,42 +191,58 @@ async function main() {
       await seekTo(page, animTotal * 0.45, animTotal);
       const midProbe = await page.evaluate(() => {
         const skip = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'HEAD', 'HTML', 'BR']);
+        const effectiveOpacity = (el) => {
+          let o = 1;
+          let cur = el;
+          while (cur && cur !== document.documentElement) {
+            const st = window.getComputedStyle(cur);
+            if (st.display === 'none' || st.visibility === 'hidden') return 0;
+            const op = parseFloat(st.opacity || '1');
+            if (Number.isFinite(op)) o *= op;
+            if (o <= 0.18) return o;
+            cur = cur.parentElement;
+          }
+          return o;
+        };
         let n = 0;
         let centerTextBlocks = 0;
         const titleHits = [];
         for (const el of document.body.querySelectorAll('*')) {
           if (skip.has(el.tagName)) continue;
           if (el.id === 'player' || el.closest?.('#player')) continue;
-          const st = window.getComputedStyle(el);
-          if (st.display === 'none' || st.visibility === 'hidden') continue;
-          const op = parseFloat(st.opacity || '0');
+          const op = effectiveOpacity(el);
           if (!(op > 0.18)) continue;
           const r = el.getBoundingClientRect();
           if (r.width < 36 || r.height < 18) continue;
           // Prefer mid-canvas content; ignore tiny corner chrome
           if (r.top < 8 && r.left < 8 && r.width < 420 && r.height < 120) continue;
           n += 1;
-          const text = String(el.textContent || '').replace(/\s+/g, '');
-          if ([...text].length >= 4
+          // Only leaf-ish text nodes: avoid counting parent wrappers that include child text.
+          const ownText = String(el.childNodes && [...el.childNodes]
+            .filter((c) => c.nodeType === 3)
+            .map((c) => c.textContent || '')
+            .join('') || '').replace(/\s+/g, '');
+          if ([...ownText].length >= 2
             && r.top > window.innerHeight * 0.12
             && r.bottom < window.innerHeight * 0.72
-            && r.width >= 100) {
+            && r.width >= 60) {
             centerTextBlocks += 1;
-            if (op > 0.45 && r.height >= 36) {
+            const fs = parseFloat(getComputedStyle(el).fontSize || '0') || 0;
+            if (op > 0.45 && fs >= 28 && r.height >= 30) {
               titleHits.push({
                 id: el.id || el.className || el.tagName,
                 op: Math.round(op * 100) / 100,
                 y: Math.round(r.top),
                 h: Math.round(r.height),
-                text: text.slice(0, 16),
+                text: ownText.slice(0, 16),
               });
             }
           }
         }
         // Intro title that should have faded by mid — stuck exports keep it fully visible.
         const big = document.getElementById('bigTitle');
-        const bigOp = big ? parseFloat(getComputedStyle(big).opacity || '0') : 0;
-        // Overlapping title-sized blocks in the same vertical band ⇒ stacked text.
+        const bigOp = big ? effectiveOpacity(big) : 0;
+        // Overlapping large-font title leaves in the same vertical band ⇒ stacked text.
         let stackedPairs = 0;
         for (let i = 0; i < titleHits.length; i++) {
           for (let j = i + 1; j < titleHits.length; j++) {
