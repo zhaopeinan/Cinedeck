@@ -184,49 +184,64 @@ export function prepareExplainHtmlForRecording(html: string): string {
 
   // Expose timeline controls for headless capture. Screenshotting is slower than
   // realtime, so rAF-driven clocks freeze; the recorder seeks each frame instead.
-  // Decks vary: some drive `t`/`elapsed`, others use `currentTime` + updateElements().
+  // Decks vary: t / elapsed / currentTime / curTime (+ DUR|DURATION|TOTAL).
   const bridge = `
 window.__explainRec = {
   seek: function(sec){
     try {
-      if (typeof playing !== 'undefined') playing = false;
+      if (typeof setPlaying === 'function') setPlaying(false);
+      else if (typeof playing !== 'undefined') playing = false;
       if (typeof lastTs !== 'undefined') lastTs = 0;
       var s = Math.max(0, Number(sec) || 0);
-      // Some decks use seconds in t; others use milliseconds in elapsed (TOTAL>1000).
+      // Common playhead names across explain HTML templates.
       if (typeof t === 'number') t = s;
+      if (typeof curTime === 'number') curTime = s;
       if (typeof currentTime === 'number') currentTime = s;
+      if (typeof playhead === 'number') playhead = s;
       if (typeof elapsed === 'number') {
-        var scale = (typeof TOTAL === 'number' && TOTAL > 1000) ? 1000 : 1;
+        var scale = (typeof TOTAL === 'number' && TOTAL > 1000) ? 1000
+          : (typeof DURATION === 'number' && DURATION > 1000) ? 1000
+          : (typeof DUR === 'number' && DUR > 1000) ? 1000
+          : 1;
         elapsed = s * scale;
       }
       var wall = (typeof performance !== 'undefined' ? performance.now() : Date.now()) / 1000;
-      var timeline = (typeof currentTime === 'number') ? currentTime
-        : (typeof t === 'number') ? t
-        : s;
       if (typeof updateUI === 'function') updateUI();
       if (typeof updatePlayerUI === 'function') updatePlayerUI();
       if (typeof applyTimeline === 'function') {
         if (typeof elapsed === 'number') applyTimeline(elapsed, true);
-        else applyTimeline(timeline, true);
+        else applyTimeline(s, true);
       }
-      if (typeof drawBackground === 'function') drawBackground(wall);
-      if (typeof drawLinks === 'function') drawLinks(wall, timeline);
-      if (typeof updateElements === 'function') updateElements(timeline, wall);
-      if (typeof updateCamera === 'function') updateCamera(timeline);
-      if (typeof render === 'function') render(timeline);
+      // Drive content with explicit seek seconds (do not rely on closed-over playhead alone).
+      if (typeof drawLinks === 'function') drawLinks(wall, s);
+      if (typeof updateElements === 'function') updateElements(s, wall);
+      if (typeof updateCamera === 'function') updateCamera(s);
+      if (typeof renderTitle === 'function') renderTitle(s);
+      if (typeof renderScene1 === 'function') renderScene1(s);
+      if (typeof renderScene2 === 'function') renderScene2(s);
+      if (typeof renderScene3 === 'function') renderScene3(s);
+      if (typeof renderScene4 === 'function') renderScene4(s);
+      if (typeof renderScene5 === 'function') renderScene5(s);
+      if (typeof renderCamera === 'function') renderCamera(s);
+      if (typeof render === 'function') render(s);
+      // drawBackground signatures differ (wall-clock sec vs rAF dt-ms); use a small dt.
+      if (typeof drawBackground === 'function') {
+        try { drawBackground(16); } catch (e1) { try { drawBackground(wall); } catch (e2) {} }
+      }
     } catch (e) {}
   },
   pause: function(){
-    try { if (typeof playing !== 'undefined') playing = false; } catch (e) {}
+    try {
+      if (typeof setPlaying === 'function') setPlaying(false);
+      else if (typeof playing !== 'undefined') playing = false;
+    } catch (e) {}
   },
   total: function(){
     try {
-      if (typeof DURATION === 'number' && DURATION > 0) {
-        return DURATION > 1000 ? DURATION / 1000 : DURATION;
-      }
-      if (typeof TOTAL === 'number' && TOTAL > 0) {
-        return TOTAL > 1000 ? TOTAL / 1000 : TOTAL;
-      }
+      if (typeof DUR === 'number' && DUR > 0) return DUR > 1000 ? DUR / 1000 : DUR;
+      if (typeof DURATION === 'number' && DURATION > 0) return DURATION > 1000 ? DURATION / 1000 : DURATION;
+      if (typeof TOTAL === 'number' && TOTAL > 0) return TOTAL > 1000 ? TOTAL / 1000 : TOTAL;
+      if (typeof duration === 'number' && duration > 0) return duration > 1000 ? duration / 1000 : duration;
     } catch (e) {}
     return 0;
   }
@@ -234,7 +249,9 @@ window.__explainRec = {
 `;
   // Prefer inject inside the main IIFE after timeline vars so it closes over them.
   if (!out.includes('window.__explainRec')) {
-    if (/\bvar\s+currentTime\s*=\s*0\s*;/.test(out)) {
+    if (/\bvar\s+curTime\s*=\s*0\s*;/.test(out)) {
+      out = out.replace(/\bvar\s+curTime\s*=\s*0\s*;/, (m) => `${m}\n${bridge}`);
+    } else if (/\bvar\s+currentTime\s*=\s*0\s*;/.test(out)) {
       out = out.replace(/\bvar\s+currentTime\s*=\s*0\s*;/, (m) => `${m}\n${bridge}`);
     } else if (/\bvar\s+t\s*=\s*0\s*;/.test(out)) {
       out = out.replace(/\bvar\s+t\s*=\s*0\s*;/, (m) => `${m}\n${bridge}`);

@@ -189,7 +189,7 @@ async function main() {
       // DOM occupancy: starfield/background can change enough to pass PSNR while
       // content nodes stay opacity=0 because seek missed currentTime/updateElements.
       await seekTo(page, animTotal * 0.45, animTotal);
-      const visible = await page.evaluate(() => {
+      const midProbe = await page.evaluate(() => {
         const skip = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'HEAD', 'HTML', 'BR']);
         let n = 0;
         for (const el of document.body.querySelectorAll('*')) {
@@ -205,9 +205,14 @@ async function main() {
           if (r.top < 8 && r.left < 8 && r.width < 420 && r.height < 120) continue;
           n += 1;
         }
-        return n;
+        // Intro title that should have faded by mid — stuck exports keep it fully visible.
+        const big = document.getElementById('bigTitle');
+        const bigOp = big ? parseFloat(getComputedStyle(big).opacity || '0') : 0;
+        return { visible: n, bigTitleOp: bigOp };
       });
-      process.stdout.write(`motion preflight visibleNodes@mid=${visible}\n`);
+      process.stdout.write(
+        `motion preflight visibleNodes@mid=${midProbe.visible} bigTitleOp=${midProbe.bigTitleOp.toFixed(2)}\n`,
+      );
 
       for (const f of [p0, pMid, pEnd]) {
         try { fs.unlinkSync(f); } catch { /* ignore */ }
@@ -217,9 +222,14 @@ async function main() {
           `讲解动画画面几乎无变化（PSNR mid=${mid.toFixed(1)}dB, end=${end.toFixed(1)}dB）：疑似 seek 失效或卡在初始叠字帧`,
         );
       }
-      if (visible < 3) {
+      if (midProbe.visible < 3) {
         throw new Error(
-          `讲解动画中段可见内容过少（visibleNodes=${visible}）：疑似 seek 未驱动 currentTime/updateElements，导出将是空白片`,
+          `讲解动画中段可见内容过少（visibleNodes=${midProbe.visible}）：疑似 seek 未驱动 currentTime/updateElements，导出将是空白片`,
+        );
+      }
+      if (midProbe.bigTitleOp > 0.35) {
+        throw new Error(
+          `讲解动画中段仍停在片头大标题（bigTitleOp=${midProbe.bigTitleOp.toFixed(2)}）：疑似 seek 未调用 render，导出将叠字`,
         );
       }
     }
