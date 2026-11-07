@@ -192,6 +192,8 @@ async function main() {
       const midProbe = await page.evaluate(() => {
         const skip = new Set(['SCRIPT', 'STYLE', 'LINK', 'META', 'HEAD', 'HTML', 'BR']);
         let n = 0;
+        let centerTextBlocks = 0;
+        const titleHits = [];
         for (const el of document.body.querySelectorAll('*')) {
           if (skip.has(el.tagName)) continue;
           if (el.id === 'player' || el.closest?.('#player')) continue;
@@ -204,14 +206,40 @@ async function main() {
           // Prefer mid-canvas content; ignore tiny corner chrome
           if (r.top < 8 && r.left < 8 && r.width < 420 && r.height < 120) continue;
           n += 1;
+          const text = String(el.textContent || '').replace(/\s+/g, '');
+          if ([...text].length >= 4
+            && r.top > window.innerHeight * 0.12
+            && r.bottom < window.innerHeight * 0.72
+            && r.width >= 100) {
+            centerTextBlocks += 1;
+            if (op > 0.45 && r.height >= 36) {
+              titleHits.push({
+                id: el.id || el.className || el.tagName,
+                op: Math.round(op * 100) / 100,
+                y: Math.round(r.top),
+                h: Math.round(r.height),
+                text: text.slice(0, 16),
+              });
+            }
+          }
         }
         // Intro title that should have faded by mid — stuck exports keep it fully visible.
         const big = document.getElementById('bigTitle');
         const bigOp = big ? parseFloat(getComputedStyle(big).opacity || '0') : 0;
-        return { visible: n, bigTitleOp: bigOp };
+        // Overlapping title-sized blocks in the same vertical band ⇒ stacked text.
+        let stackedPairs = 0;
+        for (let i = 0; i < titleHits.length; i++) {
+          for (let j = i + 1; j < titleHits.length; j++) {
+            const a = titleHits[i];
+            const b = titleHits[j];
+            if (Math.abs(a.y - b.y) < Math.max(a.h, b.h) * 0.7) stackedPairs += 1;
+          }
+        }
+        return { visible: n, bigTitleOp: bigOp, centerTextBlocks, stackedPairs, titleHits: titleHits.slice(0, 8) };
       });
       process.stdout.write(
-        `motion preflight visibleNodes@mid=${midProbe.visible} bigTitleOp=${midProbe.bigTitleOp.toFixed(2)}\n`,
+        `motion preflight visibleNodes@mid=${midProbe.visible} bigTitleOp=${midProbe.bigTitleOp.toFixed(2)}`
+        + ` stackedPairs=${midProbe.stackedPairs} centerText=${midProbe.centerTextBlocks}\n`,
       );
 
       for (const f of [p0, pMid, pEnd]) {
@@ -222,9 +250,9 @@ async function main() {
           `讲解动画画面几乎无变化（PSNR mid=${mid.toFixed(1)}dB, end=${end.toFixed(1)}dB）：疑似 seek 失效或卡在初始叠字帧`,
         );
       }
-      // Canvas-first templates often have almost no mid-timeline DOM nodes; PSNR already
-      // proves the frame changed. Only fail visibleNodes when the page is DOM-driven
-      // (no substantial canvas) or when PSNR also looks frozen.
+      // Canvas backgrounds are common, but many decks still drive titles/cards via DOM.
+      // Never skip bigTitle / DOM occupancy checks just because a <canvas> exists —
+      // that previously let stacked intro titles pass when PSNR still moved (starfield).
       const hasCanvas = await page.evaluate(() => {
         const c = document.querySelector('canvas');
         if (!c) return false;
@@ -232,21 +260,31 @@ async function main() {
         return r.width >= 320 && r.height >= 180;
       });
       const psnrShowsMotion = mid < 28 || end < 28;
-      if (midProbe.visible < 3 && !(hasCanvas && psnrShowsMotion)) {
+      // Pure-canvas decks (no mid DOM) may have visibleNodes≈0; allow only if PSNR moved.
+      if (midProbe.visible < 3 && !(hasCanvas && psnrShowsMotion && midProbe.bigTitleOp < 0.05)) {
         throw new Error(
           `讲解动画中段可见内容过少（visibleNodes=${midProbe.visible}）：疑似 seek 未驱动 currentTime/updateElements，导出将是空白片`,
         );
       }
-      if (midProbe.bigTitleOp > 0.35 && !(hasCanvas && psnrShowsMotion)) {
+      // Intro #bigTitle must be gone by mid — otherwise export shows stacked titles.
+      if (midProbe.bigTitleOp > 0.35) {
         throw new Error(
           `讲解动画中段仍停在片头大标题（bigTitleOp=${midProbe.bigTitleOp.toFixed(2)}）：疑似 seek 未调用 render，导出将叠字`,
+        );
+      }
+      if (midProbe.stackedPairs >= 2) {
+        throw new Error(
+          `讲解动画中段检测到叠字（stackedPairs=${midProbe.stackedPairs}）：同一区域多个高不透明标题块同时可见`,
         );
       }
     }
 
     for (let i = 0; i < total; i++) {
-      // Map export timeline onto animation timeline (clamp to end)
-      const timeSec = Math.min(animTotal - 0.001, (i / Math.max(1, total - 1)) * animTotal);
+      // Wall-clock follows the export/audio length; clamp seek into [0, animTotal).
+      // Stretching the whole animation across a longer narration (old behavior) makes
+      // speech and on-screen cues drift, which users report as 音轨错乱.
+      const wallSec = (i / Math.max(1, total - 1)) * seconds;
+      const timeSec = Math.min(animTotal - 0.001, wallSec);
       await seekTo(page, timeSec, animTotal);
       const file = path.join(frameDir, `f${String(i).padStart(6, '0')}.jpg`);
       await page.screenshot({ path: file, type: 'jpeg', quality: 82 });

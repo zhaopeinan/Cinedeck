@@ -213,6 +213,9 @@ window.__explainRec = {
         else applyTimeline(s, true);
       }
       // Drive content with explicit seek seconds (do not rely on closed-over playhead alone).
+      // IMPORTANT: do NOT call drawBackground() after render() — many templates' drawBackground
+      // clears the canvas (clearRect), which would wipe the frame we just drew and/or leave
+      // DOM titles stacked on an empty/partial canvas.
       if (typeof drawLinks === 'function') drawLinks(wall, s);
       if (typeof updateElements === 'function') updateElements(s, wall);
       if (typeof updateCamera === 'function') updateCamera(s);
@@ -224,8 +227,8 @@ window.__explainRec = {
       if (typeof renderScene5 === 'function') renderScene5(s);
       if (typeof renderCamera === 'function') renderCamera(s);
       if (typeof render === 'function') render(s);
-      // drawBackground signatures differ (wall-clock sec vs rAF dt-ms); use a small dt.
-      if (typeof drawBackground === 'function') {
+      else if (typeof drawBackground === 'function') {
+        // Fallback only when there is no render(): paint background yourself.
         try { drawBackground(16); } catch (e1) { try { drawBackground(wall); } catch (e2) {} }
       }
     } catch (e) {}
@@ -400,12 +403,20 @@ export async function exportExplainHtmlToMp4(opts: {
 
   // Motion QC: catch frozen/overlapped initial-frame exports before they enter MOOC.
   try {
+    const animMatch = `${r.stdout || ''}\n${r.stderr || ''}`.match(
+      /record seek-mode animTotal=([0-9.]+)s/i,
+    );
+    const animDurationSec = animMatch ? Number(animMatch[1]) : 0;
     const motion = await assertExplainAnimationMp4Ok({
       filePath: outPath,
       durationSec: seconds,
+      animDurationSec: Number.isFinite(animDurationSec) && animDurationSec > 1
+        ? animDurationSec
+        : undefined,
     });
     opts.onLog?.(
-      `motion qc ok psnr mid=${motion.scores.midPsnr.toFixed(1)}dB end=${motion.scores.endPsnr.toFixed(1)}dB`,
+      `motion qc ok psnr mid=${motion.scores.midPsnr.toFixed(1)}dB end=${motion.scores.endPsnr.toFixed(1)}dB`
+      + (animDurationSec > 1 ? ` animTotal=${animDurationSec}s` : ''),
     );
   } catch (e: any) {
     try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch { /* ignore */ }

@@ -210,6 +210,11 @@ export async function imagePsnrDb(aPath: string, bPath: string): Promise<number>
 export async function qcExplainAnimationMp4(opts: {
   filePath: string;
   durationSec?: number;
+  /**
+   * HTML animation TOTAL (seconds). When the export is much longer than TOTAL,
+   * audio/visual timelines diverge and users hear “音轨错乱”.
+   */
+  animDurationSec?: number;
   /** Fail when BOTH mid and end PSNR vs start exceed this (dB). */
   maxStillPsnrDb?: number;
 }): Promise<ExplainMotionQcResult> {
@@ -228,6 +233,17 @@ export async function qcExplainAnimationMp4(opts: {
   }
   if (!(duration > 2)) {
     return { ok: false, reasons: ['讲解视频时长异常'], scores: emptyScores };
+  }
+
+  // Note: narration often runs longer than HTML TOTAL (last frame is held). That is OK
+  // when the recorder clamps seek to TOTAL. Only flag extreme mismatches (>2.5x) that
+  // usually mean the wrong duration was fed into the exporter.
+  const animDur = Number(opts.animDurationSec) || 0;
+  if (animDur >= 8 && duration > animDur * 2.5) {
+    reasons.push(
+      `成片时长 ${duration.toFixed(1)}s 远长于动画 TOTAL ${animDur.toFixed(1)}s`
+      + `（${(duration / animDur).toFixed(2)}x）；疑似导出时长错误`,
+    );
   }
 
   const tmpDir = path.join(path.dirname(opts.filePath), `_qc_${Date.now()}`);
