@@ -222,12 +222,22 @@ async function main() {
           `讲解动画画面几乎无变化（PSNR mid=${mid.toFixed(1)}dB, end=${end.toFixed(1)}dB）：疑似 seek 失效或卡在初始叠字帧`,
         );
       }
-      if (midProbe.visible < 3) {
+      // Canvas-first templates often have almost no mid-timeline DOM nodes; PSNR already
+      // proves the frame changed. Only fail visibleNodes when the page is DOM-driven
+      // (no substantial canvas) or when PSNR also looks frozen.
+      const hasCanvas = await page.evaluate(() => {
+        const c = document.querySelector('canvas');
+        if (!c) return false;
+        const r = c.getBoundingClientRect();
+        return r.width >= 320 && r.height >= 180;
+      });
+      const psnrShowsMotion = mid < 28 || end < 28;
+      if (midProbe.visible < 3 && !(hasCanvas && psnrShowsMotion)) {
         throw new Error(
           `讲解动画中段可见内容过少（visibleNodes=${midProbe.visible}）：疑似 seek 未驱动 currentTime/updateElements，导出将是空白片`,
         );
       }
-      if (midProbe.bigTitleOp > 0.35) {
+      if (midProbe.bigTitleOp > 0.35 && !(hasCanvas && psnrShowsMotion)) {
         throw new Error(
           `讲解动画中段仍停在片头大标题（bigTitleOp=${midProbe.bigTitleOp.toFixed(2)}）：疑似 seek 未调用 render，导出将叠字`,
         );
