@@ -88,13 +88,16 @@ export function applySubtitlePreference(html: string, enabled: boolean): string 
 /** Sync script for injected <audio id="explain-narration"> with page play/pause UI. */
 export function buildNarrationSyncScript(): string {
   // Handles LLM players that use a single #playBtn toggle (not separate .play/.pause).
-  // Icon path formats vary a lot across generated HTML — prefer toggle + broad heuristics.
+  // Important: do NOT loop, and do NOT periodically force-seek while playing —
+  // Chrome can overlap old/new buffers on seek and sounds like a ~0.5s double track.
   return `<script id="explain-narration-sync">
 (function(){
+  if (window.__explainNarrationSyncBound) return;
   var a=document.getElementById('explain-narration');
   if(!a) return;
+  window.__explainNarrationSyncBound = true;
   a.volume=1;
-  try { a.loop = true; } catch (e) {}
+  try { a.loop = false; } catch (e) {}
 
   function syncPlay(playing){
     try {
@@ -128,14 +131,16 @@ export function buildNarrationSyncScript(): string {
     syncPlay(playing);
   }
 
-  function seekAudioFromTimeLabel(){
+  function seekAudioFromTimeLabel(force){
     var el = document.getElementById('time') || document.getElementById('timeLabel');
     if (!el || !isFinite(a.duration) || a.duration <= 0) return;
     var m = String(el.textContent || '').match(/(\\d+):(\\d+)/);
     if (!m) return;
     var sec = Number(m[1]) * 60 + Number(m[2]);
     if (!isFinite(sec)) return;
-    if (Math.abs((a.currentTime || 0) - sec) > 0.4) {
+    var gap = Math.abs((a.currentTime || 0) - sec);
+    // Only snap on user scrub (force) or a large desync — never chase small drift every tick.
+    if (force || gap > 1.25) {
       try { a.currentTime = Math.max(0, Math.min(sec, a.duration)); } catch (e) {}
     }
   }
@@ -164,7 +169,9 @@ export function buildNarrationSyncScript(): string {
     document.addEventListener(evt, function(ev){
       var t = ev.target;
       if (!t || !t.closest) return;
-      if (t.closest('#track,#knob,#fill,#progressTrack,#progressFill')) setTimeout(seekAudioFromTimeLabel, 0);
+      if (t.closest('#track,#knob,#fill,#progressTrack,#progressFill')) {
+        setTimeout(function(){ seekAudioFromTimeLabel(true); }, 0);
+      }
     }, true);
   });
 
@@ -174,16 +181,15 @@ export function buildNarrationSyncScript(): string {
       new MutationObserver(function(){ syncFromUi(); }).observe(icon, { childList: true, subtree: true, characterData: true });
     } catch (e) {}
   }
-  setInterval(function(){
-    if (!a.paused) seekAudioFromTimeLabel();
-  }, 500);
 
   function boot(){
     setTimeout(function(){
+      // Align once at start; do not keep re-seeking while playing.
+      seekAudioFromTimeLabel(true);
       var playing = iconLooksPlaying();
       if (playing === false) syncPlay(false);
-      else a.play().catch(function(){});
-    }, 350);
+      else syncPlay(true);
+    }, 120);
   }
   if (document.readyState === 'complete') boot();
   else window.addEventListener('load', boot);
@@ -208,7 +214,7 @@ export function patchNarrationAudioSync(html: string): string {
   return `${html}\n${script}`;
 }
 
-/** Inject a looping/controllable <audio> into the HTML so iframe sample stays self-contained. */
+/** Inject a controllable <audio> into the HTML so iframe sample stays self-contained. */
 export function injectNarrationAudio(html: string, audioPath: string): string {
   if (!fs.existsSync(audioPath)) return html;
   const buf = fs.readFileSync(audioPath);
