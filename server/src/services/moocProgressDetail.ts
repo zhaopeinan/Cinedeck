@@ -230,7 +230,7 @@ export function buildMoocProgressDetail(opts: {
     } catch { /* ignore */ }
 
     const explainStillGenerating = job.status === 'running'
-      && (job.stage === 'explain_gen' || job.stage === 'explain_points' || job.stage === 'explain');
+      && (job.stage === 'explain_gen' || job.stage === 'explain_points');
     const childRows = children.map((c) => childPublic(c, { insertedIds, explainStillGenerating }));
     const stats = {
       total: children.length,
