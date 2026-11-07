@@ -91,6 +91,8 @@ function serializeJob(
     message: job.message,
     error: job.error,
     config: safeConfig,
+    /** Top-level flag so UI can show「修复中」even if nested config is ignored. */
+    repairInProgress: !!(config && config.repairInProgress),
     project,
     pptAvailable: !!(job.file_path && fs.existsSync(job.file_path)),
     /** Finished/failed job with project can add explain inserts then re-compose */

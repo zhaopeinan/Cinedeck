@@ -288,7 +288,7 @@ export function buildMoocProgressDetail(opts: {
   }
 
   const elapsedSec = secBetween(job.started_at, job.finished_at || null);
-  const progressSummary = buildProgressSummary(job, steps, explain);
+  const progressSummary = buildProgressSummary(job, steps, explain, config);
 
   return {
     progressSummary,
@@ -299,8 +299,8 @@ export function buildMoocProgressDetail(opts: {
   };
 }
 
-function buildProgressSummary(job: MoocJobRow, steps: any[], explain: any): string {
-  if (job.status === 'success') return '已完成';
+function buildProgressSummary(job: MoocJobRow, steps: any[], explain: any, cfg?: any): string {
+  if (job.status === 'success' && !cfg?.repairInProgress) return '已完成';
   if (job.status === 'cancelled') return '已取消';
   if (job.status === 'failed') {
     return `失败于${STAGE_LABEL_CN[job.failed_stage || job.stage] || job.stage}`;
@@ -309,6 +309,10 @@ function buildProgressSummary(job: MoocJobRow, steps: any[], explain: any): stri
 
   const current = steps.find((s) => s.status === 'running');
   const msg = String(job.message || '');
+  if (cfg?.repairInProgress) {
+    return msg || (typeof cfg.repairInProgress === 'object' && cfg.repairInProgress.message)
+      || '正在修复知识点插片…';
+  }
   // Export / avatar-on-insert phases after HTML children finish
   if (/^导出/.test(msg) || /叠数字人|知识点插片/.test(msg) || /合成讲解视频/.test(msg)) {
     return msg;

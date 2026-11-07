@@ -806,8 +806,9 @@ const MoocPage: React.FC = () => {
       dataIndex: 'status',
       width: 78,
       render: (s: string, r: any) => {
-        const repairing = !!(r.config?.repairInProgress)
-          || (s === 'running' && (r.stage === 'explain_gen' || r.stage === 'explain'));
+        const repairing = !!(r.repairInProgress || r.config?.repairInProgress)
+          || (s === 'running' && (r.stage === 'explain_gen' || r.stage === 'explain'))
+          || (s === 'running' && /重导|修复|叠数字人|知识点插片/.test(String(r.message || '')));
         if (repairing) {
           return <Tag color="processing" style={{ margin: 0 }}>修复中</Tag>;
         }
@@ -823,10 +824,16 @@ const MoocPage: React.FC = () => {
       key: 'progress',
       width: 160,
       render: (_: any, r: any) => {
+        const repairing = !!(r.repairInProgress || r.config?.repairInProgress)
+          || (r.status === 'running' && /重导|修复|叠数字人|知识点插片/.test(String(r.message || '')));
         const stageText = r.status === 'failed'
           ? (r.failedStageLabel || STAGE_LABEL[r.failedStage] || STAGE_LABEL[r.stage] || r.stage)
-          : (r.stageLabel || STAGE_LABEL[r.stage] || r.stage);
-        const summary = r.progressSummary || '';
+          : repairing
+            ? (STAGE_LABEL.explain || '修复讲解插片')
+            : (r.stageLabel || STAGE_LABEL[r.stage] || r.stage);
+        const summary = repairing
+          ? (r.message || r.progressSummary || '正在修复知识点插片…')
+          : (r.progressSummary || '');
         return (
           <Tooltip title="点击查看流水线与知识点详情">
             <div
@@ -1697,12 +1704,23 @@ const MoocPage: React.FC = () => {
           <Space direction="vertical" size={20} style={{ width: '100%' }}>
             <div>
               <Space wrap size={[8, 8]}>
-                <Tag color={STATUS_COLOR[detailJob.status] || 'default'}>
-                  {STATUS_LABEL[detailJob.status] || detailJob.status}
-                </Tag>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  {detailJob.stageLabel || STAGE_LABEL[detailJob.stage] || detailJob.stage}
-                </Text>
+                {(() => {
+                  const repairing = !!(detailJob.repairInProgress || detailJob.config?.repairInProgress)
+                    || (detailJob.status === 'running' && (detailJob.stage === 'explain_gen' || detailJob.stage === 'explain'))
+                    || (detailJob.status === 'running' && /重导|修复|叠数字人|知识点插片/.test(String(detailJob.message || '')));
+                  return (
+                    <>
+                      <Tag color={repairing ? 'processing' : (STATUS_COLOR[detailJob.status] || 'default')}>
+                        {repairing ? '修复中' : (STATUS_LABEL[detailJob.status] || detailJob.status)}
+                      </Tag>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {repairing
+                          ? (STAGE_LABEL.explain || '修复讲解插片')
+                          : (detailJob.stageLabel || STAGE_LABEL[detailJob.stage] || detailJob.stage)}
+                      </Text>
+                    </>
+                  );
+                })()}
                 {detailJob.elapsedLabel && (
                   <Text type="secondary" style={{ fontSize: 12 }}>已用 {detailJob.elapsedLabel}</Text>
                 )}
@@ -1715,9 +1733,13 @@ const MoocPage: React.FC = () => {
                   />
                 )}
               </Space>
-              {detailJob.progressSummary && (
+              {(detailJob.message || detailJob.progressSummary) && (
                 <div style={{ marginTop: 8 }}>
-                  <Text>{detailJob.progressSummary}</Text>
+                  <Text>
+                    {(detailJob.repairInProgress || detailJob.config?.repairInProgress)
+                      ? (detailJob.message || detailJob.progressSummary)
+                      : (detailJob.progressSummary || detailJob.message)}
+                  </Text>
                 </div>
               )}
             </div>
