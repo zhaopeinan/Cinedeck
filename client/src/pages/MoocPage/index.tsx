@@ -30,6 +30,7 @@ const STAGE_LABEL: Record<string, string> = {
   avatar: '生成数字人',
   explain_points: '分析知识点',
   explain_gen: '生成讲解动画',
+  explain: '修复讲解插片',
   compose: '合成视频',
   done: '已完成',
   failed: '失败',
@@ -804,11 +805,18 @@ const MoocPage: React.FC = () => {
       title: '状态',
       dataIndex: 'status',
       width: 78,
-      render: (s: string) => (
-        <Tag color={STATUS_COLOR[s] || 'default'} style={{ margin: 0 }}>
-          {STATUS_LABEL[s] || s}
-        </Tag>
-      ),
+      render: (s: string, r: any) => {
+        const repairing = !!(r.config?.repairInProgress)
+          || (s === 'running' && (r.stage === 'explain_gen' || r.stage === 'explain'));
+        if (repairing) {
+          return <Tag color="processing" style={{ margin: 0 }}>修复中</Tag>;
+        }
+        return (
+          <Tag color={STATUS_COLOR[s] || 'default'} style={{ margin: 0 }}>
+            {STATUS_LABEL[s] || s}
+          </Tag>
+        );
+      },
     },
     {
       title: '进度',

@@ -379,7 +379,11 @@ export class MoocJobService {
   ): MoocJobRow | null {
     const job = this.getJob(id);
     if (!job || job.user_id !== userId) return null;
-    if (job.status === 'running' || job.status === 'queued') return null;
+    const cfg0: any = this.parseConfig(job);
+    const repairing = !!(cfg0?.repairInProgress);
+    // Allow recompose while a repair/reexport marked the parent as running.
+    if (job.status === 'queued') return null;
+    if (job.status === 'running' && !repairing) return null;
     if (!job.project_id) return null;
     const p = this.db.prepare('SELECT id, file_path FROM projects WHERE id = ?').get(job.project_id) as
       { id: string; file_path?: string } | undefined;
@@ -387,9 +391,10 @@ export class MoocJobService {
     const insertsPath = path.join(path.dirname(p.file_path), 'explain_inserts.json');
     if (!fs.existsSync(insertsPath)) return null;
 
-    const cfg: any = { ...this.parseConfig(job) };
+    const cfg: any = { ...cfg0 };
     cfg.enableExplainInsert = true;
     delete cfg.avatarOptimizeKeepExplain;
+    delete cfg.repairInProgress;
     if (Array.isArray(cfg.stageLog)) {
       cfg.stageLog = cfg.stageLog.filter((x: any) => x?.id !== 'compose');
     }
@@ -403,6 +408,33 @@ export class MoocJobService {
       error: null,
       failed_stage: null,
       retry_count: 0,
+      finished_at: null,
+      config_json: JSON.stringify(cfg),
+    });
+  }
+
+  /** Mark parent MOOC job as in-progress repair/reexport (UI should not show 已完成). */
+  markRepairInProgress(
+    id: string,
+    userId: string,
+    opts: { message: string; kind?: string },
+  ): MoocJobRow | null {
+    const job = this.getJob(id);
+    if (!job || job.user_id !== userId) return null;
+    if (job.status === 'queued') return null;
+    const cfg: any = { ...this.parseConfig(job) };
+    cfg.repairInProgress = {
+      kind: opts.kind || 'repair',
+      at: new Date().toISOString(),
+      message: opts.message,
+    };
+    return this.updateJob(id, {
+      status: 'running',
+      stage: 'explain_gen',
+      progress: Math.max(Number(job.progress) || 0, 88),
+      message: opts.message,
+      error: null,
+      failed_stage: null,
       finished_at: null,
       config_json: JSON.stringify(cfg),
     });

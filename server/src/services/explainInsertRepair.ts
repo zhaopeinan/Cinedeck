@@ -178,7 +178,7 @@ export async function repairExplainChildForMooc(opts: {
     ? cfg.explainExportQuality
     : '1080p') as '720p' | '1080p' | '1440p';
 
-  // Mark repair in-flight on explain job
+  // Mark repair in-flight on explain job + parent MOOC (avoid UI still saying 已完成)
   opts.explainJobs.mergeConfig(child.id, {
     repair: {
       moocJobId: mooc.id,
@@ -187,6 +187,14 @@ export async function repairExplainChildForMooc(opts: {
       at: new Date().toISOString(),
     },
   });
+  try {
+    opts.moocJobs.markRepairInProgress(mooc.id, opts.userId, {
+      kind: `explain_${opts.mode}`,
+      message: opts.mode === 'regenerate'
+        ? `正在重新生成知识点「${child.name}」并准备补进成片`
+        : `正在重新导出知识点「${child.name}」并准备补进成片`,
+    });
+  } catch { /* ignore */ }
 
   // Fire-and-forget long work; API returns immediately
   void (async () => {
