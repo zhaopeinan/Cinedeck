@@ -693,13 +693,22 @@ export class MoocJobService {
 
   recoverStaleRunning(message = '服务重启，任务中断。可点「继续」从断点续跑') {
     const now = new Date().toISOString();
-    // Keep stage/checkpoint so resume knows where to continue
-    this.db.prepare(`
-      UPDATE mooc_jobs
-      SET status = 'failed',
-          failed_stage = CASE WHEN stage IN ('queued','done','failed') THEN failed_stage ELSE stage END,
-          message = ?, error = ?, finished_at = ?, updated_at = ?
-      WHERE status = 'running'
-    `).run(message, message, now, now);
+    // Keep stage/checkpoint so resume knows where to continue.
+    // Skip parent jobs that are only "running" because a side-channel repair/reexport
+    // is in progress — those should not be flipped to failed on API restart.
+    const rows = this.db.prepare(`SELECT id, config_json FROM mooc_jobs WHERE status = 'running'`).all() as
+      Array<{ id: string; config_json: string }>;
+    for (const row of rows) {
+      let cfg: any = {};
+      try { cfg = JSON.parse(row.config_json || '{}'); } catch { /* ignore */ }
+      if (cfg?.repairInProgress) continue;
+      this.db.prepare(`
+        UPDATE mooc_jobs
+        SET status = 'failed',
+            failed_stage = CASE WHEN stage IN ('queued','done','failed') THEN failed_stage ELSE stage END,
+            message = ?, error = ?, finished_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'running'
+      `).run(message, message, now, now, row.id);
+    }
   }
 }
