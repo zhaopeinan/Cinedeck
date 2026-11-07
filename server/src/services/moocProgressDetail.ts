@@ -73,7 +73,10 @@ function shortTitle(name: string): string {
 
 function childPublic(c: ExplainJobRow, extras?: {
   insertedIds?: Set<string>;
-  /** Parent MOOC still generating HTML — missing inserts is normal, not a QC fail. */
+  /**
+   * True while any sibling is still running/queued, or parent is mid explain_gen.
+   * Missing inserts then means "not exported yet", not QC failure.
+   */
   explainStillGenerating?: boolean;
 }) {
   const cfg = (() => {
@@ -229,8 +232,11 @@ export function buildMoocProgressDetail(opts: {
       }
     } catch { /* ignore */ }
 
-    const explainStillGenerating = job.status === 'running'
-      && (job.stage === 'explain_gen' || job.stage === 'explain_points');
+    const siblingsStillOpen = children.some((c) => c.status === 'running' || c.status === 'queued');
+    const explainStillGenerating = siblingsStillOpen
+      || ((job.status === 'running' || job.status === 'failed')
+        && (job.stage === 'explain_gen' || job.stage === 'explain_points')
+        && children.some((c) => c.status !== 'completed' && c.status !== 'failed' && c.status !== 'cancelled'));
     const childRows = children.map((c) => childPublic(c, { insertedIds, explainStillGenerating }));
     const stats = {
       total: children.length,
