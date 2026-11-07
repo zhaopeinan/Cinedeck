@@ -305,7 +305,12 @@ function buildProgressSummary(job: MoocJobRow, steps: any[], explain: any, cfg?:
   if (job.status === 'failed') {
     return `失败于${STAGE_LABEL_CN[job.failed_stage || job.stage] || job.stage}`;
   }
-  if (job.status === 'queued') return '排队等待中';
+  if (job.status === 'queued') {
+    const queuedMsg = String(job.message || '').trim();
+    // Prefer the concrete reason (e.g. 排队重合成) over a generic wait label.
+    if (queuedMsg && queuedMsg !== '排队等待中') return queuedMsg;
+    return '排队等待中';
+  }
 
   const current = steps.find((s) => s.status === 'running');
   const msg = String(job.message || '');

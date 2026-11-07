@@ -30,6 +30,7 @@ import { createProjectAvatarRouter } from './routes/projectAvatar';
 import { createMoocRouter } from './routes/mooc';
 import { MoocJobService } from './services/moocJobService';
 import { initMoocPipeline } from './services/moocPipelineWorker';
+import { createInternalMoocRouter } from './routes/internalMooc';
 import { TranscribeJobService } from './services/transcribeJobService';
 import { initTranscribePipeline } from './services/transcribeWorker';
 import { createTranscribeRouter } from './routes/transcribe';
@@ -139,6 +140,8 @@ async function main() {
     moocJobs, projectService, pptParser, explainBatches, explainJobs,
     { videoComposer, db },
   ));
+  // Localhost-only: batch/ops scripts outside this process can wake the MOOC queue.
+  app.use('/api/internal/mooc', createInternalMoocRouter());
   app.use('/api/v1/transcribe', authRequired, createTranscribeRouter(transcribeJobs));
   app.use('/api/v1/hyperframe', authRequired, createHyperframeRouter(hyperframeJobs, projectService));
   app.use('/api/v1/explain', authRequired, createExplainRouter(explainJobs, llmService, explainGenSettings, explainBatches));

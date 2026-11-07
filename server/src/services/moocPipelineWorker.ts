@@ -56,11 +56,35 @@ function checkpointAtLeast(current: MoocCheckpoint | string | null | undefined, 
 
 let deps: MoocPipelineDeps | null = null;
 let pumping = false;
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+
+/** How often to reclaim stranded queued jobs (external scripts may queue without pumping). */
+export const MOOC_QUEUE_WATCHDOG_MS = 3000;
 
 export function initMoocPipeline(d: MoocPipelineDeps) {
   deps = d;
   d.moocJobs.recoverStaleRunning();
   setTimeout(() => pumpMoocQueue(), 1500);
+  // Safety net: batch/repair scripts often run in a separate Node process where
+  // pumpMoocQueue() is a no-op (deps unset). Without a watchdog, jobs stay queued forever.
+  if (watchdogTimer) clearInterval(watchdogTimer);
+  watchdogTimer = setInterval(() => {
+    try {
+      pumpMoocQueue();
+    } catch (err: any) {
+      console.warn('[MOOC] queue watchdog error:', err?.message || err);
+    }
+  }, MOOC_QUEUE_WATCHDOG_MS);
+}
+
+/**
+ * Wake the in-process MOOC queue. Safe to call from HTTP handlers / repair paths.
+ * Returns false when this process is not the live dispatcher (deps unset).
+ */
+export function wakeMoocQueue(): boolean {
+  if (!deps) return false;
+  pumpMoocQueue();
+  return true;
 }
 
 export function pumpMoocQueue() {

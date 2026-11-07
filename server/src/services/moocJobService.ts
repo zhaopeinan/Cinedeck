@@ -6,6 +6,34 @@ import fs from 'fs';
 const DATA_DIR = path.resolve(process.cwd(), '..', 'data');
 const MOOC_UPLOAD_DIR = path.join(DATA_DIR, 'mooc-uploads');
 
+/**
+ * After enqueueing a MOOC job, wake the live dispatcher queue.
+ * Works both in-process and from external `docker exec` scripts (HTTP localhost).
+ */
+function scheduleMoocQueueWake(reason: string) {
+  const url = process.env.MOOC_WAKE_URL
+    || `http://127.0.0.1:${process.env.PORT || 3001}/api/internal/mooc/wake`;
+  setImmediate(() => {
+    try {
+      // Lazy require avoids circular init with moocPipelineWorker.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { wakeMoocQueue } = require('./moocPipelineWorker') as {
+        wakeMoocQueue: () => boolean;
+      };
+      if (wakeMoocQueue()) return;
+    } catch {
+      /* fall through to HTTP */
+    }
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    }).catch((err: any) => {
+      console.warn('[MOOC] queue wake failed:', reason, err?.message || err);
+    });
+  });
+}
+
 export type MoocJobStatus = 'queued' | 'running' | 'success' | 'failed' | 'cancelled';
 
 export type MoocJobStage =
@@ -353,6 +381,7 @@ export class MoocJobService {
         finished_at: null,
       });
       console.log(`[MOOC] Job ${jobId} auto-retry ${next}/${maxRetries} after ${stage}`);
+      scheduleMoocQueueWake('auto_retry');
       return true;
     }
 
@@ -399,7 +428,7 @@ export class MoocJobService {
       cfg.stageLog = cfg.stageLog.filter((x: any) => x?.id !== 'compose');
     }
 
-    return this.updateJob(id, {
+    const updated = this.updateJob(id, {
       status: 'queued',
       stage: 'queued',
       progress: 88,
@@ -411,6 +440,8 @@ export class MoocJobService {
       finished_at: null,
       config_json: JSON.stringify(cfg),
     });
+    if (updated) scheduleMoocQueueWake('queue_recompose_only');
+    return updated;
   }
 
   /** Mark parent MOOC job as in-progress repair/reexport (UI should not show 已完成). */
@@ -456,7 +487,7 @@ export class MoocJobService {
         return this.queueRestart(id, userId);
       }
     }
-    return this.updateJob(id, {
+    const updated = this.updateJob(id, {
       status: 'queued',
       stage: 'queued',
       retry_count: 0,
@@ -465,6 +496,8 @@ export class MoocJobService {
       failed_stage: null,
       finished_at: null,
     });
+    if (updated) scheduleMoocQueueWake('queue_resume');
+    return updated;
   }
 
   /**
@@ -512,7 +545,7 @@ export class MoocJobService {
     } catch { /* ignore */ }
 
     // Roll back past explain+compose so worker re-enters those stages only
-    return this.updateJob(id, {
+    const updated = this.updateJob(id, {
       status: 'queued',
       stage: 'queued',
       progress: 70,
@@ -524,6 +557,8 @@ export class MoocJobService {
       finished_at: null,
       config_json: JSON.stringify(cfg),
     });
+    if (updated) scheduleMoocQueueWake('queue_optimize_explain');
+    return updated;
   }
 
   /**
@@ -644,7 +679,7 @@ export class MoocJobService {
       message = '更换数字人：排队重跑数字人并重合成';
     }
 
-    return this.updateJob(id, {
+    const updated = this.updateJob(id, {
       status: 'queued',
       stage: 'queued',
       progress: 70,
@@ -656,6 +691,8 @@ export class MoocJobService {
       finished_at: null,
       config_json: JSON.stringify(cfg),
     });
+    if (updated) scheduleMoocQueueWake('queue_optimize');
+    return updated;
   }
 
   /** Full restart from scratch (new project). */
@@ -664,7 +701,7 @@ export class MoocJobService {
     if (!job || job.user_id !== userId) return null;
     if (job.status === 'running' || job.status === 'queued') return null;
     if (!fs.existsSync(job.file_path)) return null;
-    return this.updateJob(id, {
+    const updated = this.updateJob(id, {
       status: 'queued',
       stage: 'queued',
       progress: 0,
@@ -677,6 +714,8 @@ export class MoocJobService {
       started_at: null,
       finished_at: null,
     });
+    if (updated) scheduleMoocQueueWake('queue_restart');
+    return updated;
   }
 
   deleteJob(id: string, userId: string): boolean {

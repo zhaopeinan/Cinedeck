@@ -371,8 +371,11 @@ export async function repairExplainChildForMooc(opts: {
         return;
       }
 
-      const { pumpMoocQueue } = await import('./moocPipelineWorker');
-      pumpMoocQueue();
+      const { ensureMoocQueueAwake } = await import('../utils/wakeMoocQueue');
+      const wake = await ensureMoocQueueAwake({ reason: 'explain_insert_repair' });
+      if (!wake.ok) {
+        console.warn('[ExplainRepair] mooc queue wake failed:', wake.via, wake.detail);
+      }
 
       opts.explainJobs.mergeConfig(job.id, {
         repair: {
