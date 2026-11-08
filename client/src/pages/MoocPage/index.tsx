@@ -2024,10 +2024,11 @@ const MoocPage: React.FC = () => {
                               不入片
                             </Button>
                           )}
-                          {(row.qcStatus === 'failed' || row.status === 'failed' || row.status === 'cancelled')
+                          {(row.canApprove || row.qcStatus === 'skipped' || row.qcStatus === 'failed'
+                            || row.status === 'failed' || row.status === 'cancelled')
                             && row.qcStatus !== 'repairing' && (
                             <>
-                              {row.status === 'completed' && row.hasFinal && (
+                              {row.status === 'completed' && row.hasFinal && row.qcStatus === 'failed' && (
                                 <Button
                                   type="link"
                                   size="small"
@@ -2043,14 +2044,14 @@ const MoocPage: React.FC = () => {
                               <Button
                                 type="link"
                                 size="small"
-                                danger
+                                danger={row.qcStatus === 'failed' || row.status === 'failed'}
                                 icon={<ReloadOutlined />}
                                 style={{ padding: '0 4px' }}
                                 loading={retryingExplainId === row.id}
                                 disabled={retryingExplainId === '__all__'}
                                 onClick={() => void repairExplainChild(row, 'regenerate')}
                               >
-                                {row.status === 'completed' ? '重生' : '重试'}
+                                {row.status === 'completed' || row.canApprove || row.qcStatus === 'skipped' ? '重生' : '重试'}
                               </Button>
                             </>
                           )}
