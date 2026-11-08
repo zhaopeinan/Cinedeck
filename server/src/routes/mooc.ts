@@ -838,9 +838,12 @@ export function createMoocRouter(
         error: { code: '503', message: '讲解入片服务未就绪' },
       });
     }
-    const childIds = Array.isArray(req.body?.childIds)
-      ? req.body.childIds.map(String)
-      : (req.body?.childId ? [String(req.body.childId)] : []);
+    // Client axios interceptor snake_cases body: childIds → child_ids
+    const rawIds = req.body?.childIds ?? req.body?.child_ids;
+    const rawOne = req.body?.childId ?? req.body?.child_id;
+    const childIds = Array.isArray(rawIds)
+      ? rawIds.map(String)
+      : (rawOne ? [String(rawOne)] : []);
     try {
       const result = await approveExplainChildrenForMooc({
         moocJobId: String(req.params.id),
