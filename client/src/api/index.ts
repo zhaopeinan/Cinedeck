@@ -670,6 +670,18 @@ export const moocApi = {
       {},
       { timeout: 30000 },
     ),
+  /** Cancel a queued explain work item */
+  cancelExplainWork: (moocId: string, workId: string) =>
+    apiClient.post<ApiResponse<{ ok: boolean; message: string }>>(
+      `/mooc/jobs/${moocId}/explain/work/${workId}/cancel`,
+      {},
+      { timeout: 30000 },
+    ),
+  /** List explain work queue */
+  listExplainWorkQueue: (moocId: string) =>
+    apiClient.get<ApiResponse<{ items: any[]; active: any[] }>>(
+      `/mooc/jobs/${moocId}/explain/work-queue`,
+    ),
   getPptDownloadUrl: (id: string) => withToken(`/api/v1/mooc/jobs/${id}/ppt`),
   /** 下载用户提交的原始 PPTX */
   downloadPpt: async (id: string, filenameHint?: string) => {

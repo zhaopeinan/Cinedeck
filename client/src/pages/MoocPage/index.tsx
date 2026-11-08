@@ -496,6 +496,22 @@ const MoocPage: React.FC = () => {
     });
   }, [loadJobDetail, refreshJobs]);
 
+  const cancelExplainWork = useCallback(async (work: any) => {
+    const moocId = detailIdRef.current;
+    if (!moocId || !work?.id) return;
+    setRetryingExplainId(`work:${work.id}`);
+    try {
+      const res = await moocApi.cancelExplainWork(moocId, work.id);
+      message.success(res.data.data?.message || '已取消');
+      await loadJobDetail(moocId, { silent: true });
+      await refreshJobs();
+    } catch (e: any) {
+      message.error(e.response?.data?.error?.message || '取消失败');
+    } finally {
+      setRetryingExplainId(null);
+    }
+  }, [loadJobDetail, refreshJobs]);
+
   const approveAllPendingExplain = useCallback(async () => {
     const pending = (detailJob?.explain?.children || []).filter((c: any) => c.canApprove);
     if (!pending.length) {
@@ -1891,6 +1907,11 @@ const MoocPage: React.FC = () => {
                   {!!detailJob.explain.stats?.retrying && (
                     <Tag color="warning">重试 {detailJob.explain.stats.retrying}</Tag>
                   )}
+                  {!!(detailJob.explain.workQueue?.queuedCount || detailJob.explain.workQueue?.runningCount) && (
+                    <Tag color="purple">
+                      工作队列 {(detailJob.explain.workQueue?.runningCount || 0) + (detailJob.explain.workQueue?.queuedCount || 0)}
+                    </Tag>
+                  )}
                   {detailJob.explain.concurrency != null && (
                     <Tag>并发 {detailJob.explain.concurrency}</Tag>
                   )}
@@ -1905,6 +1926,69 @@ const MoocPage: React.FC = () => {
                     </Text>
                   )}
                 </Space>
+                {!!detailJob.explain.workQueue?.active?.length && (
+                  <div style={{ marginBottom: 12 }}>
+                    <Text strong style={{ fontSize: 13 }}>入片 / 修复队列</Text>
+                    <Table
+                      rowKey="id"
+                      size="small"
+                      pagination={false}
+                      style={{ marginTop: 6 }}
+                      dataSource={detailJob.explain.workQueue.active}
+                      columns={[
+                        {
+                          title: '知识点',
+                          dataIndex: 'title',
+                          ellipsis: true,
+                          render: (t: string, row: any) => t || row.childId?.slice(0, 8) || '-',
+                        },
+                        {
+                          title: '操作',
+                          dataIndex: 'mode',
+                          width: 72,
+                          render: (m: string) => (
+                            m === 'approve' ? '入片'
+                              : m === 'regenerate' ? '重生'
+                                : m === 'reexport' ? '重导'
+                                  : m || '-'
+                          ),
+                        },
+                        {
+                          title: '状态',
+                          dataIndex: 'status',
+                          width: 88,
+                          render: (s: string) => (
+                            <Tag
+                              color={s === 'running' ? 'processing' : s === 'queued' ? 'default' : 'default'}
+                              style={{ margin: 0 }}
+                            >
+                              {s === 'running' ? '执行中' : s === 'queued' ? '排队中' : s}
+                            </Tag>
+                          ),
+                        },
+                        {
+                          title: '',
+                          key: 'cancel',
+                          width: 72,
+                          render: (_: any, row: any) => (
+                            row.status === 'queued' ? (
+                              <Button
+                                type="link"
+                                size="small"
+                                danger
+                                style={{ padding: 0 }}
+                                loading={retryingExplainId === `work:${row.id}`}
+                                onClick={() => void cancelExplainWork(row)}
+                              >
+                                取消
+                              </Button>
+                            ) : null
+                          ),
+                        },
+                      ]}
+                    />
+                  </div>
+                )}
                 <Table
                   rowKey="id"
                   size="small"

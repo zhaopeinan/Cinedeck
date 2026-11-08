@@ -17,6 +17,8 @@ import {
   repairExplainChildForMooc,
   approveExplainChildrenForMooc,
   skipExplainChildForMooc,
+  cancelExplainWorkForMooc,
+  listExplainWorkQueue,
 } from '../services/explainInsertRepair';
 
 const PREVIEW_DIR = path.join(getMoocUploadDir(), 'previews');
@@ -865,6 +867,54 @@ export function createMoocRouter(
         error: { code: String(code), message: err?.message || '入片失败' },
       });
     }
+  });
+
+  /** Cancel a queued explain work item (approve/reexport/regenerate). */
+  router.post('/jobs/:id/explain/work/:workId/cancel', (req: Request, res: Response) => {
+    if (!explainJobs) {
+      return res.status(503).json({
+        success: false, data: null,
+        error: { code: '503', message: '讲解服务未就绪' },
+      });
+    }
+    try {
+      const result = cancelExplainWorkForMooc({
+        moocJobId: String(req.params.id),
+        workId: String(req.params.workId),
+        userId: getUserId(req),
+        moocJobs,
+        explainJobs,
+      });
+      res.json({ success: true, data: result, error: null });
+    } catch (err: any) {
+      const code = err?.code === '404' || err?.code === '400' ? err.code : '500';
+      const status = code === '404' ? 404 : code === '400' ? 400 : 500;
+      res.status(status).json({
+        success: false, data: null,
+        error: { code: String(code), message: err?.message || '取消失败' },
+      });
+    }
+  });
+
+  /** List explain work queue (for UI). */
+  router.get('/jobs/:id/explain/work-queue', (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    const job = moocJobs.getJob(String(req.params.id));
+    if (!job || job.user_id !== userId) {
+      return res.status(404).json({
+        success: false, data: null,
+        error: { code: '404', message: '任务不存在' },
+      });
+    }
+    const queue = listExplainWorkQueue(moocJobs, job.id);
+    res.json({
+      success: true,
+      data: {
+        items: queue,
+        active: queue.filter((x) => x.status === 'queued' || x.status === 'running'),
+      },
+      error: null,
+    });
   });
 
   /** User skip one explain child (do not insert into final video). */

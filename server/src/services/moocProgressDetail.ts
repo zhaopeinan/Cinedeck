@@ -289,11 +289,59 @@ export function buildMoocProgressDetail(opts: {
       ? Math.round((avgDoneSec * remaining) / Math.max(1, Math.min(conc, Math.max(1, stats.running || 1))))
       : null;
 
+    const workQueue = (() => {
+      try {
+        // listExplainWorkQueue needs MoocJobService; fall back to config parse
+        const raw = Array.isArray((config as any).explainWorkQueue) ? (config as any).explainWorkQueue : [];
+        const legacy = Array.isArray((config as any).pendingExplainApproves)
+          ? (config as any).pendingExplainApproves
+          : [];
+        const items = raw.map((x: any) => ({
+          id: String(x.id || ''),
+          childId: String(x.childId || ''),
+          mode: x.mode || 'approve',
+          title: String(x.title || ''),
+          status: x.status || 'queued',
+          enqueuedAt: x.enqueuedAt || null,
+          error: x.error || null,
+        })).filter((x: any) => x.id && x.childId);
+        for (const childId of legacy) {
+          if (items.some((x: any) => x.childId === String(childId) && (x.status === 'queued' || x.status === 'running'))) {
+            continue;
+          }
+          items.push({
+            id: `legacy-${childId}`,
+            childId: String(childId),
+            mode: 'approve',
+            title: childRows.find((c) => c.id === String(childId))?.title || '',
+            status: 'queued',
+            enqueuedAt: null,
+            error: null,
+          });
+        }
+        // Enrich titles from children
+        for (const it of items) {
+          if (!it.title) {
+            it.title = childRows.find((c) => c.id === it.childId)?.title || it.title;
+          }
+        }
+        return {
+          items: opts.includeChildren ? items.slice(-40) : undefined,
+          active: items.filter((x: any) => x.status === 'queued' || x.status === 'running'),
+          queuedCount: items.filter((x: any) => x.status === 'queued').length,
+          runningCount: items.filter((x: any) => x.status === 'running').length,
+        };
+      } catch {
+        return { items: [], active: [], queuedCount: 0, runningCount: 0 };
+      }
+    })();
+
     explain = {
       batchId,
       batchStatus: batch?.status || null,
       batchMessage: batch?.message || null,
       stats,
+      workQueue,
       concurrency: conc,
       avgDoneSec,
       avgDoneLabel: formatDuration(avgDoneSec),
