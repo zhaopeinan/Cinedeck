@@ -535,21 +535,42 @@ async function exportAndBuildClip(opts: {
   return clip;
 }
 
+/** In-process drain lock: one approve worker per MOOC job. */
+const approveDrainLocks = new Map<string, Promise<void>>();
+
+function readPendingApproves(cfg: any): string[] {
+  const raw = cfg?.pendingExplainApproves;
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.map(String).filter(Boolean))];
+}
+
+function writeMoocConfig(
+  moocJobs: MoocJobService,
+  moocId: string,
+  patch: (cfg: any) => void,
+): any {
+  const job = moocJobs.getJob(moocId);
+  if (!job) return null;
+  const cfg: any = { ...moocJobs.parseConfig(job) };
+  patch(cfg);
+  moocJobs.updateJob(moocId, { config_json: JSON.stringify(cfg) });
+  return cfg;
+}
+
 /**
- * User-approved insert: export selected completed explain children (if needed),
- * patch explain_inserts.json, then recompose MOOC once.
+ * User-approved insert (queued):
+ * - Always accept childIds into pendingExplainApproves
+ * - Background drain exports them, patches inserts, recomposes once per drain cycle
+ * - Safe to click multiple times while another approve/recompose is running
  */
 export async function approveExplainChildrenForMooc(opts: {
   moocJobId: string;
   childIds: string[];
   userId: string;
-} & ApproveDeps): Promise<{ started: boolean; message: string; count: number }> {
+} & ApproveDeps): Promise<{ started: boolean; message: string; count: number; queued: boolean }> {
   const mooc = opts.moocJobs.getJob(opts.moocJobId);
   if (!mooc || mooc.user_id !== opts.userId) {
     throw Object.assign(new Error('MOOC 任务不存在'), { code: '404' });
-  }
-  if (mooc.status === 'running' || mooc.status === 'queued') {
-    throw Object.assign(new Error('MOOC 任务进行中，请稍后再入片'), { code: '400' });
   }
   if (!mooc.project_id) {
     throw Object.assign(new Error('缺少项目，无法入片'), { code: '400' });
@@ -572,136 +593,243 @@ export async function approveExplainChildrenForMooc(opts: {
     children.push(child);
   }
 
-  const cfg = opts.moocJobs.parseConfig(mooc);
-  const batchId = String(cfg.explainBatchId || children[0].batch_id || '');
   const project = opts.projectService.getProject(mooc.project_id) as any;
   if (!project?.file_path) {
     throw Object.assign(new Error('项目文件缺失'), { code: '400' });
   }
-  const projectDir = path.dirname(project.file_path);
-  const quality = (['720p', '1080p', '1440p'].includes(String(cfg.explainExportQuality))
-    ? cfg.explainExportQuality
-    : '1080p') as '720p' | '1080p' | '1440p';
+
+  // Enqueue (merge with any existing pending)
+  const cfgNow = writeMoocConfig(opts.moocJobs, mooc.id, (cfg) => {
+    const prev = readPendingApproves(cfg);
+    cfg.pendingExplainApproves = [...new Set([...prev, ...ids])];
+  });
+  const pendingTotal = readPendingApproves(cfgNow || {}).length;
 
   for (const child of children) {
     opts.explainJobs.mergeConfig(child.id, {
       repair: {
         moocJobId: mooc.id,
         mode: 'approve',
-        status: 'running',
+        status: 'queued',
         at: new Date().toISOString(),
       },
       userReview: null,
     });
-  }
-  try {
-    opts.moocJobs.markRepairInProgress(mooc.id, opts.userId, {
-      kind: 'explain_approve',
-      message: `正在将 ${children.length} 个知识点导出并入片`,
+    opts.explainJobs.updateJob(child.id, {
+      message: '已加入入片队列',
     });
-  } catch { /* ignore */ }
+  }
 
-  void (async () => {
-    const okClips: ExplainInsertClip[] = [];
-    const errors: string[] = [];
+  const alreadyDraining = approveDrainLocks.has(mooc.id);
+  void ensureApproveDrain(opts);
+
+  if (alreadyDraining || mooc.status === 'running' || mooc.status === 'queued') {
+    return {
+      started: true,
+      queued: true,
+      count: children.length,
+      message: `已加入入片队列（${children.length} 个），当前排队共 ${pendingTotal} 个，空闲后自动导出并重合成`,
+    };
+  }
+  return {
+    started: true,
+    queued: false,
+    count: children.length,
+    message: `已开始处理入片（本批 ${children.length} 个，队列共 ${pendingTotal} 个），完成后自动重合成`,
+  };
+}
+
+function ensureApproveDrain(opts: {
+  moocJobId: string;
+  userId: string;
+} & ApproveDeps): void {
+  const moocId = opts.moocJobId;
+  if (approveDrainLocks.has(moocId)) return;
+
+  const work = (async () => {
     try {
-      for (const child of children) {
+      // Wait out unrelated MOOC pipeline / recompose; allow our own repair banner.
+      for (let i = 0; i < 3600; i++) { // up to ~1h
+        const job = opts.moocJobs.getJob(moocId);
+        if (!job) return;
+        const cfg: any = opts.moocJobs.parseConfig(job);
+        const pending = readPendingApproves(cfg);
+        if (!pending.length) return;
+
+        const repairingApprove = cfg?.repairInProgress?.kind === 'explain_approve';
+        const busy = (job.status === 'running' || job.status === 'queued') && !repairingApprove;
+        if (!busy) break;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+
+      while (true) {
+        const job = opts.moocJobs.getJob(moocId);
+        if (!job || !job.project_id) return;
+        const cfg: any = opts.moocJobs.parseConfig(job);
+        const pending = readPendingApproves(cfg);
+        if (!pending.length) {
+          if (cfg.repairInProgress?.kind === 'explain_approve') {
+            writeMoocConfig(opts.moocJobs, moocId, (c) => { delete c.repairInProgress; });
+          }
+          return;
+        }
+
+        // Claim this batch atomically
+        const batchIds = [...pending];
+        writeMoocConfig(opts.moocJobs, moocId, (c) => {
+          c.pendingExplainApproves = readPendingApproves(c).filter((id) => !batchIds.includes(id));
+        });
+
         try {
-          const job = opts.explainJobs.getJob(child.id)!;
-          // Already in inserts? skip export but keep
-          const cur0 = readInserts(projectDir);
-          if (cur0.inserts.some((c) => c.explainJobId === job.id && fs.existsSync(c.videoPath))) {
-            opts.explainJobs.mergeConfig(job.id, {
-              repair: { moocJobId: mooc.id, mode: 'approve', status: 'done', at: new Date().toISOString() },
-              userReview: { decision: 'approved', at: new Date().toISOString() },
-            });
+          opts.moocJobs.markRepairInProgress(moocId, opts.userId, {
+            kind: 'explain_approve',
+            message: `正在将 ${batchIds.length} 个知识点导出并入片`,
+          });
+        } catch { /* may already be running */ }
+
+        const project = opts.projectService.getProject(job.project_id) as any;
+        if (!project?.file_path) {
+          console.warn('[ExplainApprove] project missing, requeue', batchIds);
+          writeMoocConfig(opts.moocJobs, moocId, (c) => {
+            c.pendingExplainApproves = [...new Set([...readPendingApproves(c), ...batchIds])];
+          });
+          return;
+        }
+        const projectDir = path.dirname(project.file_path);
+        const quality = (['720p', '1080p', '1440p'].includes(String(cfg.explainExportQuality))
+          ? cfg.explainExportQuality
+          : '1080p') as '720p' | '1080p' | '1440p';
+        const batchId = String(cfg.explainBatchId || '');
+
+        const okClips: ExplainInsertClip[] = [];
+        let failCount = 0;
+        for (const childId of batchIds) {
+          const child = opts.explainJobs.getJob(childId);
+          if (!child) {
+            failCount += 1;
             continue;
           }
-          const clip = await exportAndBuildClip({
-            job,
-            userId: opts.userId,
-            quality,
-            batchId,
-            projectDir,
-            enableAvatar: !!cfg.enableAvatar,
-            chromaSimilarity: cfg.chromaSimilarity,
-            projectId: mooc.project_id!,
-            projectService: opts.projectService,
-            videoComposer: opts.videoComposer,
-            db: opts.db,
-            explainJobs: opts.explainJobs,
-            batches: opts.batches,
-          });
-          okClips.push(clip);
-          opts.explainJobs.mergeConfig(job.id, {
-            repair: { moocJobId: mooc.id, mode: 'approve', status: 'done', at: new Date().toISOString() },
-          });
-          opts.explainJobs.updateJob(job.id, {
-            message: '用户已通过，已加入插片清单',
-          });
-        } catch (err: any) {
-          const reason = String(err?.message || err).slice(0, 300);
-          errors.push(`${child.name}: ${reason}`);
-          markExplainMediaQc(opts.explainJobs, child.id, { ok: false, reason });
           opts.explainJobs.mergeConfig(child.id, {
             repair: {
-              moocJobId: mooc.id,
+              moocJobId: moocId,
               mode: 'approve',
-              status: 'failed',
+              status: 'running',
               at: new Date().toISOString(),
-              error: reason,
             },
           });
-        }
-      }
-
-      if (okClips.length) {
-        const cur = readInserts(projectDir);
-        const keep = cur.inserts.filter((c) => !okClips.some((n) => n.explainJobId === c.explainJobId));
-        const next = [...keep, ...okClips]
-          .sort((a, b) => a.afterPage - b.afterPage || a.title.localeCompare(b.title));
-        const summary = `已插入 ${next.length} 段知识点动画（用户审核入片）`;
-        writeInserts(projectDir, next, summary);
-        opts.moocJobs.updateJob(mooc.id, {
-          config_json: JSON.stringify({
-            ...opts.moocJobs.parseConfig(opts.moocJobs.getJob(mooc.id)!),
-            enableExplainInsert: true,
-            explainInsertSummary: summary,
-            explainBatchId: batchId || cfg.explainBatchId,
-          }),
-        });
-
-        const queued = opts.moocJobs.queueRecomposeOnly(mooc.id, opts.userId, {
-          message: `已入片 ${okClips.length} 个知识点，排队重合成`
-            + (errors.length ? `（${errors.length} 个失败）` : ''),
-        });
-        if (queued) {
-          const { ensureMoocQueueAwake } = await import('../utils/wakeMoocQueue');
-          await ensureMoocQueueAwake({ reason: 'explain_user_approve' });
-        } else {
-          console.warn('[ExplainApprove] inserts updated but recompose queue failed');
-        }
-      } else if (!errors.length) {
-        // all already inserted — clear repair banner
-        try {
-          const fresh = opts.moocJobs.getJob(mooc.id);
-          if (fresh) {
-            const c = opts.moocJobs.parseConfig(fresh) as any;
-            delete c.repairInProgress;
-            opts.moocJobs.updateJob(mooc.id, { config_json: JSON.stringify(c) });
+          try {
+            const cur0 = readInserts(projectDir);
+            if (cur0.inserts.some((c) => c.explainJobId === child.id && fs.existsSync(c.videoPath))) {
+              opts.explainJobs.mergeConfig(child.id, {
+                repair: { moocJobId: moocId, mode: 'approve', status: 'done', at: new Date().toISOString() },
+                userReview: { decision: 'approved', at: new Date().toISOString() },
+              });
+              opts.explainJobs.updateJob(child.id, { message: '已在成片插片清单中' });
+              continue;
+            }
+            const clip = await exportAndBuildClip({
+              job: child,
+              userId: opts.userId,
+              quality,
+              batchId: batchId || String(child.batch_id || ''),
+              projectDir,
+              enableAvatar: !!cfg.enableAvatar,
+              chromaSimilarity: cfg.chromaSimilarity,
+              projectId: job.project_id!,
+              projectService: opts.projectService,
+              videoComposer: opts.videoComposer,
+              db: opts.db,
+              explainJobs: opts.explainJobs,
+              batches: opts.batches,
+            });
+            okClips.push(clip);
+            opts.explainJobs.mergeConfig(child.id, {
+              repair: { moocJobId: moocId, mode: 'approve', status: 'done', at: new Date().toISOString() },
+            });
+            opts.explainJobs.updateJob(child.id, {
+              message: '用户已通过，已加入插片清单',
+            });
+          } catch (err: any) {
+            failCount += 1;
+            const reason = String(err?.message || err).slice(0, 300);
+            markExplainMediaQc(opts.explainJobs, child.id, { ok: false, reason });
+            opts.explainJobs.mergeConfig(child.id, {
+              repair: {
+                moocJobId: moocId,
+                mode: 'approve',
+                status: 'failed',
+                at: new Date().toISOString(),
+                error: reason,
+              },
+            });
           }
-        } catch { /* ignore */ }
+        }
+
+        if (okClips.length) {
+          const cur = readInserts(projectDir);
+          const keep = cur.inserts.filter((c) => !okClips.some((n) => n.explainJobId === c.explainJobId));
+          const next = [...keep, ...okClips]
+            .sort((a, b) => a.afterPage - b.afterPage || a.title.localeCompare(b.title));
+          const summary = `已插入 ${next.length} 段知识点动画（用户审核入片）`;
+          writeInserts(projectDir, next, summary);
+          writeMoocConfig(opts.moocJobs, moocId, (c) => {
+            c.enableExplainInsert = true;
+            c.explainInsertSummary = summary;
+            if (batchId) c.explainBatchId = batchId;
+          });
+
+          // If more pending arrived during export, keep repair banner and continue
+          // after this recompose; otherwise queue recompose now.
+          const more = readPendingApproves(opts.moocJobs.parseConfig(opts.moocJobs.getJob(moocId)!) || {});
+          const queued = opts.moocJobs.queueRecomposeOnly(moocId, opts.userId, {
+            message: `已入片 ${okClips.length} 个知识点，排队重合成`
+              + (failCount ? `（${failCount} 个失败）` : '')
+              + (more.length ? `；另有 ${more.length} 个待入片` : ''),
+          });
+          if (queued) {
+            const { ensureMoocQueueAwake } = await import('../utils/wakeMoocQueue');
+            await ensureMoocQueueAwake({ reason: 'explain_user_approve' });
+            // Wait until recompose leaves queued/running before next approve batch
+            for (let i = 0; i < 7200; i++) {
+              const j = opts.moocJobs.getJob(moocId);
+              if (!j) break;
+              if (j.status !== 'running' && j.status !== 'queued') break;
+              const c: any = opts.moocJobs.parseConfig(j);
+              // queueRecomposeOnly clears repairInProgress; after claim it becomes running compose
+              if (c?.repairInProgress?.kind === 'explain_approve') break;
+              await new Promise((r) => setTimeout(r, 1000));
+            }
+          } else {
+            console.warn('[ExplainApprove] inserts updated but recompose queue failed');
+            writeMoocConfig(opts.moocJobs, moocId, (c) => { delete c.repairInProgress; });
+          }
+        } else {
+          writeMoocConfig(opts.moocJobs, moocId, (c) => {
+            if (c.repairInProgress?.kind === 'explain_approve') delete c.repairInProgress;
+          });
+        }
+        // loop for newly enqueued ids
       }
     } catch (err: any) {
-      console.error('[ExplainApprove] failed:', err?.message || err);
+      console.error('[ExplainApprove] drain failed:', err?.message || err);
+      try {
+        writeMoocConfig(opts.moocJobs, moocId, (c) => {
+          if (c.repairInProgress?.kind === 'explain_approve') delete c.repairInProgress;
+        });
+      } catch { /* ignore */ }
+    } finally {
+      approveDrainLocks.delete(moocId);
+      // If something was enqueued at the last moment, start another drain
+      try {
+        const j = opts.moocJobs.getJob(moocId);
+        if (j && readPendingApproves(opts.moocJobs.parseConfig(j)).length) {
+          ensureApproveDrain(opts);
+        }
+      } catch { /* ignore */ }
     }
   })();
 
-  return {
-    started: true,
-    count: children.length,
-    message: `已开始处理 ${children.length} 个知识点：导出后写入插片并重合成一次`,
-  };
+  approveDrainLocks.set(moocId, work);
 }
 
 /** Mark a completed-but-not-inserted explain child as user-skipped (do not insert). */

@@ -102,11 +102,15 @@ function childPublic(c: ExplainJobRow, extras?: {
   // failed = real media QC failure (or generation failure)
   let qcStatus: 'ok' | 'failed' | 'pending' | 'pending_review' | 'skipped' | 'repairing' | null = null;
   let qcReason: string | null = null;
-  if (repair?.status === 'running') {
+  if (repair?.status === 'running' || repair?.status === 'queued') {
     qcStatus = 'repairing';
-    qcReason = repair.mode === 'regenerate'
-      ? '正在重新生成…'
-      : (repair.mode === 'approve' ? '正在导出并入片…' : '正在重新导出…');
+    if (repair.mode === 'approve') {
+      qcReason = repair.status === 'queued' ? '已在入片队列中…' : '正在导出并入片…';
+    } else if (repair.mode === 'regenerate') {
+      qcReason = '正在重新生成…';
+    } else {
+      qcReason = '正在重新导出…';
+    }
   } else if (userSkipped && !inInserts) {
     qcStatus = 'skipped';
     qcReason = String(userReview?.reason || '用户选择不入片');
