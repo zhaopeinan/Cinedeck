@@ -93,37 +93,56 @@ function childPublic(c: ExplainJobRow, extras?: {
   const hasVideo = !!(c.video_path && fs.existsSync(c.video_path));
   const mediaQc = cfg.mediaQc && typeof cfg.mediaQc === 'object' ? cfg.mediaQc : null;
   const repair = cfg.repair && typeof cfg.repair === 'object' ? cfg.repair : null;
+  const userReview = cfg.userReview && typeof cfg.userReview === 'object' ? cfg.userReview : null;
   const inInserts = !!(extras?.insertedIds && extras.insertedIds.has(c.id));
   const explainStillGenerating = !!extras?.explainStillGenerating;
+  const userSkipped = userReview?.decision === 'skipped';
 
-  let qcStatus: 'ok' | 'failed' | 'pending' | 'repairing' | null = null;
+  // pending_review = HTML done, waiting for human approve-to-insert
+  // failed = real media QC failure (or generation failure)
+  let qcStatus: 'ok' | 'failed' | 'pending' | 'pending_review' | 'skipped' | 'repairing' | null = null;
   let qcReason: string | null = null;
   if (repair?.status === 'running') {
     qcStatus = 'repairing';
-    qcReason = repair.mode === 'regenerate' ? '正在重新生成…' : '正在重新导出…';
+    qcReason = repair.mode === 'regenerate'
+      ? '正在重新生成…'
+      : (repair.mode === 'approve' ? '正在导出并入片…' : '正在重新导出…');
+  } else if (userSkipped && !inInserts) {
+    qcStatus = 'skipped';
+    qcReason = String(userReview?.reason || '用户选择不入片');
   } else if (mediaQc && mediaQc.ok === false) {
     qcStatus = 'failed';
     qcReason = String(mediaQc.reason || '质检未通过');
-  } else if (mediaQc && mediaQc.ok === true) {
-    qcStatus = 'ok';
   } else if (c.status === 'completed' && inInserts) {
     qcStatus = 'ok';
+  } else if (mediaQc && mediaQc.ok === true && !inInserts) {
+    // Exported & QC-ok but not yet in inserts.json (rare race)
+    qcStatus = 'pending_review';
+    qcReason = '已导出，等待确认入片';
   } else if (c.status === 'completed' && hasFinal && !inInserts) {
     if (explainStillGenerating) {
-      // HTML finished early while siblings still run; export/insert happens after the batch.
       qcStatus = 'pending';
-      qcReason = 'HTML 已完成，等待整批导出插片';
+      qcReason = 'HTML 已完成，等待整批处理';
     } else {
-      qcStatus = 'failed';
-      qcReason = '未进入成片（导出失败或质检未通过）';
+      qcStatus = 'pending_review';
+      qcReason = '动画已完成，请预览后决定是否入片';
     }
   } else if (c.status === 'completed') {
     qcStatus = 'pending';
   }
 
+  const canApprove = c.status === 'completed'
+    && hasFinal
+    && !inInserts
+    && !explainStillGenerating
+    && qcStatus !== 'repairing'
+    && qcStatus !== 'skipped';
+
   const canRepair = c.status === 'failed' || c.status === 'cancelled'
     || qcStatus === 'failed'
-    || (c.status === 'completed' && hasFinal && !inInserts && !explainStillGenerating);
+    || canApprove;
+
+  const canSkip = canApprove;
 
   return {
     id: c.id,
@@ -144,6 +163,8 @@ function childPublic(c: ExplainJobRow, extras?: {
     qcStatus,
     qcReason,
     canRepair,
+    canApprove,
+    canSkip,
     repairStatus: repair?.status || null,
     startedAt,
     finishedAt,
@@ -245,6 +266,9 @@ export function buildMoocProgressDetail(opts: {
       queued: children.filter((c) => c.status === 'queued').length,
       failed: children.filter((c) => c.status === 'failed' || c.status === 'cancelled').length,
       qcFailed: childRows.filter((c) => c.qcStatus === 'failed').length,
+      pendingReview: childRows.filter((c) => c.qcStatus === 'pending_review').length,
+      skipped: childRows.filter((c) => c.qcStatus === 'skipped').length,
+      inserted: childRows.filter((c) => c.inInserts).length,
       repairing: childRows.filter((c) => c.qcStatus === 'repairing').length,
       retrying: children.filter((c) => c.status === 'queued' && /自动重试|重新生成|重新导出/.test(String(c.message || ''))).length,
     };
@@ -285,7 +309,8 @@ export function buildMoocProgressDetail(opts: {
           + (stats.running ? ` · 进行中 ${stats.running}` : '')
           + (stats.queued ? ` · 排队 ${stats.queued}` : '')
           + (stats.failed ? ` · 失败 ${stats.failed}` : '')
-          + (stats.qcFailed ? ` · 质检未通过 ${stats.qcFailed}` : '')
+          + (stats.pendingReview ? ` · 待审核 ${stats.pendingReview}` : '')
+          + (stats.qcFailed ? ` · 质检未过 ${stats.qcFailed}` : '')
           + (stats.retrying ? ` · 重试 ${stats.retrying}` : '')
           + (conc ? ` · 并发 ${conc}` : '');
       }

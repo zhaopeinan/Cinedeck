@@ -656,6 +656,20 @@ export const moocApi = {
       { mode },
       { timeout: 60000 },
     ),
+  /** User approve selected explain children → export → insert → single recompose */
+  approveExplainChildren: (moocId: string, childIds: string[]) =>
+    apiClient.post<ApiResponse<{ started: boolean; count: number; message: string }>>(
+      `/mooc/jobs/${moocId}/explain/approve`,
+      { childIds },
+      { timeout: 60000 },
+    ),
+  /** User skip one explain child (do not insert) */
+  skipExplainChild: (moocId: string, childId: string) =>
+    apiClient.post<ApiResponse<{ ok: boolean; message: string }>>(
+      `/mooc/jobs/${moocId}/explain/${childId}/skip`,
+      {},
+      { timeout: 30000 },
+    ),
   getPptDownloadUrl: (id: string) => withToken(`/api/v1/mooc/jobs/${id}/ppt`),
   /** 下载用户提交的原始 PPTX */
   downloadPpt: async (id: string, filenameHint?: string) => {

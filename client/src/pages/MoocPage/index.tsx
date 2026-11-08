@@ -5,7 +5,7 @@ import {
   Select, Slider, Space, Spin, Steps, Switch, Table, Tag, Tooltip, Typography, Upload, message,
 } from 'antd';
 import {
-  CloudUploadOutlined, DeleteOutlined, DownloadOutlined, ExclamationCircleOutlined, ExpandOutlined,
+  CheckOutlined, CloudUploadOutlined, DeleteOutlined, DownloadOutlined, ExclamationCircleOutlined, ExpandOutlined,
   EyeOutlined, PlayCircleOutlined, PlusOutlined, ThunderboltOutlined, UserOutlined,
   ProfileOutlined, ReloadOutlined, RocketOutlined, StopOutlined,
 } from '@ant-design/icons';
@@ -456,33 +456,67 @@ const MoocPage: React.FC = () => {
     }
   }, [loadJobDetail, refreshJobs]);
 
-  const retryExplainChild = useCallback(async (childId: string, title?: string) => {
-    const child = (detailJob?.explain?.children || []).find((c: any) => c.id === childId);
-    if (child?.canRepair || child?.qcStatus === 'failed') {
-      const mode = (child.status === 'completed' && child.hasFinal) ? 'reexport' : 'regenerate';
-      await repairExplainChild(child, mode);
-      return;
-    }
-    setRetryingExplainId(childId);
+  const approveExplainChildren = useCallback(async (childIds: string[]) => {
+    const moocId = detailIdRef.current;
+    if (!moocId || !childIds.length) return;
+    setRetryingExplainId(childIds.length === 1 ? childIds[0] : '__all__');
     try {
-      await explainApi.retryJob(childId);
-      message.success(`已重新排队：${title || '知识点'}`);
-      const openId = detailIdRef.current;
-      if (openId) await loadJobDetail(openId, { silent: true });
+      const res = await moocApi.approveExplainChildren(moocId, childIds);
+      message.success(res.data.data?.message || `已开始入片 ${childIds.length} 个知识点`);
+      await loadJobDetail(moocId, { silent: true });
       await refreshJobs();
     } catch (e: any) {
-      message.error(e.response?.data?.error?.message || '重试失败');
+      message.error(e.response?.data?.error?.message || '入片失败');
     } finally {
       setRetryingExplainId(null);
     }
-  }, [detailJob, loadJobDetail, refreshJobs, repairExplainChild]);
+  }, [loadJobDetail, refreshJobs]);
+
+  const skipExplainChild = useCallback(async (child: any) => {
+    const moocId = detailIdRef.current;
+    if (!moocId) return;
+    Modal.confirm({
+      title: '不入片？',
+      content: `确认将「${child.title || '该知识点'}」标记为不入片？成片将跳过这段动画。`,
+      okText: '确认跳过',
+      cancelText: '取消',
+      onOk: async () => {
+        setRetryingExplainId(child.id);
+        try {
+          const res = await moocApi.skipExplainChild(moocId, child.id);
+          message.success(res.data.data?.message || '已标记为不入片');
+          await loadJobDetail(moocId, { silent: true });
+          await refreshJobs();
+        } catch (e: any) {
+          message.error(e.response?.data?.error?.message || '操作失败');
+        } finally {
+          setRetryingExplainId(null);
+        }
+      },
+    });
+  }, [loadJobDetail, refreshJobs]);
+
+  const approveAllPendingExplain = useCallback(async () => {
+    const pending = (detailJob?.explain?.children || []).filter((c: any) => c.canApprove);
+    if (!pending.length) {
+      message.info('没有待审核可入片的知识点');
+      return;
+    }
+    Modal.confirm({
+      title: '批量通过并入片',
+      content: `将把 ${pending.length} 个待审核知识点导出后一并写入成片，并只重合成一次。`,
+      okText: '通过并入片',
+      cancelText: '取消',
+      onOk: () => approveExplainChildren(pending.map((c: any) => c.id)),
+    });
+  }, [detailJob, approveExplainChildren]);
 
   const retryAllFailedExplain = useCallback(async () => {
     const failed = (detailJob?.explain?.children || []).filter(
-      (c: any) => c.status === 'failed' || c.status === 'cancelled' || c.canRepair || c.qcStatus === 'failed',
+      (c: any) => c.status === 'failed' || c.status === 'cancelled' || c.qcStatus === 'failed',
     );
     if (!failed.length) {
-      message.info('没有失败或质检未通过的知识点');
+      message.info('没有生成失败或质检未过的知识点');
       return;
     }
     setRetryingExplainId('__all__');
@@ -497,7 +531,7 @@ const MoocPage: React.FC = () => {
           // continue others
         }
       }
-      message.success(`已开始修复 ${ok}/${failed.length} 个知识点（通过后自动补进成片）`);
+      message.success(`已开始修复 ${ok}/${failed.length} 个失败知识点`);
       const openId = detailIdRef.current;
       if (openId) await loadJobDetail(openId, { silent: true });
       await refreshJobs();
@@ -1802,21 +1836,43 @@ const MoocPage: React.FC = () => {
               <div>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 8 }}>
                   <Title level={5} style={{ margin: 0 }}>知识点讲解</Title>
-                  {!!((detailJob.explain.stats?.failed || 0) + (detailJob.explain.stats?.qcFailed || 0)) && (
-                    <Button
-                      size="small"
-                      icon={<ReloadOutlined />}
-                      loading={retryingExplainId === '__all__'}
-                      onClick={() => void retryAllFailedExplain()}
-                    >
-                      修复全部未通过
-                    </Button>
-                  )}
+                  <Space size={8}>
+                    {!!detailJob.explain.stats?.pendingReview && (
+                      <Button
+                        size="small"
+                        type="primary"
+                        icon={<CheckOutlined />}
+                        loading={retryingExplainId === '__all__'}
+                        onClick={() => void approveAllPendingExplain()}
+                      >
+                        批量通过并入片
+                      </Button>
+                    )}
+                    {!!((detailJob.explain.stats?.failed || 0) + (detailJob.explain.stats?.qcFailed || 0)) && (
+                      <Button
+                        size="small"
+                        icon={<ReloadOutlined />}
+                        loading={retryingExplainId === '__all__'}
+                        onClick={() => void retryAllFailedExplain()}
+                      >
+                        修复失败项
+                      </Button>
+                    )}
+                  </Space>
                 </div>
                 <Space wrap size={[8, 8]} style={{ marginBottom: 12 }}>
                   <Tag>
                     完成 {detailJob.explain.stats?.completed || 0}/{detailJob.explain.stats?.total || 0}
                   </Tag>
+                  {!!detailJob.explain.stats?.inserted && (
+                    <Tag color="success">已入片 {detailJob.explain.stats.inserted}</Tag>
+                  )}
+                  {!!detailJob.explain.stats?.pendingReview && (
+                    <Tag color="blue">待审核 {detailJob.explain.stats.pendingReview}</Tag>
+                  )}
+                  {!!detailJob.explain.stats?.skipped && (
+                    <Tag>已跳过 {detailJob.explain.stats.skipped}</Tag>
+                  )}
                   {!!detailJob.explain.stats?.running && (
                     <Tag color="processing">进行中 {detailJob.explain.stats.running}</Tag>
                   )}
@@ -1827,10 +1883,10 @@ const MoocPage: React.FC = () => {
                     <Tag color="error">失败 {detailJob.explain.stats.failed}</Tag>
                   )}
                   {!!detailJob.explain.stats?.qcFailed && (
-                    <Tag color="warning">未通过 {detailJob.explain.stats.qcFailed}</Tag>
+                    <Tag color="warning">质检未过 {detailJob.explain.stats.qcFailed}</Tag>
                   )}
                   {!!detailJob.explain.stats?.repairing && (
-                    <Tag color="processing">修复中 {detailJob.explain.stats.repairing}</Tag>
+                    <Tag color="processing">处理中 {detailJob.explain.stats.repairing}</Tag>
                   )}
                   {!!detailJob.explain.stats?.retrying && (
                     <Tag color="warning">重试 {detailJob.explain.stats.retrying}</Tag>
@@ -1873,10 +1929,16 @@ const MoocPage: React.FC = () => {
                       render: (s: string, row: any) => {
                         const tip = row.qcReason || row.error || row.message || undefined;
                         if (row.qcStatus === 'repairing') {
-                          return <Tooltip title={tip}><Tag color="processing" style={{ margin: 0 }}>修复中</Tag></Tooltip>;
+                          return <Tooltip title={tip}><Tag color="processing" style={{ margin: 0 }}>处理中</Tag></Tooltip>;
+                        }
+                        if (row.qcStatus === 'pending_review') {
+                          return <Tooltip title={tip}><Tag color="blue" style={{ margin: 0 }}>待审核</Tag></Tooltip>;
+                        }
+                        if (row.qcStatus === 'skipped') {
+                          return <Tooltip title={tip}><Tag style={{ margin: 0 }}>不入片</Tag></Tooltip>;
                         }
                         if (row.qcStatus === 'failed') {
-                          return <Tooltip title={tip}><Tag color="warning" style={{ margin: 0 }}>未通过</Tag></Tooltip>;
+                          return <Tooltip title={tip}><Tag color="warning" style={{ margin: 0 }}>质检未过</Tag></Tooltip>;
                         }
                         return (
                           <Tooltip title={tip}>
@@ -1919,7 +1981,7 @@ const MoocPage: React.FC = () => {
                     {
                       title: '',
                       key: 'actions',
-                      width: 148,
+                      width: 220,
                       render: (_: any, row: any) => (
                         <Space size={0} wrap>
                           {(row.hasFinal || row.hasSample) && (
@@ -1938,7 +2000,32 @@ const MoocPage: React.FC = () => {
                               预览
                             </Button>
                           )}
-                          {row.canRepair && row.qcStatus !== 'repairing' && (
+                          {row.canApprove && row.qcStatus !== 'repairing' && (
+                            <Button
+                              type="link"
+                              size="small"
+                              icon={<CheckOutlined />}
+                              style={{ padding: '0 4px' }}
+                              loading={retryingExplainId === row.id}
+                              disabled={retryingExplainId === '__all__'}
+                              onClick={() => void approveExplainChildren([row.id])}
+                            >
+                              通过并入片
+                            </Button>
+                          )}
+                          {row.canSkip && row.qcStatus !== 'repairing' && (
+                            <Button
+                              type="link"
+                              size="small"
+                              style={{ padding: '0 4px' }}
+                              disabled={retryingExplainId === '__all__' || retryingExplainId === row.id}
+                              onClick={() => void skipExplainChild(row)}
+                            >
+                              不入片
+                            </Button>
+                          )}
+                          {(row.qcStatus === 'failed' || row.status === 'failed' || row.status === 'cancelled')
+                            && row.qcStatus !== 'repairing' && (
                             <>
                               {row.status === 'completed' && row.hasFinal && (
                                 <Button
@@ -1956,7 +2043,7 @@ const MoocPage: React.FC = () => {
                               <Button
                                 type="link"
                                 size="small"
-                                danger={row.qcStatus === 'failed' || row.status === 'failed'}
+                                danger
                                 icon={<ReloadOutlined />}
                                 style={{ padding: '0 4px' }}
                                 loading={retryingExplainId === row.id}

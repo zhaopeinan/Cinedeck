@@ -416,3 +416,320 @@ export async function repairExplainChildForMooc(opts: {
       : '已开始重新导出该知识点，通过质检后会自动补进成片并重合成',
   };
 }
+
+type ApproveDeps = {
+  moocJobs: MoocJobService;
+  explainJobs: ExplainJobService;
+  batches: ExplainBatchService;
+  projectService: ProjectService;
+  videoComposer: VideoComposerService;
+  db: import('better-sqlite3').Database;
+};
+
+async function exportAndBuildClip(opts: {
+  job: ExplainJobRow;
+  userId: string;
+  quality: '720p' | '1080p' | '1440p';
+  batchId: string;
+  projectDir: string;
+  enableAvatar: boolean;
+  chromaSimilarity?: number;
+  projectId: string;
+  projectService: ProjectService;
+  videoComposer: VideoComposerService;
+  db: import('better-sqlite3').Database;
+  explainJobs: ExplainJobService;
+  batches: ExplainBatchService;
+}): Promise<ExplainInsertClip> {
+  let job = opts.job;
+  if (!job.final_path || !fs.existsSync(job.final_path)) {
+    throw new Error('缺少全片 HTML，请先重生该知识点');
+  }
+  const finalDir = path.dirname(job.final_path);
+  const outPath = path.join(finalDir, `export_${opts.quality}.mp4`);
+  const audioPath = path.join(finalDir, 'narration.wav');
+
+  // Reuse existing export if present and QC-ok
+  let videoPath: string | null = null;
+  if (job.video_path && fs.existsSync(job.video_path)) {
+    videoPath = job.video_path;
+  } else if (fs.existsSync(outPath)) {
+    videoPath = outPath;
+  }
+
+  if (videoPath) {
+    try {
+      if (fs.existsSync(audioPath)) {
+        await assertSpeechAudioOk({ filePath: audioPath, minDurationSec: 0.8 });
+      }
+      await assertExplainAnimationMp4Ok({ filePath: videoPath });
+    } catch {
+      try { if (fs.existsSync(videoPath)) fs.unlinkSync(videoPath); } catch { /* ignore */ }
+      videoPath = null;
+      opts.explainJobs.updateJob(job.id, { video_path: null });
+    }
+  }
+
+  if (!videoPath) {
+    for (const q of ['720p', '1080p', '1440p']) {
+      const f = path.join(finalDir, `export_${q}.mp4`);
+      try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch { /* ignore */ }
+    }
+    const exportJob = await prepareAndEnqueueExplainExport({
+      explainJobs: opts.explainJobs,
+      explainJobId: job.id,
+      userId: opts.userId,
+      quality: opts.quality,
+    });
+    await waitUntil(() => {
+      const ej = getExplainExportJob(exportJob.id);
+      return !!ej && (ej.status === 'completed' || ej.status === 'failed' || ej.status === 'cancelled');
+    }, { timeoutMs: 2 * 60 * 60 * 1000, intervalMs: 2500 });
+
+    const ej = getExplainExportJob(exportJob.id);
+    videoPath = (ej?.status === 'completed' && fs.existsSync(outPath))
+      ? outPath
+      : (opts.explainJobs.getJob(job.id)?.video_path || null);
+    if (!videoPath || !fs.existsSync(videoPath)) {
+      throw new Error(ej?.error || ej?.message || '导出失败');
+    }
+    if (fs.existsSync(audioPath)) {
+      await assertSpeechAudioOk({ filePath: audioPath, minDurationSec: 0.8 });
+    }
+    await assertExplainAnimationMp4Ok({ filePath: videoPath });
+  }
+
+  markExplainMediaQc(opts.explainJobs, job.id, { ok: true, reason: 'ok', path: videoPath });
+  opts.explainJobs.updateJob(job.id, { video_path: videoPath });
+  opts.explainJobs.mergeConfig(job.id, {
+    userReview: { decision: 'approved', at: new Date().toISOString() },
+  });
+
+  let clip: ExplainInsertClip = {
+    afterPage: resolveAfterPage(opts.batches, opts.batchId, job),
+    videoPath,
+    title: job.name,
+    explainJobId: job.id,
+    audioPath: fs.existsSync(audioPath) ? audioPath : null,
+  };
+
+  if (opts.enableAvatar) {
+    try {
+      const av = await attachAvatarsToExplainInserts({
+        projectId: opts.projectId,
+        userId: opts.userId,
+        projectDir: opts.projectDir,
+        inserts: [clip],
+        projectService: opts.projectService,
+        videoComposer: opts.videoComposer,
+        db: opts.db,
+        chromaSimilarity: opts.chromaSimilarity ?? 0.28,
+        isCancelled: () => false,
+        force: true,
+      });
+      if (av.inserts?.[0]) clip = av.inserts[0];
+    } catch (err: any) {
+      console.warn('[ExplainApprove] avatar overlay soft-fail:', err?.message || err);
+    }
+  }
+  return clip;
+}
+
+/**
+ * User-approved insert: export selected completed explain children (if needed),
+ * patch explain_inserts.json, then recompose MOOC once.
+ */
+export async function approveExplainChildrenForMooc(opts: {
+  moocJobId: string;
+  childIds: string[];
+  userId: string;
+} & ApproveDeps): Promise<{ started: boolean; message: string; count: number }> {
+  const mooc = opts.moocJobs.getJob(opts.moocJobId);
+  if (!mooc || mooc.user_id !== opts.userId) {
+    throw Object.assign(new Error('MOOC 任务不存在'), { code: '404' });
+  }
+  if (mooc.status === 'running' || mooc.status === 'queued') {
+    throw Object.assign(new Error('MOOC 任务进行中，请稍后再入片'), { code: '400' });
+  }
+  if (!mooc.project_id) {
+    throw Object.assign(new Error('缺少项目，无法入片'), { code: '400' });
+  }
+
+  const ids = [...new Set((opts.childIds || []).map(String).filter(Boolean))];
+  if (!ids.length) {
+    throw Object.assign(new Error('请选择要入片的知识点'), { code: '400' });
+  }
+
+  const children: ExplainJobRow[] = [];
+  for (const id of ids) {
+    const child = opts.explainJobs.getOwned(id, opts.userId);
+    if (!child) {
+      throw Object.assign(new Error(`知识点不存在：${id.slice(0, 8)}`), { code: '404' });
+    }
+    if (child.status !== 'completed' || !child.final_path || !fs.existsSync(child.final_path)) {
+      throw Object.assign(new Error(`「${child.name}」尚未完成动画，无法入片`), { code: '400' });
+    }
+    children.push(child);
+  }
+
+  const cfg = opts.moocJobs.parseConfig(mooc);
+  const batchId = String(cfg.explainBatchId || children[0].batch_id || '');
+  const project = opts.projectService.getProject(mooc.project_id) as any;
+  if (!project?.file_path) {
+    throw Object.assign(new Error('项目文件缺失'), { code: '400' });
+  }
+  const projectDir = path.dirname(project.file_path);
+  const quality = (['720p', '1080p', '1440p'].includes(String(cfg.explainExportQuality))
+    ? cfg.explainExportQuality
+    : '1080p') as '720p' | '1080p' | '1440p';
+
+  for (const child of children) {
+    opts.explainJobs.mergeConfig(child.id, {
+      repair: {
+        moocJobId: mooc.id,
+        mode: 'approve',
+        status: 'running',
+        at: new Date().toISOString(),
+      },
+      userReview: null,
+    });
+  }
+  try {
+    opts.moocJobs.markRepairInProgress(mooc.id, opts.userId, {
+      kind: 'explain_approve',
+      message: `正在将 ${children.length} 个知识点导出并入片`,
+    });
+  } catch { /* ignore */ }
+
+  void (async () => {
+    const okClips: ExplainInsertClip[] = [];
+    const errors: string[] = [];
+    try {
+      for (const child of children) {
+        try {
+          const job = opts.explainJobs.getJob(child.id)!;
+          // Already in inserts? skip export but keep
+          const cur0 = readInserts(projectDir);
+          if (cur0.inserts.some((c) => c.explainJobId === job.id && fs.existsSync(c.videoPath))) {
+            opts.explainJobs.mergeConfig(job.id, {
+              repair: { moocJobId: mooc.id, mode: 'approve', status: 'done', at: new Date().toISOString() },
+              userReview: { decision: 'approved', at: new Date().toISOString() },
+            });
+            continue;
+          }
+          const clip = await exportAndBuildClip({
+            job,
+            userId: opts.userId,
+            quality,
+            batchId,
+            projectDir,
+            enableAvatar: !!cfg.enableAvatar,
+            chromaSimilarity: cfg.chromaSimilarity,
+            projectId: mooc.project_id!,
+            projectService: opts.projectService,
+            videoComposer: opts.videoComposer,
+            db: opts.db,
+            explainJobs: opts.explainJobs,
+            batches: opts.batches,
+          });
+          okClips.push(clip);
+          opts.explainJobs.mergeConfig(job.id, {
+            repair: { moocJobId: mooc.id, mode: 'approve', status: 'done', at: new Date().toISOString() },
+          });
+          opts.explainJobs.updateJob(job.id, {
+            message: '用户已通过，已加入插片清单',
+          });
+        } catch (err: any) {
+          const reason = String(err?.message || err).slice(0, 300);
+          errors.push(`${child.name}: ${reason}`);
+          markExplainMediaQc(opts.explainJobs, child.id, { ok: false, reason });
+          opts.explainJobs.mergeConfig(child.id, {
+            repair: {
+              moocJobId: mooc.id,
+              mode: 'approve',
+              status: 'failed',
+              at: new Date().toISOString(),
+              error: reason,
+            },
+          });
+        }
+      }
+
+      if (okClips.length) {
+        const cur = readInserts(projectDir);
+        const keep = cur.inserts.filter((c) => !okClips.some((n) => n.explainJobId === c.explainJobId));
+        const next = [...keep, ...okClips]
+          .sort((a, b) => a.afterPage - b.afterPage || a.title.localeCompare(b.title));
+        const summary = `已插入 ${next.length} 段知识点动画（用户审核入片）`;
+        writeInserts(projectDir, next, summary);
+        opts.moocJobs.updateJob(mooc.id, {
+          config_json: JSON.stringify({
+            ...opts.moocJobs.parseConfig(opts.moocJobs.getJob(mooc.id)!),
+            enableExplainInsert: true,
+            explainInsertSummary: summary,
+            explainBatchId: batchId || cfg.explainBatchId,
+          }),
+        });
+
+        const queued = opts.moocJobs.queueRecomposeOnly(mooc.id, opts.userId, {
+          message: `已入片 ${okClips.length} 个知识点，排队重合成`
+            + (errors.length ? `（${errors.length} 个失败）` : ''),
+        });
+        if (queued) {
+          const { ensureMoocQueueAwake } = await import('../utils/wakeMoocQueue');
+          await ensureMoocQueueAwake({ reason: 'explain_user_approve' });
+        } else {
+          console.warn('[ExplainApprove] inserts updated but recompose queue failed');
+        }
+      } else if (!errors.length) {
+        // all already inserted — clear repair banner
+        try {
+          const fresh = opts.moocJobs.getJob(mooc.id);
+          if (fresh) {
+            const c = opts.moocJobs.parseConfig(fresh) as any;
+            delete c.repairInProgress;
+            opts.moocJobs.updateJob(mooc.id, { config_json: JSON.stringify(c) });
+          }
+        } catch { /* ignore */ }
+      }
+    } catch (err: any) {
+      console.error('[ExplainApprove] failed:', err?.message || err);
+    }
+  })();
+
+  return {
+    started: true,
+    count: children.length,
+    message: `已开始处理 ${children.length} 个知识点：导出后写入插片并重合成一次`,
+  };
+}
+
+/** Mark a completed-but-not-inserted explain child as user-skipped (do not insert). */
+export function skipExplainChildForMooc(opts: {
+  moocJobId: string;
+  childId: string;
+  userId: string;
+  moocJobs: MoocJobService;
+  explainJobs: ExplainJobService;
+}): { ok: boolean; message: string } {
+  const mooc = opts.moocJobs.getJob(opts.moocJobId);
+  if (!mooc || mooc.user_id !== opts.userId) {
+    throw Object.assign(new Error('MOOC 任务不存在'), { code: '404' });
+  }
+  const child = opts.explainJobs.getOwned(opts.childId, opts.userId);
+  if (!child) {
+    throw Object.assign(new Error('知识点任务不存在'), { code: '404' });
+  }
+  opts.explainJobs.mergeConfig(child.id, {
+    userReview: {
+      decision: 'skipped',
+      reason: '用户选择不入片',
+      at: new Date().toISOString(),
+    },
+    repair: null,
+  });
+  opts.explainJobs.updateJob(child.id, {
+    message: '用户选择不入片',
+  });
+  return { ok: true, message: '已标记为不入片' };
+}

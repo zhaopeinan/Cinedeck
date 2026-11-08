@@ -13,7 +13,11 @@ import type { ExplainBatchService } from '../services/explainBatchService';
 import type { ExplainJobService } from '../services/explainJobService';
 import type { VideoComposerService } from '../services/videoComposer';
 import type Database from 'better-sqlite3';
-import { repairExplainChildForMooc } from '../services/explainInsertRepair';
+import {
+  repairExplainChildForMooc,
+  approveExplainChildrenForMooc,
+  skipExplainChildForMooc,
+} from '../services/explainInsertRepair';
 
 const PREVIEW_DIR = path.join(getMoocUploadDir(), 'previews');
 fs.mkdirSync(PREVIEW_DIR, { recursive: true });
@@ -787,7 +791,7 @@ export function createMoocRouter(
   });
 
   /**
-   * Repair one explain child (QC-failed / export-skipped / generation-failed):
+   * Repair one explain child (QC-failed / generation-failed):
    * mode=reexport | regenerate → QC → patch inserts → recompose MOOC.
    */
   router.post('/jobs/:id/explain/:childId/repair', async (req: Request, res: Response) => {
@@ -819,6 +823,70 @@ export function createMoocRouter(
       res.status(status).json({
         success: false, data: null,
         error: { code: String(code), message: err?.message || '修复失败' },
+      });
+    }
+  });
+
+  /**
+   * User approve selected explain children → export → insert → single recompose.
+   * Body: { childIds: string[] }
+   */
+  router.post('/jobs/:id/explain/approve', async (req: Request, res: Response) => {
+    if (!explainJobs || !explainBatches || !videoComposer || !db) {
+      return res.status(503).json({
+        success: false, data: null,
+        error: { code: '503', message: '讲解入片服务未就绪' },
+      });
+    }
+    const childIds = Array.isArray(req.body?.childIds)
+      ? req.body.childIds.map(String)
+      : (req.body?.childId ? [String(req.body.childId)] : []);
+    try {
+      const result = await approveExplainChildrenForMooc({
+        moocJobId: String(req.params.id),
+        childIds,
+        userId: getUserId(req),
+        moocJobs,
+        explainJobs,
+        batches: explainBatches,
+        projectService,
+        videoComposer,
+        db,
+      });
+      res.json({ success: true, data: result, error: null });
+    } catch (err: any) {
+      const code = err?.code === '404' || err?.code === '400' ? err.code : '500';
+      const status = code === '404' ? 404 : code === '400' ? 400 : 500;
+      res.status(status).json({
+        success: false, data: null,
+        error: { code: String(code), message: err?.message || '入片失败' },
+      });
+    }
+  });
+
+  /** User skip one explain child (do not insert into final video). */
+  router.post('/jobs/:id/explain/:childId/skip', (req: Request, res: Response) => {
+    if (!explainJobs) {
+      return res.status(503).json({
+        success: false, data: null,
+        error: { code: '503', message: '讲解服务未就绪' },
+      });
+    }
+    try {
+      const result = skipExplainChildForMooc({
+        moocJobId: String(req.params.id),
+        childId: String(req.params.childId),
+        userId: getUserId(req),
+        moocJobs,
+        explainJobs,
+      });
+      res.json({ success: true, data: result, error: null });
+    } catch (err: any) {
+      const code = err?.code === '404' || err?.code === '400' ? err.code : '500';
+      const status = code === '404' ? 404 : code === '400' ? 400 : 500;
+      res.status(status).json({
+        success: false, data: null,
+        error: { code: String(code), message: err?.message || '操作失败' },
       });
     }
   });
