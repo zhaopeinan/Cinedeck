@@ -50,6 +50,34 @@ export function noteVoiceboxTaskEnded(taskId: string) {
   ttsHolds.delete(taskId);
 }
 
+/** Drop holds that outlive the Voicebox task (restart/cancel without poll). */
+const TTS_HOLD_MAX_AGE_MS = 25 * 60 * 1000;
+
+export function clearStaleTtsHolds(maxAgeMs = TTS_HOLD_MAX_AGE_MS): string[] {
+  const now = Date.now();
+  const dropped: string[] = [];
+  for (const [id, h] of ttsHolds) {
+    if (now - h.since >= maxAgeMs) {
+      ttsHolds.delete(id);
+      dropped.push(id);
+    }
+  }
+  if (dropped.length) {
+    console.warn(`[VoiceboxGPU] dropped stale TTS holds: ${dropped.join(',')}`);
+  }
+  return dropped;
+}
+
+/** Force-clear all TTS holds (ops recovery after Voicebox restart). */
+export function clearAllTtsHolds(reason = 'manual'): string[] {
+  const ids = [...ttsHolds.keys()];
+  ttsHolds.clear();
+  if (ids.length) {
+    console.warn(`[VoiceboxGPU] cleared ${ids.length} TTS hold(s) (${reason}): ${ids.join(',')}`);
+  }
+  return ids;
+}
+
 async function waitDuixClear(timeoutMs = 120_000): Promise<void> {
   if (!duixBusyProbe) return;
   const start = Date.now();
@@ -64,7 +92,13 @@ async function waitDuixClear(timeoutMs = 120_000): Promise<void> {
 async function waitTtsHoldsClear(timeoutMs = 20 * 60 * 1000): Promise<void> {
   const start = Date.now();
   while (ttsHolds.size > 0) {
+    clearStaleTtsHolds();
+    if (ttsHolds.size === 0) return;
     if (Date.now() - start > timeoutMs) {
+      // Last resort: drop leftovers so one cancelled Voicebox job cannot block
+      // the entire explain/MOOC pipeline for hours of retries.
+      const leftover = clearAllTtsHolds('wait-timeout');
+      if (leftover.length) return;
       const ids = [...ttsHolds.keys()].join(',');
       throw new Error(`Voicebox TTS 任务长时间未结束（${ids}），请稍后重试`);
     }

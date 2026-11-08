@@ -476,6 +476,7 @@ export class VoiceboxAdapter {
       };
     } catch (err: any) {
       if (err.response?.status === 404) {
+        noteVoiceboxTaskEnded(taskId);
         return { id: taskId, status: 'failed', error: 'Generation not found' };
       }
       throw err;
@@ -483,7 +484,11 @@ export class VoiceboxAdapter {
   }
 
   async cancelTask(taskId: string): Promise<void> {
-    await axios.post(`${this.baseUrl}/generate/${taskId}/cancel`, {}, { timeout: 10000 });
+    try {
+      await axios.post(`${this.baseUrl}/generate/${taskId}/cancel`, {}, { timeout: 10000 });
+    } finally {
+      noteVoiceboxTaskEnded(taskId);
+    }
   }
 
   /**
