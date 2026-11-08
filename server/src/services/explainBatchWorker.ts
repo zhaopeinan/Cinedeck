@@ -43,6 +43,122 @@ function extractJsonBlock(raw: string): any {
   }
 }
 
+function tokenizeForPageMatch(s: string): string[] {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^\u4e00-\u9fa5a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length >= 2);
+}
+
+/** Parse "第N页：…" outline lines into a page→text map. */
+function parsePageOutlineMap(outline: string): Map<number, string> {
+  const map = new Map<number, string>();
+  const re = /第\s*(\d+)\s*页\s*[:：]\s*([^\n]*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(outline))) {
+    const page = Number(m[1]);
+    if (!Number.isFinite(page) || page < 1) continue;
+    map.set(page, `${map.get(page) || ''} ${m[2] || ''}`.trim());
+  }
+  return map;
+}
+
+function scoreTextAgainstTokens(text: string, tokens: string[]): number {
+  if (!text || !tokens.length) return 0;
+  let score = 0;
+  for (const t of tokens) {
+    if (text.includes(t)) score += t.length >= 3 ? 2 : 1;
+  }
+  return score;
+}
+
+/**
+ * When LLM page clusters drift from the actual PPT outline, snap each point to the
+ * contiguous page range that best matches its title/summary. Keeps insertAfterPage = pageEnd.
+ */
+export function realignPointsToPageOutline(
+  points: ExplainKnowledgePoint[],
+  outline: string,
+  totalPages: number,
+): ExplainKnowledgePoint[] {
+  const pageMap = parsePageOutlineMap(outline);
+  if (!pageMap.size || !points.length) return points;
+  const pages = [...pageMap.keys()].sort((a, b) => a - b);
+  const claimed = new Set<number>();
+
+  const ranked = points.map((p, idx) => {
+    const tokens = tokenizeForPageMatch(`${p.title} ${p.coreQuestion || ''} ${p.summary || ''}`);
+    const perPage = pages.map((page) => ({
+      page,
+      score: scoreTextAgainstTokens(pageMap.get(page) || '', tokens),
+    }));
+    const best = Math.max(0, ...perPage.map((x) => x.score));
+    const claimedRangeScore = (() => {
+      const lo = Number(p.pageStart) || 0;
+      const hi = Number(p.pageEnd) || lo;
+      if (!(lo >= 1 && hi >= lo)) return 0;
+      let s = 0;
+      for (let page = lo; page <= hi; page++) s += scoreTextAgainstTokens(pageMap.get(page) || '', tokens);
+      return s;
+    })();
+    return { p, idx, tokens, perPage, best, claimedRangeScore };
+  }).sort((a, b) => b.best - a.best || a.idx - b.idx);
+
+  const next = points.map((p) => ({ ...p }));
+  for (const item of ranked) {
+    if (item.best < 3) continue; // too weak to override LLM
+    // LLM range already decent relative to best single page — keep
+    if (item.claimedRangeScore >= item.best && item.claimedRangeScore >= 3) continue;
+
+    const candidates = item.perPage
+      .filter((x) => x.score > 0 && !claimed.has(x.page))
+      .sort((a, b) => b.score - a.score || a.page - b.page);
+    if (!candidates.length) continue;
+
+    // Expand around the best page while neighbors stay relevant and free
+    const seed = candidates[0].page;
+    let lo = seed;
+    let hi = seed;
+    const minKeep = Math.max(1, Math.floor(item.best * 0.35));
+    while (lo > 1 && !claimed.has(lo - 1)) {
+      const sc = scoreTextAgainstTokens(pageMap.get(lo - 1) || '', item.tokens);
+      if (sc < minKeep) break;
+      lo -= 1;
+    }
+    while (hi < (totalPages || hi) && !claimed.has(hi + 1)) {
+      const sc = scoreTextAgainstTokens(pageMap.get(hi + 1) || '', item.tokens);
+      if (sc < minKeep) break;
+      hi += 1;
+    }
+    for (let page = lo; page <= hi; page++) claimed.add(page);
+    const sourcePages = lo === hi ? `第 ${lo} 页` : `第 ${lo}–${hi} 页`;
+    next[item.idx] = {
+      ...next[item.idx],
+      pageStart: lo,
+      pageEnd: hi,
+      insertAfterPage: hi,
+      sourcePages,
+    };
+  }
+
+  // Ensure insertAfterPage stays consistent even when we kept LLM ranges
+  return next.map((p) => {
+    const pageEnd = Number(p.pageEnd) || Number(p.pageStart) || 0;
+    const insertAfterPage = Number.isFinite(Number(p.insertAfterPage))
+      ? Math.max(0, Math.min(Number(p.insertAfterPage), totalPages || Number(p.insertAfterPage)))
+      : pageEnd;
+    return {
+      ...p,
+      insertAfterPage: insertAfterPage || pageEnd,
+      sourcePages: p.sourcePages
+        || (p.pageStart === p.pageEnd
+          ? `第 ${p.pageStart} 页`
+          : `第 ${p.pageStart}–${p.pageEnd} 页`),
+    };
+  });
+}
+
 export function initExplainBatchPipeline(d: ExplainBatchPipelineDeps) {
   deps = d;
   d.batches.recoverStaleAnalyzing();
@@ -161,9 +277,10 @@ ${outlineForPrompt}
 硬性要求：
 - 通常输出 2–8 个独立动画单元；课件内容足够时禁止只返回 1 个（除非全文只有一个主题）
 - pageStart/pageEnd 为闭区间页码，必须来自真实页；同一页可只属于一个主单元
-- insertAfterPage = 建议插入位置：讲完该页后再播放此动画（一般取 pageEnd；封面导入类可用 0 表示第 1 页前）
-- 单元之间主题不重复；跳过纯目录/致谢/作业布置页
-- priority 越小越优先；title 简洁互不重复`,
+- 标题/摘要必须能被 pageStart–pageEnd 范围内的课件原文支撑；禁止把「Linux/麒麟/等保」等主题挂到完全不讲该内容的页上
+- insertAfterPage = 建议插入位置：讲完该页后再播放此动画（必须等于 pageEnd；封面导入类可用 0 表示第 1 页前）
+- 单元之间主题不重复、页码区间不重叠；按页码升序排列；跳过纯目录/致谢/作业布置页
+- priority 越小越优先；title 简洁互不重复`
         },
       ],
       {
@@ -275,12 +392,14 @@ ${outlineForPrompt.slice(0, 20000)}
       }
     }
 
-    batches.setPoints(batchId, points);
+    const aligned = realignPointsToPageOutline(points, outlineForPrompt, totalPages);
+    aligned.sort((a, b) => (a.pageStart || 0) - (b.pageStart || 0) || (a.priority || 0) - (b.priority || 0));
+    batches.setPoints(batchId, aligned);
     batches.update(batchId, {
       status: 'await_points',
       stage: 'await_points',
       progress: 100,
-      message: `已聚类出 ${points.length} 个独立动画单元，请确认后开始生成`,
+      message: `已聚类出 ${aligned.length} 个独立动画单元，请确认后开始生成`,
       error: null,
     });
   } catch (err: any) {

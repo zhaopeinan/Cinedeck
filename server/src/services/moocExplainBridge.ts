@@ -331,9 +331,11 @@ export async function runMoocExplainInsert(opts: {
     const finalDir = path.dirname(child.final_path);
     const outPath = path.join(finalDir, `export_${quality}.mp4`);
     const audioPath = resolveNarration(finalDir);
+    // Prefer pageEnd so the clip always follows the cluster it was generated from.
+    const pageEnd = Number(p.pageEnd) || Number(p.pageStart) || 0;
     const afterPage = Number.isFinite(Number(p.insertAfterPage))
       ? Number(p.insertAfterPage)
-      : (Number(p.pageEnd) || Number(p.pageStart) || 0);
+      : pageEnd;
 
     // Reuse existing export only if it still passes visual/audio QC
     const tryReuse = async (candidate: string): Promise<boolean> => {

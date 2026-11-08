@@ -659,6 +659,17 @@ async function runMoocJob(job: MoocJobRow) {
           insertClips = result.inserts;
           explainSummary = result.summary;
 
+          // Partial inserts (some KP exports failed) feel disordered vs the PPT timeline.
+          // Keep explain_inserts.json for repair, but do not weave an incomplete set into the final cut.
+          if (result.failed > 0 && insertClips.length > 0) {
+            console.warn(
+              `[MOOC] Partial explain inserts job=${job.id}: ok=${insertClips.length} failed=${result.failed}; defer insert until repaired`,
+            );
+            explainSummary =
+              `${result.summary}；有 ${result.failed} 段失败，已暂缓插入以免错位，请修复知识点后重合成`;
+            insertClips = [];
+          }
+
           // Reuse MOOC avatar config on knowledge-point inserts
           if (config.enableAvatar && insertClips.length) {
             setProgress('explain_gen', 86, '为知识点插片生成数字人…');
