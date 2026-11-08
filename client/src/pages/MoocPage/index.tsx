@@ -512,6 +512,30 @@ const MoocPage: React.FC = () => {
     }
   }, [loadJobDetail, refreshJobs]);
 
+  const removeExplainInsert = useCallback(async (child: any) => {
+    const moocId = detailIdRef.current;
+    if (!moocId) return;
+    Modal.confirm({
+      title: '移出成片？',
+      content: `确认将「${child.title || '该知识点'}」从最终成片中移出？动画仍保留，之后可再入片或重生。`,
+      okText: '移出并重合成',
+      cancelText: '取消',
+      onOk: async () => {
+        setRetryingExplainId(child.id);
+        try {
+          const res = await moocApi.removeExplainInsert(moocId, child.id);
+          message.success(res.data.data?.message || '已移出');
+          await loadJobDetail(moocId, { silent: true });
+          await refreshJobs();
+        } catch (e: any) {
+          message.error(e.response?.data?.error?.message || '移出失败');
+        } finally {
+          setRetryingExplainId(null);
+        }
+      },
+    });
+  }, [loadJobDetail, refreshJobs]);
+
   const approveAllPendingExplain = useCallback(async () => {
     const pending = (detailJob?.explain?.children || []).filter((c: any) => c.canApprove);
     if (!pending.length) {
@@ -2108,9 +2132,19 @@ const MoocPage: React.FC = () => {
                               不入片
                             </Button>
                           )}
-                          {(row.canApprove || row.qcStatus === 'skipped' || row.qcStatus === 'failed'
-                            || row.status === 'failed' || row.status === 'cancelled')
-                            && row.qcStatus !== 'repairing' && (
+                          {row.canRemoveInsert && (
+                            <Button
+                              type="link"
+                              size="small"
+                              style={{ padding: '0 4px' }}
+                              loading={retryingExplainId === row.id}
+                              disabled={retryingExplainId === '__all__'}
+                              onClick={() => void removeExplainInsert(row)}
+                            >
+                              移出成片
+                            </Button>
+                          )}
+                          {row.canRegenerate && row.qcStatus !== 'repairing' && (
                             <>
                               {row.status === 'completed' && row.hasFinal && row.qcStatus === 'failed' && (
                                 <Button
@@ -2133,9 +2167,21 @@ const MoocPage: React.FC = () => {
                                 style={{ padding: '0 4px' }}
                                 loading={retryingExplainId === row.id}
                                 disabled={retryingExplainId === '__all__'}
-                                onClick={() => void repairExplainChild(row, 'regenerate')}
+                                onClick={() => {
+                                  if (row.inInserts) {
+                                    Modal.confirm({
+                                      title: '重生已入片知识点？',
+                                      content: `「${row.title || '该知识点'}」已在成片中。重生完成后会自动替换插片并重合成。`,
+                                      okText: '加入重生队列',
+                                      cancelText: '取消',
+                                      onOk: () => repairExplainChild(row, 'regenerate'),
+                                    });
+                                  } else {
+                                    void repairExplainChild(row, 'regenerate');
+                                  }
+                                }}
                               >
-                                {row.status === 'completed' || row.canApprove || row.qcStatus === 'skipped' ? '重生' : '重试'}
+                                {row.status === 'failed' || row.status === 'cancelled' ? '重试' : '重生'}
                               </Button>
                             </>
                           )}

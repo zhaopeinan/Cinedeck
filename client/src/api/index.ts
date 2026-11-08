@@ -677,6 +677,13 @@ export const moocApi = {
       {},
       { timeout: 30000 },
     ),
+  /** Remove an already-inserted explain clip from final video */
+  removeExplainInsert: (moocId: string, childId: string) =>
+    apiClient.post<ApiResponse<{ ok: boolean; message: string; recomposing?: boolean }>>(
+      `/mooc/jobs/${moocId}/explain/${childId}/remove-insert`,
+      {},
+      { timeout: 60000 },
+    ),
   /** List explain work queue */
   listExplainWorkQueue: (moocId: string) =>
     apiClient.get<ApiResponse<{ items: any[]; active: any[] }>>(

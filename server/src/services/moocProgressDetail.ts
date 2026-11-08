@@ -148,6 +148,14 @@ function childPublic(c: ExplainJobRow, extras?: {
 
   const canSkip = canApprove;
 
+  // Already inserted: still allow regenerate / remove-from-final
+  const canRegenerate = c.status === 'completed'
+    && hasFinal
+    && qcStatus !== 'repairing'
+    && (canApprove || inInserts || qcStatus === 'failed' || qcStatus === 'skipped');
+
+  const canRemoveInsert = inInserts && qcStatus !== 'repairing';
+
   return {
     id: c.id,
     title: shortTitle(c.name),
@@ -169,6 +177,8 @@ function childPublic(c: ExplainJobRow, extras?: {
     canRepair,
     canApprove,
     canSkip,
+    canRegenerate,
+    canRemoveInsert,
     repairStatus: repair?.status || null,
     startedAt,
     finishedAt,

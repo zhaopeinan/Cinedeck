@@ -830,3 +830,81 @@ export function skipExplainChildForMooc(opts: {
   });
   return { ok: true, message: '已标记为不入片' };
 }
+
+/**
+ * Remove an already-inserted explain clip from the final video inserts list,
+ * then recompose. The HTML/animation job itself is kept for later re-approve.
+ */
+export async function removeExplainInsertForMooc(opts: {
+  moocJobId: string;
+  childId: string;
+  userId: string;
+  moocJobs: MoocJobService;
+  explainJobs: ExplainJobService;
+  projectService: ProjectService;
+}): Promise<{ ok: boolean; message: string; recomposing: boolean }> {
+  const mooc = opts.moocJobs.getJob(opts.moocJobId);
+  if (!mooc || mooc.user_id !== opts.userId) {
+    throw Object.assign(new Error('MOOC 任务不存在'), { code: '404' });
+  }
+  if (!mooc.project_id) {
+    throw Object.assign(new Error('缺少项目'), { code: '400' });
+  }
+  const child = opts.explainJobs.getOwned(opts.childId, opts.userId);
+  if (!child) {
+    throw Object.assign(new Error('知识点任务不存在'), { code: '404' });
+  }
+
+  const project = opts.projectService.getProject(mooc.project_id) as any;
+  if (!project?.file_path) {
+    throw Object.assign(new Error('项目文件缺失'), { code: '400' });
+  }
+  const projectDir = path.dirname(project.file_path);
+  const cur = readInserts(projectDir);
+  const before = cur.inserts.length;
+  const next = cur.inserts.filter((c) => c.explainJobId !== child.id);
+  if (next.length === before) {
+    throw Object.assign(new Error('该知识点当前不在成片插片清单中'), { code: '400' });
+  }
+  const summary = next.length
+    ? `已插入 ${next.length} 段知识点动画（已移出「${child.name}」）`
+    : '已清空知识点插片';
+  writeInserts(projectDir, next, summary);
+
+  // Cancel queued work for this child; leave HTML for re-approve
+  for (const item of listExplainWorkQueue(opts.moocJobs, mooc.id)) {
+    if (item.childId === child.id && item.status === 'queued') {
+      patchWorkItem(opts.moocJobs, mooc.id, item.id, {
+        status: 'cancelled',
+        finishedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  opts.explainJobs.mergeConfig(child.id, {
+    userReview: null,
+    repair: null,
+  });
+  opts.explainJobs.updateJob(child.id, {
+    message: '已从成片移出，可重新审核入片或重生',
+  });
+
+  writeMoocConfig(opts.moocJobs, mooc.id, (cfg) => {
+    cfg.explainInsertSummary = summary;
+  });
+
+  const queued = opts.moocJobs.queueRecomposeOnly(mooc.id, opts.userId, {
+    message: `已移出知识点「${child.name}」，排队重合成`,
+  });
+  if (queued) {
+    const { ensureMoocQueueAwake } = await import('../utils/wakeMoocQueue');
+    await ensureMoocQueueAwake({ reason: 'explain_remove_insert' });
+  }
+  return {
+    ok: true,
+    recomposing: !!queued,
+    message: queued
+      ? '已从成片移出该知识点，正在重合成'
+      : '已从插片清单移出（当前无法排队重合成，请稍后点继续）',
+  };
+}

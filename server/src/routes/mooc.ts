@@ -19,6 +19,7 @@ import {
   skipExplainChildForMooc,
   cancelExplainWorkForMooc,
   listExplainWorkQueue,
+  removeExplainInsertForMooc,
 } from '../services/explainInsertRepair';
 
 const PREVIEW_DIR = path.join(getMoocUploadDir(), 'previews');
@@ -915,6 +916,34 @@ export function createMoocRouter(
       },
       error: null,
     });
+  });
+
+  /** Remove an already-inserted explain clip from final video, then recompose. */
+  router.post('/jobs/:id/explain/:childId/remove-insert', async (req: Request, res: Response) => {
+    if (!explainJobs) {
+      return res.status(503).json({
+        success: false, data: null,
+        error: { code: '503', message: '讲解服务未就绪' },
+      });
+    }
+    try {
+      const result = await removeExplainInsertForMooc({
+        moocJobId: String(req.params.id),
+        childId: String(req.params.childId),
+        userId: getUserId(req),
+        moocJobs,
+        explainJobs,
+        projectService,
+      });
+      res.json({ success: true, data: result, error: null });
+    } catch (err: any) {
+      const code = err?.code === '404' || err?.code === '400' ? err.code : '500';
+      const status = code === '404' ? 404 : code === '400' ? 400 : 500;
+      res.status(status).json({
+        success: false, data: null,
+        error: { code: String(code), message: err?.message || '移出失败' },
+      });
+    }
   });
 
   /** User skip one explain child (do not insert into final video). */
