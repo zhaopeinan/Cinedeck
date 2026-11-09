@@ -29,6 +29,7 @@ import type { ExplainJobService } from './explainJobService';
 import { runMoocExplainInsert, type ExplainInsertClip } from './moocExplainBridge';
 import { attachAvatarsToExplainInserts } from './moocExplainAvatar';
 import { recordMoocStageEvent } from './moocProgressDetail';
+import { resumeExplainWorkQueues } from './explainInsertRepair';
 
 export interface MoocPipelineDeps {
   db: Database.Database;
@@ -64,6 +65,22 @@ export const MOOC_QUEUE_WATCHDOG_MS = 3000;
 export function initMoocPipeline(d: MoocPipelineDeps) {
   deps = d;
   d.moocJobs.recoverStaleRunning();
+  // Explain approve/repair drain lives in-process; restart orphans "running" items
+  // and previously blocked the whole MOOC queue via repairInProgress zombies.
+  try {
+    if (d.explainJobs && d.explainBatches) {
+      resumeExplainWorkQueues({
+        moocJobs: d.moocJobs,
+        explainJobs: d.explainJobs,
+        batches: d.explainBatches,
+        projectService: d.projectService,
+        videoComposer: d.videoComposer,
+        db: d.db,
+      });
+    }
+  } catch (err: any) {
+    console.warn('[MOOC] resume explain work queues failed:', err?.message || err);
+  }
   setTimeout(() => pumpMoocQueue(), 1500);
   // Safety net: batch/repair scripts often run in a separate Node process where
   // pumpMoocQueue() is a no-op (deps unset). Without a watchdog, jobs stay queued forever.

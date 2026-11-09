@@ -499,12 +499,58 @@ async function runOneWorkItem(
   return clip;
 }
 
+/**
+ * After process restart the in-memory drain locks are gone. Re-queue orphaned
+ * "running" work items and restart drains so approve/repair/regen don't sit forever.
+ */
+export function resumeExplainWorkQueues(deps: WorkDeps): number {
+  const jobs = deps.moocJobs.listJobsWithPendingExplainWork();
+  let resumed = 0;
+  for (const row of jobs) {
+    writeMoocConfig(deps.moocJobs, row.id, (cfg) => {
+      const queue = normalizeWorkQueue(cfg);
+      let changed = false;
+      cfg.explainWorkQueue = queue.map((x) => {
+        if (x.status !== 'running') return x;
+        changed = true;
+        return {
+          ...x,
+          status: 'queued',
+          startedAt: undefined,
+          error: '服务重启，已重新排队',
+        };
+      });
+      if (changed && String(cfg?.repairInProgress?.kind || '').startsWith('explain_')) {
+        delete cfg.repairInProgress;
+      }
+      if (!changed) cfg.explainWorkQueue = queue;
+    });
+    ensureExplainWorkDrain({ ...deps, moocJobId: row.id, userId: row.user_id });
+    resumed += 1;
+  }
+  if (resumed > 0) {
+    console.log(`[ExplainWork] resumed ${resumed} MOOC work queue(s) after restart`);
+  }
+  return resumed;
+}
+
 function ensureExplainWorkDrain(deps: WorkDeps & { moocJobId: string; userId: string }) {
   const moocId = deps.moocJobId;
   if (workDrainLocks.has(moocId)) return;
 
   const work = (async () => {
     try {
+      // Reclaim orphaned "running" rows left by a crashed previous drain.
+      writeMoocConfig(deps.moocJobs, moocId, (cfg) => {
+        const queue = normalizeWorkQueue(cfg);
+        if (!queue.some((x) => x.status === 'running')) return;
+        cfg.explainWorkQueue = queue.map((x) => (
+          x.status === 'running'
+            ? { ...x, status: 'queued', startedAt: undefined, error: '中断后重新排队' }
+            : x
+        ));
+      });
+
       while (true) {
         const job = deps.moocJobs.getJob(moocId);
         if (!job) return;

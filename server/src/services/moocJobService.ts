@@ -733,13 +733,41 @@ export class MoocJobService {
   recoverStaleRunning(message = '服务重启，任务中断。可点「继续」从断点续跑') {
     const now = new Date().toISOString();
     // Keep stage/checkpoint so resume knows where to continue.
-    // Skip parent jobs that are only "running" because a side-channel repair/reexport
-    // is in progress — those should not be flipped to failed on API restart.
-    const rows = this.db.prepare(`SELECT id, config_json FROM mooc_jobs WHERE status = 'running'`).all() as
-      Array<{ id: string; config_json: string }>;
+    // Side-channel explain approve/repair marks the parent "running" via repairInProgress.
+    // After restart that in-memory drain is gone; leaving these as running blocks the
+    // entire MOOC queue (hasRunning). Release them back to success and re-queue work items.
+    const rows = this.db.prepare(`SELECT id, config_json, project_id, checkpoint FROM mooc_jobs WHERE status = 'running'`).all() as
+      Array<{ id: string; config_json: string; project_id: string | null; checkpoint: string | null }>;
     for (const row of rows) {
       let cfg: any = {};
       try { cfg = JSON.parse(row.config_json || '{}'); } catch { /* ignore */ }
+      const repairKind = String(cfg?.repairInProgress?.kind || '');
+      if (repairKind.startsWith('explain_')) {
+        if (Array.isArray(cfg.explainWorkQueue)) {
+          cfg.explainWorkQueue = cfg.explainWorkQueue.map((x: any) => {
+            if (!x || x.status !== 'running') return x;
+            return {
+              ...x,
+              status: 'queued',
+              startedAt: undefined,
+              error: '服务重启，已重新排队',
+            };
+          });
+        }
+        delete cfg.repairInProgress;
+        this.db.prepare(`
+          UPDATE mooc_jobs
+          SET status = 'success',
+              stage = 'done',
+              message = ?,
+              error = NULL,
+              finished_at = ?,
+              updated_at = ?,
+              config_json = ?
+          WHERE id = ? AND status = 'running'
+        `).run('服务重启，入片/修复队列将自动续跑', now, now, JSON.stringify(cfg), row.id);
+        continue;
+      }
       if (cfg?.repairInProgress) continue;
       this.db.prepare(`
         UPDATE mooc_jobs
@@ -749,5 +777,21 @@ export class MoocJobService {
         WHERE id = ? AND status = 'running'
       `).run(message, message, now, now, row.id);
     }
+  }
+
+  /** Jobs that still have pending explain approve/repair/regen work after restart. */
+  listJobsWithPendingExplainWork(): Array<{ id: string; user_id: string }> {
+    const rows = this.db.prepare(`SELECT id, user_id, config_json FROM mooc_jobs`).all() as
+      Array<{ id: string; user_id: string; config_json: string }>;
+    const out: Array<{ id: string; user_id: string }> = [];
+    for (const row of rows) {
+      let cfg: any = {};
+      try { cfg = JSON.parse(row.config_json || '{}'); } catch { /* ignore */ }
+      const queue = Array.isArray(cfg?.explainWorkQueue) ? cfg.explainWorkQueue : [];
+      if (queue.some((x: any) => x?.status === 'queued' || x?.status === 'running')) {
+        out.push({ id: row.id, user_id: row.user_id });
+      }
+    }
+    return out;
   }
 }
