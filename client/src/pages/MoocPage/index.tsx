@@ -1790,7 +1790,7 @@ const MoocPage: React.FC = () => {
         title={detailJob ? `进度详情 · ${truncateText(detailJob.name || detailJob.fileName || '', 28)}` : '进度详情'}
         open={detailOpen}
         onClose={closeJobDetail}
-        width={560}
+        width={720}
         destroyOnClose
         extra={
           detailJob?.id ? (
@@ -1997,18 +1997,31 @@ const MoocPage: React.FC = () => {
                       size="small"
                       pagination={false}
                       style={{ marginTop: 6 }}
+                      tableLayout="fixed"
                       dataSource={detailJob.explain.workQueue.active}
                       columns={[
                         {
                           title: '知识点',
                           dataIndex: 'title',
                           ellipsis: true,
-                          render: (t: string, row: any) => t || row.childId?.slice(0, 8) || '-',
+                          render: (t: string, row: any) => {
+                            const label = truncateText(
+                              String(t || '').split(' · ').pop() || t || row.childId?.slice(0, 8) || '-',
+                              28,
+                            );
+                            return (
+                              <Tooltip title={t || row.childId}>
+                                <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {label}
+                                </span>
+                              </Tooltip>
+                            );
+                          },
                         },
                         {
                           title: '操作',
                           dataIndex: 'mode',
-                          width: 72,
+                          width: 56,
                           render: (m: string) => (
                             m === 'approve' ? '入片'
                               : m === 'regenerate' ? '重生'
@@ -2019,7 +2032,7 @@ const MoocPage: React.FC = () => {
                         {
                           title: '状态',
                           dataIndex: 'status',
-                          width: 88,
+                          width: 72,
                           render: (s: string) => (
                             <Tag
                               color={s === 'running' ? 'processing' : s === 'queued' ? 'default' : 'default'}
@@ -2032,7 +2045,7 @@ const MoocPage: React.FC = () => {
                         {
                           title: '',
                           key: 'cancel',
-                          width: 72,
+                          width: 56,
                           render: (_: any, row: any) => (
                             row.status === 'queued' ? (
                               <Button
@@ -2056,23 +2069,27 @@ const MoocPage: React.FC = () => {
                   rowKey="id"
                   size="small"
                   pagination={false}
+                  tableLayout="fixed"
                   dataSource={detailJob.explain.children || []}
                   locale={{ emptyText: '暂无子任务' }}
                   columns={[
                     {
                       title: '知识点',
                       dataIndex: 'title',
+                      width: 200,
                       ellipsis: true,
                       render: (t: string, row: any) => (
-                        <Tooltip title={row.qcReason || row.error || row.message || row.name || t}>
-                          <span>{t || '-'}</span>
+                        <Tooltip title={row.name || row.qcReason || row.error || row.message || t}>
+                          <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {t || row.name?.split?.(' · ')?.pop() || '-'}
+                          </span>
                         </Tooltip>
                       ),
                     },
                     {
                       title: '状态',
                       dataIndex: 'status',
-                      width: 100,
+                      width: 88,
                       render: (s: string, row: any) => {
                         const tip = row.qcReason || row.error || row.message || undefined;
                         if (row.qcStatus === 'repairing') {
@@ -2111,7 +2128,7 @@ const MoocPage: React.FC = () => {
                     },
                     {
                       title: '进度',
-                      width: 72,
+                      width: 64,
                       render: (_: any, row: any) => (
                         row.status === 'running' || row.status === 'queued' || row.qcStatus === 'repairing'
                           ? `${row.progress || 0}%`
@@ -2121,14 +2138,14 @@ const MoocPage: React.FC = () => {
                     {
                       title: '阶段',
                       dataIndex: 'stageLabel',
-                      width: 88,
+                      width: 72,
                       ellipsis: true,
                       render: (t: string, row: any) => t || row.stage || '-',
                     },
                     {
                       title: '',
                       key: 'actions',
-                      width: 220,
+                      width: 200,
                       render: (_: any, row: any) => (
                         <Space size={0} wrap>
                           {(row.hasFinal || row.hasSample) && (
