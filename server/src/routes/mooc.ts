@@ -100,6 +100,9 @@ function serializeJob(
     config: safeConfig,
     /** Top-level flag so UI can show「修复中」even if nested config is ignored. */
     repairInProgress: !!(config && config.repairInProgress),
+    /** True while approve/regen/reexport work queue still has queued/running items. */
+    explainWorkActive: Array.isArray(config?.explainWorkQueue)
+      && config.explainWorkQueue.some((x: any) => x?.status === 'queued' || x?.status === 'running'),
     project,
     pptAvailable: !!(job.file_path && fs.existsSync(job.file_path)),
     /** Finished/failed job with project can add explain inserts then re-compose */

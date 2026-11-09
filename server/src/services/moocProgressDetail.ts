@@ -213,15 +213,24 @@ export function buildMoocProgressDetail(opts: {
     })
     .map((s) => {
       const log = logById.get(s.id);
+      const repairKind = String((config as any)?.repairInProgress?.kind || '');
+      const sideChannelExplain = repairKind.startsWith('explain_')
+        || hasActiveExplainWork(config);
       const done = checkpointAtLeast(checkpoint, s.checkpoint)
-        || (job.status === 'success' && s.checkpoint === 'composed')
+        || (job.status === 'success' && !sideChannelExplain && s.checkpoint === 'composed')
         || log?.status === 'done';
       const isCurrent = s.stages.includes(job.stage)
         && (job.status === 'running' || job.status === 'queued');
+      // Approve/regen keeps checkpoint=composed but re-enters explain_gen — surface it.
+      const isSideChannelExplainStep = sideChannelExplain
+        && (s.id === 'explain_gen' || s.id === 'explain_points')
+        && (job.status === 'running' || job.status === 'queued' || hasActiveExplainWork(config));
       let status: 'pending' | 'running' | 'done' | 'failed' | 'skipped' = 'pending';
       if (job.status === 'failed' && s.stages.includes(job.failed_stage || job.stage)) {
         status = 'failed';
-      } else if (done && !isCurrent) {
+      } else if (isSideChannelExplainStep && s.id === 'explain_gen') {
+        status = 'running';
+      } else if (done && !isCurrent && !(isSideChannelExplainStep && s.id === 'explain_gen')) {
         status = 'done';
       } else if (isCurrent) {
         status = 'running';
@@ -402,8 +411,24 @@ export function buildMoocProgressDetail(opts: {
   };
 }
 
+function hasActiveExplainWork(cfg?: any): boolean {
+  const queue = Array.isArray(cfg?.explainWorkQueue) ? cfg.explainWorkQueue : [];
+  return queue.some((x: any) => x?.status === 'queued' || x?.status === 'running');
+}
+
 function buildProgressSummary(job: MoocJobRow, steps: any[], explain: any, cfg?: any): string {
-  if (job.status === 'success' && !cfg?.repairInProgress) return '已完成';
+  // Side-channel approve/regen can leave status=success while work queue is still active.
+  if (hasActiveExplainWork(cfg) || cfg?.repairInProgress) {
+    const msg = String(job.message || '').trim();
+    if (msg && (job.status === 'running' || job.status === 'queued' || hasActiveExplainWork(cfg))) {
+      return msg;
+    }
+    if (cfg?.repairInProgress?.message) return String(cfg.repairInProgress.message);
+    const active = explain?.workQueue;
+    const n = (active?.runningCount || 0) + (active?.queuedCount || 0);
+    return n > 0 ? `入片/修复队列处理中（${n}）` : '入片/修复队列处理中';
+  }
+  if (job.status === 'success') return '已完成';
   if (job.status === 'cancelled') return '已取消';
   if (job.status === 'failed') {
     return `失败于${STAGE_LABEL_CN[job.failed_stage || job.stage] || job.stage}`;

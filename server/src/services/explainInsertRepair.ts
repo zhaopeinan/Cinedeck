@@ -562,14 +562,12 @@ function ensureExplainWorkDrain(deps: WorkDeps & { moocJobId: string; userId: st
         // Failed work items used to clear repairInProgress while leaving status=running,
         // which made this drain busy-wait forever and blocked the whole MOOC queue.
         if (job.status === 'running' && !repairingUs) {
-          const now = new Date().toISOString();
           writeMoocConfig(deps.moocJobs, moocId, (c) => { delete c.repairInProgress; });
-          deps.moocJobs.updateJob(moocId, {
-            status: 'success',
-            stage: 'done',
+          // Keep parent non-success while queued work remains so the outer list
+          // does not show「已完成」alongside an active 入片/重生 queue.
+          deps.moocJobs.markRepairInProgress(moocId, deps.userId, {
+            kind: 'explain_queue',
             message: '入片/修复队列继续处理中',
-            error: null,
-            finished_at: now,
           });
           continue;
         }
@@ -711,23 +709,34 @@ function ensureExplainWorkDrain(deps: WorkDeps & { moocJobId: string; userId: st
             }
           }
         } else {
-          // No new clips this round — release the side-channel "running" lock so
-          // other MOOC jobs (and our own next items) are not blocked forever.
-          const now = new Date().toISOString();
-          writeMoocConfig(deps.moocJobs, moocId, (c) => {
-            if (String(c?.repairInProgress?.kind || '').startsWith('explain_')) {
-              delete c.repairInProgress;
-            }
-          });
-          const cur = deps.moocJobs.getJob(moocId);
-          if (cur?.status === 'running') {
-            deps.moocJobs.updateJob(moocId, {
-              status: 'success',
-              stage: 'done',
-              message: '入片/修复项已处理（本轮无需重合成）',
-              error: null,
-              finished_at: now,
+          // No new clips this round. If more work remains, keep the repair banner;
+          // otherwise release so sibling MOOC jobs can run.
+          const stillQueued = listExplainWorkQueue(deps.moocJobs, moocId)
+            .some((x) => x.status === 'queued');
+          if (stillQueued) {
+            try {
+              deps.moocJobs.markRepairInProgress(moocId, deps.userId, {
+                kind: 'explain_queue',
+                message: '入片/修复队列继续处理中',
+              });
+            } catch { /* ignore */ }
+          } else {
+            const now = new Date().toISOString();
+            writeMoocConfig(deps.moocJobs, moocId, (c) => {
+              if (String(c?.repairInProgress?.kind || '').startsWith('explain_')) {
+                delete c.repairInProgress;
+              }
             });
+            const cur = deps.moocJobs.getJob(moocId);
+            if (cur?.status === 'running') {
+              deps.moocJobs.updateJob(moocId, {
+                status: 'success',
+                stage: 'done',
+                message: '入片/修复项已处理（本轮无需重合成）',
+                error: null,
+                finished_at: now,
+              });
+            }
           }
         }
       }

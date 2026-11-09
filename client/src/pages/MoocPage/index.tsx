@@ -898,11 +898,12 @@ const MoocPage: React.FC = () => {
       dataIndex: 'status',
       width: 78,
       render: (s: string, r: any) => {
-        const repairing = !!(r.repairInProgress || r.config?.repairInProgress)
+        const workActive = !!(r.explainWorkActive || r.repairInProgress || r.config?.repairInProgress);
+        const repairing = workActive
           || (s === 'running' && (r.stage === 'explain_gen' || r.stage === 'explain'))
-          || (s === 'running' && /重导|修复|叠数字人|知识点插片/.test(String(r.message || '')));
+          || (s === 'running' && /重导|修复|重生|入片|重合成|叠数字人|知识点插片|队列/.test(String(r.message || '')));
         if (repairing) {
-          return <Tag color="processing" style={{ margin: 0 }}>修复中</Tag>;
+          return <Tag color="processing" style={{ margin: 0 }}>处理中</Tag>;
         }
         return (
           <Tag color={STATUS_COLOR[s] || 'default'} style={{ margin: 0 }}>
@@ -916,15 +917,16 @@ const MoocPage: React.FC = () => {
       key: 'progress',
       width: 160,
       render: (_: any, r: any) => {
-        const repairing = !!(r.repairInProgress || r.config?.repairInProgress)
-          || (r.status === 'running' && /重导|修复|叠数字人|知识点插片/.test(String(r.message || '')));
+        const workActive = !!(r.explainWorkActive || r.repairInProgress || r.config?.repairInProgress);
+        const repairing = workActive
+          || (r.status === 'running' && /重导|修复|重生|入片|重合成|叠数字人|知识点插片|队列/.test(String(r.message || '')));
         const stageText = r.status === 'failed'
           ? (r.failedStageLabel || STAGE_LABEL[r.failedStage] || STAGE_LABEL[r.stage] || r.stage)
           : repairing
             ? (STAGE_LABEL.explain || '修复讲解插片')
             : (r.stageLabel || STAGE_LABEL[r.stage] || r.stage);
         const summary = repairing
-          ? (r.message || r.progressSummary || '正在修复知识点插片…')
+          ? (r.progressSummary || r.message || '正在处理知识点插片…')
           : (r.progressSummary || '');
         return (
           <Tooltip title="点击查看流水线与知识点详情">
@@ -962,11 +964,11 @@ const MoocPage: React.FC = () => {
                   重试 {r.retryCount || 0}/{r.maxRetries ?? 5}
                 </div>
               )}
-              {(r.status === 'running' || r.status === 'queued') ? (
+              {(r.status === 'running' || r.status === 'queued' || repairing) ? (
                 <Progress
                   percent={r.progress || 0}
                   size="small"
-                  status={r.status === 'queued' ? 'normal' : 'active'}
+                  status={r.status === 'queued' && !repairing ? 'normal' : 'active'}
                   showInfo={false}
                 />
               ) : r.status === 'success' ? (
