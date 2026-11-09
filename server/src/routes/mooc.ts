@@ -112,6 +112,17 @@ function serializeJob(
       && (job.status === 'success' || job.status === 'failed' || job.status === 'cancelled')
     ),
     hasExplainInsert: !!(config.enableExplainInsert && (config.explainInsertSummary || config.explainBatchId)),
+    /** Keep existing explain_inserts.json and re-merge final video (manual). */
+    canRecompose: !!(
+      job.project_id
+      && (config.enableExplainInsert || config.explainInsertSummary)
+      && (
+        job.status === 'success'
+        || job.status === 'failed'
+        || job.status === 'cancelled'
+        || (job.status === 'queued' && job.checkpoint === 'explain_ready')
+      )
+    ),
     createdAt: job.created_at,
     updatedAt: job.updated_at,
     startedAt: job.started_at,
@@ -916,6 +927,54 @@ export function createMoocRouter(
       },
       error: null,
     });
+  });
+
+  /**
+   * Manual recompose: keep current explain_inserts.json and re-merge the final video.
+   * Use after regenerate/approve when you don't want to wait for auto-queue, or to nudge a stuck recompose.
+   */
+  router.post('/jobs/:id/recompose', async (req: Request, res: Response) => {
+    const userId = getUserId(req);
+    const job = moocJobs.getJob(String(req.params.id));
+    if (!job || job.user_id !== userId) {
+      return res.status(404).json({
+        success: false, data: null,
+        error: { code: '404', message: '任务不存在' },
+      });
+    }
+    if (!job.project_id) {
+      return res.status(400).json({
+        success: false, data: null,
+        error: { code: '400', message: '缺少项目，无法重合成' },
+      });
+    }
+    try {
+      const updated = moocJobs.queueRecomposeOnly(job.id, userId, {
+        message: '手动排队重新合成成片',
+        force: true,
+      });
+      if (!updated) {
+        return res.status(400).json({
+          success: false, data: null,
+          error: { code: '400', message: '当前无法重合成（需已有知识点插片清单）' },
+        });
+      }
+      const { ensureMoocQueueAwake } = await import('../utils/wakeMoocQueue');
+      await ensureMoocQueueAwake({ reason: 'manual_recompose' });
+      res.json({
+        success: true,
+        data: {
+          ...serializeJob(updated, projectService, progressExtras),
+          message: '已排队重新合成成片',
+        },
+        error: null,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false, data: null,
+        error: { code: '500', message: err?.message || '重合成失败' },
+      });
+    }
   });
 
   /** Remove an already-inserted explain clip from final video, then recompose. */

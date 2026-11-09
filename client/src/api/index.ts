@@ -649,6 +649,9 @@ export const moocApi = {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 180000,
     }),
+  /** Manual recompose final video from current explain inserts */
+  recompose: (id: string) =>
+    apiClient.post<ApiResponse<any>>(`/mooc/jobs/${id}/recompose`, {}, { timeout: 60000 }),
   /** Repair one explain child then auto recompose */
   repairExplainChild: (moocId: string, childId: string, mode: 'reexport' | 'regenerate' = 'reexport') =>
     apiClient.post<ApiResponse<{ started: boolean; mode: string; message: string }>>(

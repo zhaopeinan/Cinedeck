@@ -714,6 +714,24 @@ const MoocPage: React.FC = () => {
     }
   };
 
+  const handleRecompose = (job: any) => {
+    Modal.confirm({
+      title: '重新合成成片？',
+      content: '保留当前已入片的知识点插片，只重新合并输出最终视频。可用于重生/入片后手动触发，或催促卡住的重合成。',
+      okText: '排队重合成',
+      onOk: async () => {
+        try {
+          await moocApi.recompose(job.id);
+          message.success('已排队重新合成成片');
+          await refreshJobs();
+          if (detailJobId === job.id) await loadDetail(job.id);
+        } catch (e: any) {
+          message.error(e.response?.data?.error?.message || '重合成失败');
+        }
+      },
+    });
+  };
+
   const handleRestart = async (id: string) => {
     Modal.confirm({
       title: '全部重跑？',
@@ -1087,6 +1105,16 @@ const MoocPage: React.FC = () => {
                 项目
               </Button>
             </>
+          )}
+          {r.canRecompose && (
+            <Button
+              size="small"
+              type="link"
+              icon={<ReloadOutlined />}
+              onClick={() => handleRecompose(r)}
+            >
+              重合成
+            </Button>
           )}
           {(r.canOptimizeExplain || r.canOptimizeAvatar) && (
             <Button
@@ -1898,6 +1926,15 @@ const MoocPage: React.FC = () => {
                         修复失败项
                       </Button>
                     )}
+                    {(detailJob.canRecompose || !!detailJob.explain.stats?.inserted) && (
+                      <Button
+                        size="small"
+                        icon={<ReloadOutlined />}
+                        onClick={() => handleRecompose(detailJob)}
+                      >
+                        重合成成片
+                      </Button>
+                    )}
                   </Space>
                 </div>
                 <Space wrap size={[8, 8]} style={{ marginBottom: 12 }}>
@@ -2171,7 +2208,7 @@ const MoocPage: React.FC = () => {
                                   if (row.inInserts) {
                                     Modal.confirm({
                                       title: '重生已入片知识点？',
-                                      content: `「${row.title || '该知识点'}」已在成片中。重生完成后会自动替换插片并重合成。`,
+                                      content: `「${row.title || '该知识点'}」已在成片中。重生完成后会自动替换插片并重合成；也可以之后在任务上点「重合成」手动合并。`,
                                       okText: '加入重生队列',
                                       cancelText: '取消',
                                       onOk: () => repairExplainChild(row, 'regenerate'),

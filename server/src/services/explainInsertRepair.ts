@@ -559,11 +559,35 @@ function ensureExplainWorkDrain(deps: WorkDeps & { moocJobId: string; userId: st
 
         // Wait out unrelated pipeline; allow our repair banner
         const repairingUs = String(cfg?.repairInProgress?.kind || '').startsWith('explain_');
+        // Failed work items used to clear repairInProgress while leaving status=running,
+        // which made this drain busy-wait forever and blocked the whole MOOC queue.
+        if (job.status === 'running' && !repairingUs) {
+          const now = new Date().toISOString();
+          writeMoocConfig(deps.moocJobs, moocId, (c) => { delete c.repairInProgress; });
+          deps.moocJobs.updateJob(moocId, {
+            status: 'success',
+            stage: 'done',
+            message: '入片/修复队列继续处理中',
+            error: null,
+            finished_at: now,
+          });
+          continue;
+        }
         const busy = (job.status === 'running' || job.status === 'queued') && !repairingUs;
         const hasQueued = queue.some((x) => x.status === 'queued');
         if (!hasQueued) {
-          if (repairingUs) {
+          if (repairingUs || job.status === 'running') {
+            const now = new Date().toISOString();
             writeMoocConfig(deps.moocJobs, moocId, (c) => { delete c.repairInProgress; });
+            if (job.status === 'running') {
+              deps.moocJobs.updateJob(moocId, {
+                status: 'success',
+                stage: 'done',
+                message: '入片/修复队列已空闲',
+                error: null,
+                finished_at: now,
+              });
+            }
           }
           return;
         }
@@ -687,11 +711,24 @@ function ensureExplainWorkDrain(deps: WorkDeps & { moocJobId: string; userId: st
             }
           }
         } else {
+          // No new clips this round — release the side-channel "running" lock so
+          // other MOOC jobs (and our own next items) are not blocked forever.
+          const now = new Date().toISOString();
           writeMoocConfig(deps.moocJobs, moocId, (c) => {
             if (String(c?.repairInProgress?.kind || '').startsWith('explain_')) {
               delete c.repairInProgress;
             }
           });
+          const cur = deps.moocJobs.getJob(moocId);
+          if (cur?.status === 'running') {
+            deps.moocJobs.updateJob(moocId, {
+              status: 'success',
+              stage: 'done',
+              message: '入片/修复项已处理（本轮无需重合成）',
+              error: null,
+              finished_at: now,
+            });
+          }
         }
       }
     } catch (err: any) {

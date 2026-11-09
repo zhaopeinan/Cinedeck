@@ -404,15 +404,21 @@ export class MoocJobService {
   queueRecomposeOnly(
     id: string,
     userId: string,
-    opts?: { message?: string },
+    opts?: { message?: string; force?: boolean },
   ): MoocJobRow | null {
     const job = this.getJob(id);
     if (!job || job.user_id !== userId) return null;
     const cfg0: any = this.parseConfig(job);
     const repairing = !!(cfg0?.repairInProgress);
+    // Already waiting for recompose — just wake the pump.
+    if (job.status === 'queued' && (job.checkpoint === 'explain_ready' || opts?.force)) {
+      scheduleMoocQueueWake('queue_recompose_only_wake');
+      return job;
+    }
     // Allow recompose while a repair/reexport marked the parent as running.
+    // force: manual button / recovery may reclaim a zombie "running" without repair banner.
     if (job.status === 'queued') return null;
-    if (job.status === 'running' && !repairing) return null;
+    if (job.status === 'running' && !repairing && !opts?.force) return null;
     if (!job.project_id) return null;
     const p = this.db.prepare('SELECT id, file_path FROM projects WHERE id = ?').get(job.project_id) as
       { id: string; file_path?: string } | undefined;
