@@ -276,14 +276,18 @@ async function main() {
       const psnrLooksStill = mid >= 28 && end >= 28;
       const psnrNearIdentical = mid >= 50 && end >= 50;
       const psnrShowsMotion = mid < 28 || end < 28;
+      // Header/page chrome alone is not enough: scroll-decks with a hidden #track
+      // still show kicker/title/PAGE while the body is blank cream.
       const domSaysSeekOk = midProbe.visible >= 3
         && midProbe.bigTitleOp <= 0.35
-        && midProbe.stackedPairs < 2;
+        && midProbe.stackedPairs < 2
+        && midProbe.centerTextBlocks >= 1;
       if (psnrLooksStill && !domSaysSeekOk) {
         throw new Error(
           `讲解动画画面几乎无变化（PSNR mid=${mid.toFixed(1)}dB, end=${end.toFixed(1)}dB`
-          + `, visibleNodes=${midProbe.visible}, bigTitleOp=${midProbe.bigTitleOp.toFixed(2)}`
-          + `, stackedPairs=${midProbe.stackedPairs}）：疑似 seek 失效或卡在初始叠字帧`,
+          + `, visibleNodes=${midProbe.visible}, centerText=${midProbe.centerTextBlocks}`
+          + `, bigTitleOp=${midProbe.bigTitleOp.toFixed(2)}`
+          + `, stackedPairs=${midProbe.stackedPairs}）：疑似 seek 失效、正文未绘出或卡在初始叠字帧`,
         );
       }
       if (psnrNearIdentical && midProbe.visible < 3) {
@@ -291,10 +295,16 @@ async function main() {
           `讲解动画画面近乎静止（PSNR mid=${mid.toFixed(1)}dB, end=${end.toFixed(1)}dB）且中段几乎无 DOM 内容：疑似 seek 失效`,
         );
       }
+      if (psnrLooksStill && midProbe.centerTextBlocks < 1) {
+        throw new Error(
+          `讲解动画中段正文区无文字（centerText=0, PSNR mid=${mid.toFixed(1)}dB）：疑似内容轨道被隐藏或未渲染`,
+        );
+      }
       if (psnrLooksStill && domSaysSeekOk) {
         process.stdout.write(
           `motion preflight soft-pass: high PSNR but DOM seek ok`
-          + ` (visible=${midProbe.visible}, bigTitleOp=${midProbe.bigTitleOp.toFixed(2)})\n`,
+          + ` (visible=${midProbe.visible}, centerText=${midProbe.centerTextBlocks}`
+          + `, bigTitleOp=${midProbe.bigTitleOp.toFixed(2)})\n`,
         );
       }
       // Pure-canvas decks (no mid DOM) may have visibleNodes≈0; allow only if PSNR moved.

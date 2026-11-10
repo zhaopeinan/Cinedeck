@@ -159,12 +159,19 @@ export function prepareExplainHtmlForRecording(html: string): string {
 
   // Hide interactive preview chrome (play bar / scrubber) — must not appear in MP4.
   // Preview iframe keeps the original HTML; only the recording copy gets this CSS.
+  // IMPORTANT: never bare-match #track/#fill/#knob — Editorial Chart and similar
+  // scroll-decks use #track as the content scroller; hiding it yields an empty
+  // header-only MP4 that still soft-passes DOM probes (page chrome stays visible).
   const hidePlayerCss = `
 <style id="explain-hide-player-chrome">
-#player, #player *, #playBtn, #playIcon, #track, #fill, #knob, #chapter, #time,
-#chapterLabel, #timeLabel, #progressTrack, #progressFill,
+#player, #player *,
+#playBtn, #playIcon, #chapter, #time,
+#chapterLabel, #timeLabel,
+#player #track, #player #fill, #player #knob,
+#progressTrack, #progressFill, #progressKnob, #progressWrap,
 #controls, #controlBar, #control-bar, #scrubber, #progress,
-.player-bar, .playback-bar, .play-bar, .controls-bar,
+.player-bar, .player-bar #track, .player-bar #fill, .player-bar #knob,
+.playback-bar, .play-bar, .controls-bar,
 [data-explain-player], [aria-label="播放/暂停"], [aria-label="播放"], [aria-label="暂停"] {
   display: none !important;
   visibility: hidden !important;
