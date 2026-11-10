@@ -261,11 +261,6 @@ async function main() {
       for (const f of [p0, pMid, pEnd]) {
         try { fs.unlinkSync(f); } catch { /* ignore */ }
       }
-      if (mid >= 28 && end >= 28) {
-        throw new Error(
-          `讲解动画画面几乎无变化（PSNR mid=${mid.toFixed(1)}dB, end=${end.toFixed(1)}dB）：疑似 seek 失效或卡在初始叠字帧`,
-        );
-      }
       // Canvas backgrounds are common, but many decks still drive titles/cards via DOM.
       // Never skip bigTitle / DOM occupancy checks just because a <canvas> exists —
       // that previously let stacked intro titles pass when PSNR still moved (starfield).
@@ -275,7 +270,33 @@ async function main() {
         const r = c.getBoundingClientRect();
         return r.width >= 320 && r.height >= 180;
       });
+      // Full-frame PSNR is dominated by static dark backgrounds; local text/card motion
+      // often lands at 40–48dB even when seek works. Treat PSNR as soft evidence and
+      // require corroborating DOM freeze signals before failing.
+      const psnrLooksStill = mid >= 28 && end >= 28;
+      const psnrNearIdentical = mid >= 50 && end >= 50;
       const psnrShowsMotion = mid < 28 || end < 28;
+      const domSaysSeekOk = midProbe.visible >= 3
+        && midProbe.bigTitleOp <= 0.35
+        && midProbe.stackedPairs < 2;
+      if (psnrLooksStill && !domSaysSeekOk) {
+        throw new Error(
+          `讲解动画画面几乎无变化（PSNR mid=${mid.toFixed(1)}dB, end=${end.toFixed(1)}dB`
+          + `, visibleNodes=${midProbe.visible}, bigTitleOp=${midProbe.bigTitleOp.toFixed(2)}`
+          + `, stackedPairs=${midProbe.stackedPairs}）：疑似 seek 失效或卡在初始叠字帧`,
+        );
+      }
+      if (psnrNearIdentical && midProbe.visible < 3) {
+        throw new Error(
+          `讲解动画画面近乎静止（PSNR mid=${mid.toFixed(1)}dB, end=${end.toFixed(1)}dB）且中段几乎无 DOM 内容：疑似 seek 失效`,
+        );
+      }
+      if (psnrLooksStill && domSaysSeekOk) {
+        process.stdout.write(
+          `motion preflight soft-pass: high PSNR but DOM seek ok`
+          + ` (visible=${midProbe.visible}, bigTitleOp=${midProbe.bigTitleOp.toFixed(2)})\n`,
+        );
+      }
       // Pure-canvas decks (no mid DOM) may have visibleNodes≈0; allow only if PSNR moved.
       if (midProbe.visible < 3 && !(hasCanvas && psnrShowsMotion && midProbe.bigTitleOp < 0.05)) {
         throw new Error(

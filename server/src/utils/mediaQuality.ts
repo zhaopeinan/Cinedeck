@@ -215,7 +215,12 @@ export async function qcExplainAnimationMp4(opts: {
    * audio/visual timelines diverge and users hear “音轨错乱”.
    */
   animDurationSec?: number;
-  /** Fail when BOTH mid and end PSNR vs start exceed this (dB). */
+  /**
+   * Fail when BOTH mid and end PSNR vs start exceed this (dB).
+   * Default 50: full-frame PSNR on dark-bg decks with real local text/card motion
+   * commonly sits at 40–48dB; 28 was a false-positive trap. Near-identical freezes
+   * still land near 99 / inf.
+   */
   maxStillPsnrDb?: number;
 }): Promise<ExplainMotionQcResult> {
   const reasons: string[] = [];
@@ -274,10 +279,10 @@ export async function qcExplainAnimationMp4(opts: {
     const toMotion = (psnr: number) => Math.max(0, Math.min(1, 1 - (psnr / 50)));
     const mid = toMotion(midPsnr);
     const end = toMotion(endPsnr);
-    const maxStill = opts.maxStillPsnrDb ?? 28;
+    const maxStill = opts.maxStillPsnrDb ?? 50;
     if (midPsnr >= maxStill && endPsnr >= maxStill) {
       reasons.push(
-        `画面几乎无变化（PSNR mid=${midPsnr.toFixed(1)}dB, end=${endPsnr.toFixed(1)}dB）；疑似录制 seek 失效或动画卡在初始帧（叠字/空白）`,
+        `画面近乎静止（PSNR mid=${midPsnr.toFixed(1)}dB, end=${endPsnr.toFixed(1)}dB）；疑似录制 seek 失效或动画卡在初始帧（叠字/空白）`,
       );
     }
     return {
