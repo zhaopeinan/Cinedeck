@@ -5,8 +5,10 @@ import { execFileSync } from 'child_process';
 const SCRIPT_PATH = path.resolve(__dirname, '../../scripts/fix_pptx_omml.py');
 
 /**
- * LibreOffice cannot render Office OMML (a14) equations in PPTX.
- * Use PowerPoint fallback bitmaps or rasterize OMML before export.
+ * LibreOffice cannot render Office OMML (a14) equations in PPTX, and its
+ * SVG→PDF path turns MathJax formula SVGs into blurry bitmaps.
+ * Pre-process: use PowerPoint fallbacks / rasterize OMML, and convert
+ * embedded SVG formulas to high-DPI PNG before export.
  */
 export function preparePptxEquationsForExport(filePath: string): boolean {
   if (!filePath || !fs.existsSync(filePath)) return false;

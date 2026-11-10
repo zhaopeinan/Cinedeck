@@ -281,7 +281,7 @@ except Exception as e:
 import sys
 try:
     from pdf2image import convert_from_path
-    images = convert_from_path(r"${pdfPath.replace(/"/g, '\\"')}", dpi=150)
+    images = convert_from_path(r"${pdfPath.replace(/"/g, '\\"')}", dpi=220)
     for i, img in enumerate(images):
         out = r"${outputDir.replace(/"/g, '\\"')}" + "/slide_" + str(i + 1) + ".png"
         img.save(out, "PNG")
@@ -290,7 +290,7 @@ except ImportError:
     # pdf2image 未安装，回退到 poppler pdftoppm
     import subprocess
     import json
-    result = subprocess.run(["pdftoppm", "-png", "-r", "150", r"${pdfPath.replace(/"/g, '\\"')}", r"${path.join(outputDir, 'slide').replace(/"/g, '\\"')}"], capture_output=True, text=True)
+    result = subprocess.run(["pdftoppm", "-png", "-r", "220", r"${pdfPath.replace(/"/g, '\\"')}", r"${path.join(outputDir, 'slide').replace(/"/g, '\\"')}"], capture_output=True, text=True)
     print(json.dumps({"fallback": "pdftoppm", "rc": result.returncode}))
 except Exception as e:
     print(json.dumps({"error": str(e)}))
@@ -304,7 +304,7 @@ except Exception as e:
       // pdf2image 不可用时，尝试用 pdftoppm 直接转换
       try {
         await execFileAsync('pdftoppm', [
-          '-png', '-r', '150',
+          '-png', '-r', '220',
           pdfPath,
           path.join(outputDir, 'slide'),
         ], { timeout: 120000 });

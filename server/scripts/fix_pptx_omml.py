@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Prepare PPTX for LibreOffice export: use equation fallback images or rasterize OMML.
+Prepare PPTX for LibreOffice export:
+- use equation fallback images or rasterize OMML
+- pre-rasterize embedded MathJax/SVG formulas to high-DPI PNG (LibreOffice
+  rasterizes complex SVG path fonts into blurry smears in PDF/PNG)
 """
 import os
 import re
@@ -8,8 +11,9 @@ import sys
 import zipfile
 import tempfile
 import shutil
+import subprocess
 import xml.etree.ElementTree as ET
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 
 M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -233,16 +237,232 @@ def render_mathtext_png(
     return render_plain_text_png(plain_lines, out_path, width_px, height_px)
 
 
-def shape_size_px(fb_inner: str) -> Tuple[int, int]:
-    """Read a:ext cx/cy (EMU) from fallback shape → ~150dpi pixels."""
+def shape_size_px(fb_inner: str, dpi: int = 220) -> Tuple[int, int]:
+    """Read a:ext cx/cy (EMU) from fallback shape → target-dpi pixels."""
     m = re.search(r'<a:ext\s+cx="(\d+)"\s+cy="(\d+)"', fb_inner)
     if not m:
         return 900, 240
-    # 914400 EMU = 1 inch; 150 dpi
+    # 914400 EMU = 1 inch
     cx, cy = int(m.group(1)), int(m.group(2))
-    w = max(200, int(cx / 914400 * 150))
-    h = max(80, int(cy / 914400 * 150))
+    w = max(200, int(cx / 914400 * dpi))
+    h = max(80, int(cy / 914400 * dpi))
     return w, h
+
+
+def _find_rsvg_convert() -> Optional[str]:
+    for cand in ("rsvg-convert", "/usr/bin/rsvg-convert"):
+        if shutil.which(cand) or os.path.isfile(cand):
+            return shutil.which(cand) or cand
+    return None
+
+
+def _emu_to_px(emu: int, dpi: int) -> int:
+    return max(1, int(int(emu) / 914400 * dpi))
+
+
+def collect_svg_display_sizes(work_root: str, dpi: int = 300) -> Dict[str, Tuple[int, int]]:
+    """Map media basename → max on-slide box size in px at `dpi`."""
+    sizes: Dict[str, Tuple[int, int]] = {}
+    slides_dir = os.path.join(work_root, "ppt", "slides")
+    if not os.path.isdir(slides_dir):
+        return sizes
+    for slide_file in os.listdir(slides_dir):
+        if not (slide_file.startswith("slide") and slide_file.endswith(".xml")):
+            continue
+        slide_path = os.path.join(slides_dir, slide_file)
+        rels_path = os.path.join(slides_dir, "_rels", slide_file + ".rels")
+        rels = load_rels(rels_path)
+        with open(slide_path, "r", encoding="utf-8") as f:
+            xml = f.read()
+        for m in re.finditer(r"<p:pic\b[\s\S]*?</p:pic>", xml):
+            block = m.group(0)
+            emb = re.search(r'r:embed="([^"]+)"', block)
+            ext = re.search(r'<a:ext\s+cx="(\d+)"\s+cy="(\d+)"', block)
+            if not emb or not ext:
+                continue
+            target = rels.get(emb.group(1), "")
+            if not target.lower().endswith(".svg"):
+                continue
+            base = os.path.basename(target.replace("\\", "/"))
+            w = _emu_to_px(int(ext.group(1)), dpi)
+            h = _emu_to_px(int(ext.group(2)), dpi)
+            prev = sizes.get(base)
+            if not prev or w * h > prev[0] * prev[1]:
+                sizes[base] = (w, h)
+    return sizes
+
+
+def _rasterize_svg_file(rsvg: str, src: str, dst: str, width: int) -> bool:
+    try:
+        r = subprocess.run(
+            [rsvg, "-w", str(max(64, width)), src, "-o", dst],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception as e:
+        print(f"WARN:svg_raster_fail:{os.path.basename(src)}:{e}")
+        return False
+    if r.returncode != 0 or not os.path.isfile(dst) or os.path.getsize(dst) < 50:
+        print(f"WARN:svg_raster_fail:{os.path.basename(src)}:{(r.stderr or '')[-160:]}")
+        return False
+    return True
+
+
+def replace_office_svg_fallbacks(work_root: str) -> int:
+    """
+    Office dual-image pics: a:blip → PNG fallback, asvg:svgBlip → vector SVG.
+    LibreOffice only reads the PNG fallback (often a soft 2k preview). Overwrite
+    that PNG with a crisp rsvg raster of the SVG at the on-slide box size.
+    """
+    rsvg = _find_rsvg_convert()
+    if not rsvg:
+        print("WARN:rsvg-convert missing; skip SVG formula rasterize")
+        return 0
+    media_dir = os.path.join(work_root, "ppt", "media")
+    slides_dir = os.path.join(work_root, "ppt", "slides")
+    if not os.path.isdir(media_dir) or not os.path.isdir(slides_dir):
+        return 0
+
+    fixes = 0
+    for slide_file in sorted(os.listdir(slides_dir)):
+        if not (slide_file.startswith("slide") and slide_file.endswith(".xml")):
+            continue
+        slide_path = os.path.join(slides_dir, slide_file)
+        rels_path = os.path.join(slides_dir, "_rels", slide_file + ".rels")
+        rels = load_rels(rels_path)
+        with open(slide_path, "r", encoding="utf-8") as f:
+            xml = f.read()
+        if "svgBlip" not in xml and "asvg:" not in xml:
+            continue
+
+        for m in re.finditer(r"<p:pic\b[\s\S]*?</p:pic>", xml):
+            block = m.group(0)
+            svg_m = re.search(
+                r'<(?:asvg:)?svgBlip\b[^>]*r:embed="([^"]+)"',
+                block,
+            )
+            blip_m = re.search(r"<a:blip\b[^>]*r:embed=\"([^\"]+)\"", block)
+            ext = re.search(r"<a:ext\s+cx=\"(\d+)\"\s+cy=\"(\d+)\"", block)
+            if not svg_m or not blip_m or not ext:
+                continue
+            svg_rid, png_rid = svg_m.group(1), blip_m.group(1)
+            if svg_rid == png_rid:
+                continue
+            svg_target = rels.get(svg_rid, "")
+            png_target = rels.get(png_rid, "")
+            if not svg_target.lower().endswith(".svg"):
+                continue
+            svg_abs = resolve_media_path(svg_target, work_root)
+            png_abs = resolve_media_path(png_target, work_root)
+            if not svg_abs:
+                continue
+            # Target supersampled width for the on-slide box (~300dpi × 2).
+            box_w = _emu_to_px(int(ext.group(1)), 300)
+            width = max(1600, box_w * 2)
+            tmp_png = svg_abs + ".__raster.png"
+            if not _rasterize_svg_file(rsvg, svg_abs, tmp_png, width):
+                continue
+            # Prefer overwriting the PNG fallback LibreOffice actually paints.
+            dest = png_abs if (png_abs and png_target.lower().endswith((".png", ".jpg", ".jpeg"))) else None
+            if dest is None:
+                # No usable fallback file — write beside SVG and retarget blip rid.
+                dest = os.path.splitext(svg_abs)[0] + ".png"
+                shutil.move(tmp_png, dest)
+                new_rid = f"rIdSvgPng{fixes}"
+                rels[png_rid if png_rid in rels else new_rid] = (
+                    f"../media/{os.path.basename(dest)}"
+                )
+                write_rels(rels_path, rels)
+            else:
+                shutil.move(tmp_png, dest)
+            fixes += 1
+
+    return fixes
+
+
+def rasterize_orphan_svgs(work_root: str) -> int:
+    """Rasterize leftover ppt/media/*.svg not already handled as Office fallbacks."""
+    rsvg = _find_rsvg_convert()
+    if not rsvg:
+        return 0
+    media_dir = os.path.join(work_root, "ppt", "media")
+    if not os.path.isdir(media_dir):
+        return 0
+    svgs = [f for f in os.listdir(media_dir) if f.lower().endswith(".svg")]
+    if not svgs:
+        return 0
+
+    display = collect_svg_display_sizes(work_root, dpi=300)
+    converted: Dict[str, str] = {}
+    for name in svgs:
+        src = os.path.join(media_dir, name)
+        stem = os.path.splitext(name)[0]
+        dst_name = f"{stem}.png"
+        dst = os.path.join(media_dir, dst_name)
+        box = display.get(name)
+        width = max(1600, (box[0] * 2) if box else 1600)
+        if not _rasterize_svg_file(rsvg, src, dst, width):
+            continue
+        converted[name] = dst_name
+        try:
+            os.remove(src)
+        except OSError:
+            pass
+
+    if not converted:
+        return 0
+
+    slides_dir = os.path.join(work_root, "ppt", "slides")
+    rels_root = os.path.join(slides_dir, "_rels")
+    if os.path.isdir(rels_root):
+        for rels_file in os.listdir(rels_root):
+            if not rels_file.endswith(".rels"):
+                continue
+            rels_path = os.path.join(rels_root, rels_file)
+            with open(rels_path, "r", encoding="utf-8") as f:
+                text = f.read()
+            orig = text
+            for old, new in converted.items():
+                text = text.replace(f"../media/{old}", f"../media/{new}")
+                text = text.replace(f"media/{old}", f"media/{new}")
+            if text != orig:
+                with open(rels_path, "w", encoding="utf-8") as f:
+                    f.write(text)
+
+    ct_path = os.path.join(work_root, "[Content_Types].xml")
+    if os.path.isfile(ct_path):
+        with open(ct_path, "r", encoding="utf-8") as f:
+            ct = f.read()
+        orig_ct = ct
+        for old, new in converted.items():
+            ct = ct.replace(f'/ppt/media/{old}"', f'/ppt/media/{new}"')
+        ct = re.sub(
+            r'(PartName="/ppt/media/[^"]+\.png"\s+ContentType=")image/svg\+xml(")',
+            r'\1image/png\2',
+            ct,
+        )
+        if 'Extension="png"' not in ct:
+            ct = ct.replace(
+                "</Types>",
+                '<Default Extension="png" ContentType="image/png"/></Types>',
+            )
+        if ct != orig_ct:
+            with open(ct_path, "w", encoding="utf-8") as f:
+                f.write(ct)
+
+    return len(converted)
+
+
+def rasterize_svg_media(work_root: str) -> int:
+    """
+    Make SVG formulas crisp for LibreOffice export.
+    1) Overwrite Office PNG fallbacks from asvg:svgBlip sources
+    2) Convert any remaining standalone SVGs to PNG
+    """
+    n1 = replace_office_svg_fallbacks(work_root)
+    n2 = rasterize_orphan_svgs(work_root)
+    return n1 + n2
 
 
 
@@ -353,13 +573,14 @@ def fix_pptx(src_path: str) -> bool:
 
     with zipfile.ZipFile(src_path, "r") as zin:
         names = [n.replace("\\", "/") for n in zin.namelist()]
-        has_math = any(
+        has_omml = any(
             n.startswith("ppt/slides/slide") and n.endswith(".xml")
             and (b"mc:AlternateContent" in zin.read(n) or b"m:oMath" in zin.read(n))
             for n in names
             if n.startswith("ppt/slides/slide") and n.endswith(".xml")
         )
-    if not has_math:
+        has_svg = any(n.startswith("ppt/media/") and n.lower().endswith(".svg") for n in names)
+    if not has_omml and not has_svg:
         print("SKIP:no_math")
         return False
 
@@ -371,24 +592,28 @@ def fix_pptx(src_path: str) -> bool:
         total_fixes = 0
         eq_counter = 0
         slides_dir = os.path.join(work, "ppt", "slides")
-        for slide_file in sorted(os.listdir(slides_dir)):
-            if not slide_file.startswith("slide") or not slide_file.endswith(".xml"):
-                continue
-            slide_path = os.path.join(slides_dir, slide_file)
-            rels_path = os.path.join(slides_dir, "_rels", slide_file + ".rels")
-            with open(slide_path, "r", encoding="utf-8") as f:
-                xml = f.read()
-            if "mc:AlternateContent" not in xml:
-                continue
-            rels = load_rels(rels_path)
-            new_xml, fixes, eq_counter = patch_slide_xml(
-                xml, rels, work, slide_file.replace(".xml", ""), eq_counter,
-            )
-            if fixes:
-                with open(slide_path, "w", encoding="utf-8") as f:
-                    f.write(new_xml)
-                write_rels(rels_path, rels)
-                total_fixes += fixes
+        if has_omml and os.path.isdir(slides_dir):
+            for slide_file in sorted(os.listdir(slides_dir)):
+                if not slide_file.startswith("slide") or not slide_file.endswith(".xml"):
+                    continue
+                slide_path = os.path.join(slides_dir, slide_file)
+                rels_path = os.path.join(slides_dir, "_rels", slide_file + ".rels")
+                with open(slide_path, "r", encoding="utf-8") as f:
+                    xml = f.read()
+                if "mc:AlternateContent" not in xml:
+                    continue
+                rels = load_rels(rels_path)
+                new_xml, fixes, eq_counter = patch_slide_xml(
+                    xml, rels, work, slide_file.replace(".xml", ""), eq_counter,
+                )
+                if fixes:
+                    with open(slide_path, "w", encoding="utf-8") as f:
+                        f.write(new_xml)
+                    write_rels(rels_path, rels)
+                    total_fixes += fixes
+
+        svg_fixes = rasterize_svg_media(work) if has_svg else 0
+        total_fixes += svg_fixes
 
         if total_fixes == 0:
             print("SKIP:no_fixes")

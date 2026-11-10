@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     libreoffice-impress \
     poppler-utils \
+    librsvg2-bin \
     fonts-noto-cjk \
     ffmpeg \
     docker.io \
