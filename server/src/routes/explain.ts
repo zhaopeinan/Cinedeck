@@ -20,9 +20,16 @@ import {
 import { prepareAndEnqueueExplainExport } from '../services/explainExportQueue';
 import { patchNarrationAudioSync } from '../services/explainNarration';
 import { decodeUploadFilename } from '../utils/uploadFilename';
+import { AccessControl, type AccessOpts } from '../services/accessControl';
 
 function getUserId(req: Request): string {
   return (req as any).user?.id || '';
+}
+
+function getAccessOpts(req: Request, accessControl?: AccessControl): AccessOpts | undefined {
+  const actor = AccessControl.actorFromRequest(req);
+  if (!accessControl || !actor) return undefined;
+  return { access: accessControl, actor };
 }
 
 function parseVoiceBody(body: any): {
@@ -63,6 +70,7 @@ export function createExplainRouter(
   llm: LlmService,
   genSettings: ExplainGenSettingsService,
   batches?: ExplainBatchService,
+  accessControl?: AccessControl,
 ): Router {
   const router = Router();
   fs.mkdirSync(EXPLAIN_UPLOAD_DIR, { recursive: true });
@@ -152,13 +160,15 @@ export function createExplainRouter(
   router.get('/jobs', (req: Request, res: Response) => {
     const userId = getUserId(req);
     if (!userId) return res.status(401).json({ success: false, data: null, error: { code: '401', message: '未登录' } });
-    const rows = jobs.listJobs(userId).map((j) => jobs.publicRow(j));
+    const actor = AccessControl.actorFromRequest(req);
+    const ownerIds = accessControl && actor ? accessControl.listAccessibleOwnerIds(actor) : [userId];
+    const rows = jobs.listJobs(ownerIds).map((j) => jobs.publicRow(j));
     res.json({ success: true, data: { jobs: rows }, error: null });
   });
 
   router.get('/jobs/:id', (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const job = jobs.getOwned(String(req.params.id), userId);
+    const job = jobs.getOwned(String(req.params.id), userId, getAccessOpts(req, accessControl));
     if (!job) return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     res.json({ success: true, data: jobs.publicRow(job), error: null });
   });
@@ -203,7 +213,7 @@ export function createExplainRouter(
 
   router.post('/jobs/:id/select-style', (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const job = jobs.getOwned(String(req.params.id), userId);
+    const job = jobs.getOwned(String(req.params.id), userId, getAccessOpts(req, accessControl));
     if (!job) return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     if (job.status !== 'await_style') {
       return res.status(400).json({
@@ -245,7 +255,7 @@ export function createExplainRouter(
 
   router.post('/jobs/:id/approve-sample', (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const job = jobs.getOwned(String(req.params.id), userId);
+    const job = jobs.getOwned(String(req.params.id), userId, getAccessOpts(req, accessControl));
     if (!job) return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     if (job.status !== 'await_sample') {
       return res.status(400).json({
@@ -296,7 +306,7 @@ export function createExplainRouter(
 
   router.post('/jobs/:id/reject-sample', (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const job = jobs.getOwned(String(req.params.id), userId);
+    const job = jobs.getOwned(String(req.params.id), userId, getAccessOpts(req, accessControl));
     if (!job) return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     if (job.status !== 'await_sample') {
       return res.status(400).json({
@@ -332,7 +342,7 @@ export function createExplainRouter(
 
   router.post('/jobs/:id/retry', (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const job = jobs.getOwned(String(req.params.id), userId);
+    const job = jobs.getOwned(String(req.params.id), userId, getAccessOpts(req, accessControl));
     if (!job) return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     if (job.status !== 'failed' && job.status !== 'cancelled') {
       return res.status(400).json({
@@ -404,7 +414,7 @@ export function createExplainRouter(
     } catch (err: any) {
       const code = err?.code === '409' || err?.code === '404' || err?.code === '400' ? err.code : '500';
       const status = code === '404' ? 404 : code === '409' ? 409 : code === '400' ? 400 : 500;
-      const parent = jobs.getOwned(String(req.params.id), userId);
+      const parent = jobs.getOwned(String(req.params.id), userId, getAccessOpts(req, accessControl));
       return res.status(status).json({
         success: false,
         data: parent ? jobs.publicRow(parent) : (err?.job ? { exportJobId: err.job.id } : null),
@@ -415,14 +425,14 @@ export function createExplainRouter(
 
   router.post('/jobs/:id/cancel', (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const updated = jobs.requestCancel(String(req.params.id), userId);
+    const updated = jobs.requestCancel(String(req.params.id), userId, getAccessOpts(req, accessControl));
     if (!updated) return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     res.json({ success: true, data: jobs.publicRow(updated), error: null });
   });
 
   router.delete('/jobs/:id', (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const ok = jobs.deleteJob(String(req.params.id), userId);
+    const ok = jobs.deleteJob(String(req.params.id), userId, getAccessOpts(req, accessControl));
     if (!ok) {
       return res.status(400).json({
         success: false,
@@ -435,7 +445,7 @@ export function createExplainRouter(
 
   const sendHtml = (req: Request, res: Response, kind: 'sample' | 'final') => {
     const userId = getUserId(req);
-    const job = jobs.getOwned(String(req.params.id), userId);
+    const job = jobs.getOwned(String(req.params.id), userId, getAccessOpts(req, accessControl));
     if (!job) return res.status(404).end();
     const filePath = kind === 'sample' ? job.sample_path : job.final_path;
     if (!filePath || !fs.existsSync(filePath)) return res.status(404).end();
@@ -456,7 +466,7 @@ export function createExplainRouter(
 
   router.get('/jobs/:id/video', (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const job = jobs.getOwned(String(req.params.id), userId);
+    const job = jobs.getOwned(String(req.params.id), userId, getAccessOpts(req, accessControl));
     if (!job?.video_path || !fs.existsSync(job.video_path)) return res.status(404).end();
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="explain-${job.id.slice(0, 8)}.mp4"`);
@@ -467,13 +477,15 @@ export function createExplainRouter(
   if (batches) {
     router.get('/batches', (req: Request, res: Response) => {
       const userId = getUserId(req);
-      const rows = batches.listForUser(userId).map((b) => batches.publicRow(b));
+      const actor = AccessControl.actorFromRequest(req);
+      const ownerIds = accessControl && actor ? accessControl.listAccessibleOwnerIds(actor) : [userId];
+      const rows = batches.listForUser(ownerIds).map((b) => batches.publicRow(b));
       res.json({ success: true, data: { batches: rows }, error: null });
     });
 
     router.get('/batches/:id', (req: Request, res: Response) => {
       const userId = getUserId(req);
-      const batch = batches.getOwned(String(req.params.id), userId);
+      const batch = batches.getOwned(String(req.params.id), userId, getAccessOpts(req, accessControl));
       if (!batch) {
         return res.status(404).json({ success: false, data: null, error: { code: '404', message: '专题不存在' } });
       }
@@ -550,14 +562,14 @@ export function createExplainRouter(
 
     router.post('/batches/:id/cancel', (req: Request, res: Response) => {
       const userId = getUserId(req);
-      const updated = batches.requestCancel(String(req.params.id), userId);
+      const updated = batches.requestCancel(String(req.params.id), userId, getAccessOpts(req, accessControl));
       if (!updated) {
         return res.status(404).json({ success: false, data: null, error: { code: '404', message: '专题不存在' } });
       }
       // Best-effort cancel child jobs still waiting
       for (const child of batches.listChildJobs(updated.id)) {
         if (['queued', 'await_style', 'await_sample', 'running'].includes(child.status)) {
-          jobs.requestCancel(child.id, userId);
+          jobs.requestCancel(child.id, userId, getAccessOpts(req, accessControl));
         }
       }
       batches.refreshFromChildren(updated.id);

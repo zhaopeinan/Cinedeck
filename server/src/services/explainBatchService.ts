@@ -6,6 +6,7 @@ import type Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 import { EXPLAIN_UPLOAD_DIR, EXPLAIN_WORK_DIR, type ExplainJobRow } from './explainJobService';
+import { AccessOpts, ownerInClause, ownsOrGranted } from './accessControl';
 
 fs.mkdirSync(EXPLAIN_UPLOAD_DIR, { recursive: true });
 fs.mkdirSync(EXPLAIN_WORK_DIR, { recursive: true });
@@ -131,16 +132,18 @@ export class ExplainBatchService {
     return (this.db.prepare('SELECT * FROM explain_batches WHERE id = ?').get(id) as ExplainBatchRow | undefined) || null;
   }
 
-  getOwned(id: string, userId: string): ExplainBatchRow | null {
+  getOwned(id: string, userId: string, opts?: AccessOpts): ExplainBatchRow | null {
     const row = this.get(id);
-    if (!row || row.user_id !== userId) return null;
+    if (!row || !ownsOrGranted(row.user_id, userId, opts)) return null;
     return row;
   }
 
-  listForUser(userId: string, limit = 40): ExplainBatchRow[] {
+  listForUser(ownerIds: string | string[], limit = 40): ExplainBatchRow[] {
+    const ids = Array.isArray(ownerIds) ? ownerIds : [ownerIds];
+    const { sql, params } = ownerInClause(ids);
     return this.db.prepare(
-      'SELECT * FROM explain_batches WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
-    ).all(userId, Math.min(100, Math.max(1, limit))) as ExplainBatchRow[];
+      `SELECT * FROM explain_batches WHERE user_id IN (${sql}) ORDER BY created_at DESC LIMIT ?`,
+    ).all(...params, Math.min(100, Math.max(1, limit))) as ExplainBatchRow[];
   }
 
   listActive(): ExplainBatchRow[] {
@@ -199,8 +202,8 @@ export class ExplainBatchService {
     return !!(row && Number(row.cancel_requested));
   }
 
-  requestCancel(id: string, userId: string): ExplainBatchRow | null {
-    const batch = this.getOwned(id, userId);
+  requestCancel(id: string, userId: string, opts?: AccessOpts): ExplainBatchRow | null {
+    const batch = this.getOwned(id, userId, opts);
     if (!batch) return null;
     if (batch.status === 'queued' || batch.status === 'await_points') {
       return this.update(id, {

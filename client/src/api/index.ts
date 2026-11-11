@@ -381,6 +381,48 @@ export const authApi = {
   getStats: () => apiClient.get<ApiResponse<any>>('/auth/stats'),
 };
 
+export interface AccessGrant {
+  id: string;
+  grantorUserId: string;
+  granteeUserId: string;
+  status: 'active' | 'revoked';
+  createdBy: string;
+  note: string | null;
+  createdAt: string;
+  revokedAt: string | null;
+  revokedBy: string | null;
+  grantorUsername?: string;
+  granteeUsername?: string;
+  createdByUsername?: string;
+}
+
+/** 数据授权：可查看并操作对方已有任务/项目（不可代建） */
+export const accessGrantApi = {
+  list: () =>
+    apiClient.get<ApiResponse<{ granted: AccessGrant[]; received: AccessGrant[] }>>('/auth/access-grants'),
+  create: (granteeUsername: string, note?: string) =>
+    apiClient.post<ApiResponse<AccessGrant>>('/auth/access-grants', {
+      granteeUsername,
+      note: note || undefined,
+    }),
+  revoke: (id: string) =>
+    apiClient.delete<ApiResponse<AccessGrant>>(`/auth/access-grants/${id}`),
+  adminList: (params?: { grantorUserId?: string; granteeUserId?: string; status?: string }) =>
+    apiClient.get<ApiResponse<AccessGrant[]>>('/auth/access-grants/admin', {
+      params: {
+        grantor_user_id: params?.grantorUserId,
+        grantee_user_id: params?.granteeUserId,
+        status: params?.status,
+      },
+    }),
+  adminCreate: (grantorUserId: string, granteeUsername: string, note?: string) =>
+    apiClient.post<ApiResponse<AccessGrant>>('/auth/access-grants/admin', {
+      grantorUserId,
+      granteeUsername,
+      note: note || undefined,
+    }),
+};
+
 export const systemSettingsApi = {
   list: () => apiClient.get<ApiResponse<any[]>>('/system-settings'),
   update: (key: string, value: string) =>
@@ -924,6 +966,8 @@ export interface UnifiedJob {
   durationMs?: number | null;
   href?: string;
   cancellable: boolean;
+  ownerUserId?: string | null;
+  ownerUsername?: string | null;
 }
 
 export interface JobsSummary {

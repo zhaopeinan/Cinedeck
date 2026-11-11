@@ -47,12 +47,28 @@ export class ProjectService {
     return !!(row && Number(row.is_greenscreen));
   }
 
-  /** 列出当前用户的项目 */
-  listProjects(userId?: string) {
-    if (userId) {
-      return this.db.prepare('SELECT id, name, file_name, parse_status, video_status, created_at, updated_at FROM projects WHERE user_id = ? ORDER BY updated_at DESC').all(userId);
+  /** 列出当前用户（或可访问所有者）的项目，附带所有者用户名 */
+  listProjects(ownerIds?: string | string[]) {
+    if (ownerIds) {
+      const ids = Array.isArray(ownerIds) ? ownerIds : [ownerIds];
+      if (!ids.length) return [];
+      const placeholders = ids.map(() => '?').join(', ');
+      return this.db.prepare(`
+        SELECT p.id, p.name, p.file_name, p.parse_status, p.video_status, p.created_at, p.updated_at, p.user_id,
+               u.username AS owner_username
+        FROM projects p
+        LEFT JOIN users u ON p.user_id = u.id
+        WHERE p.user_id IN (${placeholders})
+        ORDER BY p.updated_at DESC
+      `).all(...ids);
     }
-    return this.db.prepare('SELECT id, name, file_name, parse_status, video_status, created_at, updated_at FROM projects ORDER BY updated_at DESC').all();
+    return this.db.prepare(`
+      SELECT p.id, p.name, p.file_name, p.parse_status, p.video_status, p.created_at, p.updated_at, p.user_id,
+             u.username AS owner_username
+      FROM projects p
+      LEFT JOIN users u ON p.user_id = u.id
+      ORDER BY p.updated_at DESC
+    `).all();
   }
 
   /** 管理员：列出所有项目（含用户名） */

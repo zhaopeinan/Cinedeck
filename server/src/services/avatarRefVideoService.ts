@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'crypto';
+import { AccessOpts, ownerInClause, ownsOrGranted } from './accessControl';
 
 const DATA_DIR = path.resolve(process.cwd(), '..', 'data');
 
@@ -59,17 +60,20 @@ export class AvatarRefVideoService {
     return dir;
   }
 
-  listByUser(userId: string): AvatarRefVideo[] {
+  listByUser(ownerIds: string | string[]): AvatarRefVideo[] {
+    const ids = Array.isArray(ownerIds) ? ownerIds : [ownerIds];
+    const { sql, params } = ownerInClause(ids);
     return this.db
-      .prepare('SELECT * FROM avatar_ref_videos WHERE user_id = ? ORDER BY created_at DESC')
-      .all(userId) as AvatarRefVideo[];
+      .prepare(`SELECT * FROM avatar_ref_videos WHERE user_id IN (${sql}) ORDER BY created_at DESC`)
+      .all(...params) as AvatarRefVideo[];
   }
 
-  getOwned(id: string, userId: string): AvatarRefVideo | null {
+  getOwned(id: string, userId: string, opts?: AccessOpts): AvatarRefVideo | null {
     const row = this.db
-      .prepare('SELECT * FROM avatar_ref_videos WHERE id = ? AND user_id = ?')
-      .get(id, userId) as AvatarRefVideo | undefined;
-    return row || null;
+      .prepare('SELECT * FROM avatar_ref_videos WHERE id = ?')
+      .get(id) as AvatarRefVideo | undefined;
+    if (!row || !ownsOrGranted(row.user_id, userId, opts)) return null;
+    return row;
   }
 
   /** Move file across mounts safely (rename fails with EXDEV). */

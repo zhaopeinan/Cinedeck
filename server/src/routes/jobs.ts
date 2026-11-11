@@ -13,6 +13,8 @@ import {
   requestCancelExplainExportJob,
 } from '../services/explainExportQueue';
 import { VoiceTtsJobService } from '../services/voiceTtsJobService';
+import { AccessControl, type AccessOpts } from '../services/accessControl';
+import { ProjectService } from '../services/projectService';
 
 function getUserId(req: Request): string {
   return (req as any).user?.id || '';
@@ -25,9 +27,24 @@ export function createJobsRouter(
     moocJobs: MoocJobService;
     explainJobs?: ExplainJobService;
     voiceTtsJobs?: VoiceTtsJobService;
+    projectService?: ProjectService;
   },
+  accessControl?: AccessControl,
 ): Router {
   const router = Router();
+
+  const accessOpts = (req: Request): AccessOpts | undefined => {
+    const actor = AccessControl.actorFromRequest(req);
+    if (!accessControl || !actor) return undefined;
+    return { access: accessControl, actor };
+  };
+
+  const canAccess = (req: Request, ownerId: string | null | undefined): boolean => {
+    const actor = AccessControl.actorFromRequest(req);
+    if (!actor) return false;
+    if (accessControl) return accessControl.canAccessOwner(actor, ownerId);
+    return actor.id === ownerId || actor.role === 'admin';
+  };
 
   router.get('/', (req: Request, res: Response) => {
     const userId = getUserId(req);
@@ -38,9 +55,11 @@ export function createJobsRouter(
         error: { code: '401', message: '未登录' },
       });
     }
+    const actor = AccessControl.actorFromRequest(req);
+    const ownerIds = accessControl && actor ? accessControl.listAccessibleOwnerIds(actor) : [userId];
     const status = typeof req.query.status === 'string' ? req.query.status : undefined;
     const limit = req.query.limit ? Number(req.query.limit) : undefined;
-    const jobs = registry.listForUser(userId, { status, limit });
+    const jobs = registry.listForUser(ownerIds, { status, limit });
     res.json({ success: true, data: { jobs }, error: null });
   });
 
@@ -53,7 +72,9 @@ export function createJobsRouter(
         error: { code: '401', message: '未登录' },
       });
     }
-    const summary = registry.summaryForUser(userId);
+    const actor = AccessControl.actorFromRequest(req);
+    const ownerIds = accessControl && actor ? accessControl.listAccessibleOwnerIds(actor) : [userId];
+    const summary = registry.summaryForUser(ownerIds);
     res.json({ success: true, data: summary, error: null });
   });
 
@@ -71,6 +92,7 @@ export function createJobsRouter(
       });
     }
 
+    const opts = accessOpts(req);
     const rawId = String(req.params.id || '');
     let kind = String(req.query.kind || req.body?.kind || '') as JobKind | '';
     let id = rawId;
@@ -91,27 +113,27 @@ export function createJobsRouter(
     if (!kind) {
       // Infer from in-memory maps / DB ownership
       const avatar = getAvatarJob(rawId);
-      if (avatar && avatar.userId === userId) kind = 'avatar';
+      if (avatar && canAccess(req, avatar.userId)) kind = 'avatar';
       const compose = getComposeJob(rawId);
-      if (!kind && compose && compose.userId === userId) kind = 'compose';
+      if (!kind && compose && canAccess(req, compose.userId)) kind = 'compose';
       if (!kind) {
-        const d = deps.dialogueJobs.getOwned(rawId, userId);
+        const d = deps.dialogueJobs.getOwned(rawId, userId, opts);
         if (d) kind = 'dialogue';
       }
       if (!kind) {
-        const m = deps.moocJobs.getJob(rawId);
-        if (m && m.user_id === userId) kind = 'mooc';
+        const m = deps.moocJobs.getOwned(rawId, userId, opts);
+        if (m) kind = 'mooc';
       }
       if (!kind && deps.explainJobs) {
-        const e = deps.explainJobs.getOwned(rawId, userId);
+        const e = deps.explainJobs.getOwned(rawId, userId, opts);
         if (e) kind = 'explain';
       }
       if (!kind) {
         const ex = getExplainExportJob(rawId);
-        if (ex && ex.userId === userId) kind = 'explain_export';
+        if (ex && canAccess(req, ex.userId)) kind = 'explain_export';
       }
       if (!kind && deps.voiceTtsJobs) {
-        const t = deps.voiceTtsJobs.getOwned(rawId, userId);
+        const t = deps.voiceTtsJobs.getOwned(rawId, userId, opts);
         if (t) kind = 'voice_tts';
       }
     }
@@ -128,7 +150,7 @@ export function createJobsRouter(
       switch (kind) {
         case 'avatar': {
           const job = getAvatarJob(id);
-          if (!job || job.userId !== userId) {
+          if (!job || !canAccess(req, job.userId)) {
             return res.status(404).json({
               success: false,
               data: null,
@@ -140,7 +162,7 @@ export function createJobsRouter(
         }
         case 'compose': {
           const job = getComposeJob(id);
-          if (!job || job.userId !== userId) {
+          if (!job || !canAccess(req, job.userId)) {
             return res.status(404).json({
               success: false,
               data: null,
@@ -151,7 +173,7 @@ export function createJobsRouter(
           return res.json({ success: true, data: { id, kind, status: updated?.status }, error: null });
         }
         case 'dialogue': {
-          const updated = deps.dialogueJobs.requestCancel(id, userId);
+          const updated = deps.dialogueJobs.requestCancel(id, userId, opts);
           if (!updated) {
             return res.status(404).json({
               success: false,
@@ -162,23 +184,43 @@ export function createJobsRouter(
           return res.json({ success: true, data: { id, kind, status: updated.status }, error: null });
         }
         case 'mooc': {
-          const job = deps.moocJobs.getJob(id);
-          if (!job || job.user_id !== userId) {
+          const job = deps.moocJobs.getOwned(id, userId, opts);
+          if (!job) {
             return res.status(404).json({
               success: false,
               data: null,
               error: { code: '404', message: '任务不存在' },
             });
           }
-          const updated = deps.moocJobs.cancelJob(id, userId);
+          const updated = deps.moocJobs.cancelJob(id, userId, opts);
           requestMoocJobCancel(id);
           return res.json({ success: true, data: { id, kind, status: updated?.status }, error: null });
         }
         case 'tts_dubbing': {
+          if (deps.projectService) {
+            const project = deps.projectService.getProject(id);
+            if (!project || !canAccess(req, project.user_id)) {
+              return res.status(404).json({
+                success: false,
+                data: null,
+                error: { code: '404', message: '任务不存在' },
+              });
+            }
+          }
           markDubbingCancelled(id);
           return res.json({ success: true, data: { id, kind, status: 'cancelled' }, error: null });
         }
         case 'project_avatar': {
+          if (deps.projectService) {
+            const project = deps.projectService.getProject(id);
+            if (!project || !canAccess(req, project.user_id)) {
+              return res.status(404).json({
+                success: false,
+                data: null,
+                error: { code: '404', message: '任务不存在' },
+              });
+            }
+          }
           requestCancel('avatar', id);
           return res.json({ success: true, data: { id, kind, status: 'cancelled' }, error: null });
         }
@@ -190,7 +232,7 @@ export function createJobsRouter(
               error: { code: 'JOB_NO_CANCEL', message: '讲解动画取消不可用' },
             });
           }
-          const updated = deps.explainJobs.requestCancel(id, userId);
+          const updated = deps.explainJobs.requestCancel(id, userId, opts);
           if (!updated) {
             return res.status(404).json({
               success: false,
@@ -201,7 +243,16 @@ export function createJobsRouter(
           return res.json({ success: true, data: { id, kind, status: updated.status }, error: null });
         }
         case 'explain_export': {
-          const updated = requestCancelExplainExportJob(id, userId);
+          const job = getExplainExportJob(id);
+          if (!job || !canAccess(req, job.userId)) {
+            return res.status(404).json({
+              success: false,
+              data: null,
+              error: { code: '404', message: '任务不存在' },
+            });
+          }
+          // requestCancelExplainExportJob still checks strict owner; bypass via direct cancel after access check
+          const updated = requestCancelExplainExportJob(id, job.userId);
           if (!updated) {
             return res.status(404).json({
               success: false,
@@ -219,7 +270,7 @@ export function createJobsRouter(
               error: { code: 'JOB_NO_CANCEL', message: '造声任务取消不可用' },
             });
           }
-          const job = deps.voiceTtsJobs.getOwned(id, userId);
+          const job = deps.voiceTtsJobs.getOwned(id, userId, opts);
           if (!job) {
             return res.status(404).json({
               success: false,

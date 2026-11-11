@@ -11,6 +11,7 @@ import {
 import { decodeUploadFilename } from '../utils/uploadFilename';
 import { pumpTranscribeQueue } from '../services/transcribeWorker';
 import { shouldSimplifyTranscript, toSimplifiedChinese } from '../utils/toSimplifiedChinese';
+import { AccessControl } from '../services/accessControl';
 
 const MAX_BYTES = 500 * 1024 * 1024;
 const ALLOWED_EXT = new Set([
@@ -34,7 +35,7 @@ function cleanupJobFiles(filePath: string, audioPath: string | null) {
   } catch { /* ignore */ }
 }
 
-export function createTranscribeRouter(jobs: TranscribeJobService): Router {
+export function createTranscribeRouter(jobs: TranscribeJobService, accessControl?: AccessControl): Router {
   const router = Router();
   fs.mkdirSync(TRANSCRIBE_UPLOAD_DIR, { recursive: true });
 
@@ -68,7 +69,9 @@ export function createTranscribeRouter(jobs: TranscribeJobService): Router {
   router.get('/jobs', (req: Request, res: Response) => {
     const user = getUser(req);
     if (!user?.id) return res.status(401).json({ success: false, data: null, error: { code: 'AUTH001', message: '未登录' } });
-    const rows = jobs.listByUser(user.id, user.role === 'admin');
+    const actor = AccessControl.actorFromRequest(req);
+    const ownerIds = accessControl && actor ? accessControl.listAccessibleOwnerIds(actor) : [user.id];
+    const rows = jobs.listByUser(ownerIds, user.role === 'admin');
     res.json({ success: true, data: rows.map(publicTranscribeJob), error: null });
   });
 
@@ -77,7 +80,7 @@ export function createTranscribeRouter(jobs: TranscribeJobService): Router {
     const id = String(req.params.id);
     const row = jobs.get(id);
     if (!row) return res.status(404).json({ success: false, data: null, error: { code: '4040', message: '任务不存在' } });
-    if (user?.role !== 'admin' && row.user_id !== user?.id) {
+    if (!(accessControl ? accessControl.canAccessOwner(AccessControl.actorFromRequest(req), row.user_id) : (user?.role === 'admin' || row.user_id === user?.id))) {
       return res.status(403).json({ success: false, data: null, error: { code: 'AUTH003', message: '没有权限' } });
     }
     res.json({ success: true, data: publicTranscribeJob(row), error: null });
@@ -88,7 +91,7 @@ export function createTranscribeRouter(jobs: TranscribeJobService): Router {
     const id = String(req.params.id);
     const row = jobs.get(id);
     if (!row) return res.status(404).json({ success: false, data: null, error: { code: '4040', message: '任务不存在' } });
-    if (user?.role !== 'admin' && row.user_id !== user?.id) {
+    if (!(accessControl ? accessControl.canAccessOwner(AccessControl.actorFromRequest(req), row.user_id) : (user?.role === 'admin' || row.user_id === user?.id))) {
       return res.status(403).json({ success: false, data: null, error: { code: 'AUTH003', message: '没有权限' } });
     }
     if (!row.text) {
@@ -144,7 +147,7 @@ export function createTranscribeRouter(jobs: TranscribeJobService): Router {
     const id = String(req.params.id);
     const row = jobs.get(id);
     if (!row) return res.status(404).json({ success: false, data: null, error: { code: '4040', message: '任务不存在' } });
-    if (user?.role !== 'admin' && row.user_id !== user?.id) {
+    if (!(accessControl ? accessControl.canAccessOwner(AccessControl.actorFromRequest(req), row.user_id) : (user?.role === 'admin' || row.user_id === user?.id))) {
       return res.status(403).json({ success: false, data: null, error: { code: 'AUTH003', message: '没有权限' } });
     }
     if (!row.file_path || !fs.existsSync(row.file_path)) {
@@ -163,7 +166,7 @@ export function createTranscribeRouter(jobs: TranscribeJobService): Router {
     const id = String(req.params.id);
     const row = jobs.get(id);
     if (!row) return res.status(404).json({ success: false, data: null, error: { code: '4040', message: '任务不存在' } });
-    if (user?.role !== 'admin' && row.user_id !== user?.id) {
+    if (!(accessControl ? accessControl.canAccessOwner(AccessControl.actorFromRequest(req), row.user_id) : (user?.role === 'admin' || row.user_id === user?.id))) {
       return res.status(403).json({ success: false, data: null, error: { code: 'AUTH003', message: '没有权限' } });
     }
     if (row.status === 'running' || row.status === 'queued') {
@@ -192,7 +195,7 @@ export function createTranscribeRouter(jobs: TranscribeJobService): Router {
     const id = String(req.params.id);
     const row = jobs.get(id);
     if (!row) return res.status(404).json({ success: false, data: null, error: { code: '4040', message: '任务不存在' } });
-    if (user?.role !== 'admin' && row.user_id !== user?.id) {
+    if (!(accessControl ? accessControl.canAccessOwner(AccessControl.actorFromRequest(req), row.user_id) : (user?.role === 'admin' || row.user_id === user?.id))) {
       return res.status(403).json({ success: false, data: null, error: { code: 'AUTH003', message: '没有权限' } });
     }
     if (row.status === 'running') {

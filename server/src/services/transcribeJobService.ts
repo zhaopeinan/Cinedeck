@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import { ownerInClause } from './accessControl';
 
 const DATA_DIR = path.resolve(process.cwd(), '..', 'data');
 export const TRANSCRIBE_UPLOAD_DIR = path.join(DATA_DIR, 'transcribe-uploads');
@@ -110,13 +111,15 @@ export class TranscribeJobService {
     return (this.db.prepare('SELECT * FROM transcribe_jobs WHERE id = ?').get(id) as TranscribeJobRow | undefined) || null;
   }
 
-  listByUser(userId: string, isAdmin: boolean, limit = 50): TranscribeJobRow[] {
+  listByUser(ownerIds: string | string[], isAdmin: boolean, limit = 50): TranscribeJobRow[] {
     if (isAdmin) {
       return this.db.prepare('SELECT * FROM transcribe_jobs ORDER BY created_at DESC LIMIT ?').all(limit) as TranscribeJobRow[];
     }
+    const ids = Array.isArray(ownerIds) ? ownerIds : [ownerIds];
+    const { sql, params } = ownerInClause(ids);
     return this.db.prepare(
-      'SELECT * FROM transcribe_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
-    ).all(userId, limit) as TranscribeJobRow[];
+      `SELECT * FROM transcribe_jobs WHERE user_id IN (${sql}) ORDER BY created_at DESC LIMIT ?`,
+    ).all(...params, limit) as TranscribeJobRow[];
   }
 
   nextQueued(): TranscribeJobRow | null {

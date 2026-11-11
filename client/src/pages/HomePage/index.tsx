@@ -5,6 +5,7 @@ import { InboxOutlined, FilePptOutlined, RightOutlined, ClockCircleOutlined, Del
 import { useProjectStore } from '../../stores/projectStore';
 import { projectApi } from '../../api';
 import { analytics, AnalyticsEvents } from '../../utils/analytics';
+import { useAuthStore } from '../../stores/authStore';
 
 const { Title, Text } = Typography;
 const { Dragger } = Upload;
@@ -19,6 +20,7 @@ const PARSE_STATUS_MAP: Record<string, { text: string; color: string }> = {
 
 const HomePage: React.FC = () => {
   const navigate = useNavigate();
+  const { user } = useAuthStore();
   const { createProject, parseProject, isParsing, listProjects, projects } = useProjectStore();
   const [file, setFile] = useState<File | null>(null);
   const [projectCreated, setProjectCreated] = useState(false);
@@ -263,6 +265,12 @@ const HomePage: React.FC = () => {
                         <FilePptOutlined style={{ color: '#d4380d' }} />
                         <span>{project.name || project.file_name}</span>
                         <Tag color={statusInfo.color}>{statusInfo.text}</Tag>
+                        {project.ownerUsername
+                          && project.userId
+                          && user?.id
+                          && project.userId !== user.id && (
+                          <Tag color="orange">所有者 · {project.ownerUsername}</Tag>
+                        )}
                       </Space>
                     }
                     description={

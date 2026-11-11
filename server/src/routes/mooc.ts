@@ -21,6 +21,7 @@ import {
   listExplainWorkQueue,
   removeExplainInsertForMooc,
 } from '../services/explainInsertRepair';
+import { AccessControl, type AccessOpts } from '../services/accessControl';
 
 const PREVIEW_DIR = path.join(getMoocUploadDir(), 'previews');
 fs.mkdirSync(PREVIEW_DIR, { recursive: true });
@@ -36,6 +37,20 @@ const previewOwners = new Map<string, string>();
 function getUserId(req: Request): string {
   return (req as any).user?.id || '';
 }
+
+function getAccessOpts(req: Request, accessControl?: AccessControl): AccessOpts | undefined {
+  const actor = AccessControl.actorFromRequest(req);
+  if (!accessControl || !actor) return undefined;
+  return { access: accessControl, actor };
+}
+
+function canAccessJob(req: Request, ownerId: string | null | undefined, accessControl?: AccessControl): boolean {
+  const actor = AccessControl.actorFromRequest(req);
+  if (!actor) return false;
+  if (accessControl) return accessControl.canAccessOwner(actor, ownerId);
+  return actor.id === ownerId || actor.role === 'admin';
+}
+
 
 function serializeJob(
   job: any,
@@ -171,6 +186,7 @@ export function createMoocRouter(
     videoComposer?: VideoComposerService;
     db?: Database.Database;
   },
+  accessControl?: AccessControl,
 ): Router {
   const router = Router();
   const progressExtras = { explainBatches, explainJobs };
@@ -295,7 +311,9 @@ export function createMoocRouter(
   // List jobs for current user
   router.get('/jobs', (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const jobs = moocJobs.listJobs(userId);
+    const actor = AccessControl.actorFromRequest(req);
+    const ownerIds = accessControl && actor ? accessControl.listAccessibleOwnerIds(actor) : [userId];
+    const jobs = moocJobs.listJobs(ownerIds);
     res.json({
       success: true,
       data: {
@@ -313,7 +331,7 @@ export function createMoocRouter(
   router.get('/jobs/:id', (req: Request, res: Response) => {
     const userId = getUserId(req);
     const job = moocJobs.getJob(String(req.params.id));
-    if (!job || job.user_id !== userId) {
+    if (!job || !canAccessJob(req, job.user_id, accessControl)) {
       return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     }
     res.json({
@@ -327,7 +345,7 @@ export function createMoocRouter(
   router.get('/jobs/:id/ppt', (req: Request, res: Response) => {
     const userId = getUserId(req);
     const job = moocJobs.getJob(String(req.params.id));
-    if (!job || job.user_id !== userId) {
+    if (!job || !canAccessJob(req, job.user_id, accessControl)) {
       return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     }
     if (!job.file_path || !fs.existsSync(job.file_path)) {
@@ -532,11 +550,11 @@ export function createMoocRouter(
   router.post('/jobs/:id/cancel', (req: Request, res: Response) => {
     const userId = getUserId(req);
     const job = moocJobs.getJob(String(req.params.id));
-    if (!job || job.user_id !== userId) {
+    if (!job || !canAccessJob(req, job.user_id, accessControl)) {
       return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     }
     if (job.status === 'queued') {
-      const updated = moocJobs.cancelJob(job.id, userId);
+      const updated = moocJobs.cancelJob(job.id, userId, getAccessOpts(req, accessControl));
       return res.json({ success: true, data: serializeJob(updated, projectService, progressExtras), error: null });
     }
     if (job.status === 'running') {
@@ -554,7 +572,7 @@ export function createMoocRouter(
   router.post('/jobs/:id/optimize-explain', (req: Request, res: Response) => {
     const userId = getUserId(req);
     const job = moocJobs.getJob(String(req.params.id));
-    if (!job || job.user_id !== userId) {
+    if (!job || !canAccessJob(req, job.user_id, accessControl)) {
       return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     }
     if (job.status === 'running' || job.status === 'queued') {
@@ -576,7 +594,7 @@ export function createMoocRouter(
     const updated = moocJobs.queueOptimizeExplain(job.id, userId, {
       explainExportQuality: quality,
       force: true,
-    });
+    }, getAccessOpts(req, accessControl));
     if (!updated) {
       return res.status(400).json({
         success: false, data: null,
@@ -598,7 +616,7 @@ export function createMoocRouter(
   function handleOptimizeMultipart(req: Request, res: Response, defaults?: { changeAvatar?: boolean; addExplain?: boolean }) {
     const userId = getUserId(req);
     const job = moocJobs.getJob(String(req.params.id));
-    if (!job || job.user_id !== userId) {
+    if (!job || !canAccessJob(req, job.user_id, accessControl)) {
       return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     }
     if (job.status === 'running' || job.status === 'queued') {
@@ -700,7 +718,7 @@ export function createMoocRouter(
       addExplain,
       avatarPatch,
       explainExportQuality,
-    });
+    }, getAccessOpts(req, accessControl));
     if (!updated) {
       return res.status(400).json({
         success: false, data: null,
@@ -761,14 +779,14 @@ export function createMoocRouter(
     let ok = 0;
     for (const id of ids.slice(0, 50)) {
       const job = moocJobs.getJob(id);
-      if (!job || job.user_id !== userId) {
+      if (!job || !canAccessJob(req, job.user_id, accessControl)) {
         results.push({ id, ok: false, error: '不存在' });
         continue;
       }
       const updated = moocJobs.queueOptimizeExplain(id, userId, {
         explainExportQuality: quality,
         force: true,
-      });
+      }, getAccessOpts(req, accessControl));
       if (!updated) {
         results.push({ id, ok: false, error: '无法优化' });
         continue;
@@ -788,7 +806,7 @@ export function createMoocRouter(
   router.patch('/jobs/:id/config', (req: Request, res: Response) => {
     const userId = getUserId(req);
     const job = moocJobs.getJob(String(req.params.id));
-    if (!job || job.user_id !== userId) {
+    if (!job || !canAccessJob(req, job.user_id, accessControl)) {
       return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     }
     const cfg: any = { ...moocJobs.parseConfig(job) };
@@ -915,7 +933,7 @@ export function createMoocRouter(
   router.get('/jobs/:id/explain/work-queue', (req: Request, res: Response) => {
     const userId = getUserId(req);
     const job = moocJobs.getJob(String(req.params.id));
-    if (!job || job.user_id !== userId) {
+    if (!job || !canAccessJob(req, job.user_id, accessControl)) {
       return res.status(404).json({
         success: false, data: null,
         error: { code: '404', message: '任务不存在' },
@@ -939,7 +957,7 @@ export function createMoocRouter(
   router.post('/jobs/:id/recompose', async (req: Request, res: Response) => {
     const userId = getUserId(req);
     const job = moocJobs.getJob(String(req.params.id));
-    if (!job || job.user_id !== userId) {
+    if (!job || !canAccessJob(req, job.user_id, accessControl)) {
       return res.status(404).json({
         success: false, data: null,
         error: { code: '404', message: '任务不存在' },
@@ -955,7 +973,7 @@ export function createMoocRouter(
       const updated = moocJobs.queueRecomposeOnly(job.id, userId, {
         message: '手动排队重新合成成片',
         force: true,
-      });
+      }, getAccessOpts(req, accessControl));
       if (!updated) {
         return res.status(400).json({
           success: false, data: null,
@@ -1043,7 +1061,7 @@ export function createMoocRouter(
   router.post('/jobs/:id/retry', (req: Request, res: Response) => {
     const userId = getUserId(req);
     const job = moocJobs.getJob(String(req.params.id));
-    if (!job || job.user_id !== userId) {
+    if (!job || !canAccessJob(req, job.user_id, accessControl)) {
       return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
     }
     if (job.status === 'running' || job.status === 'queued') {
@@ -1065,8 +1083,8 @@ export function createMoocRouter(
       : !(req.body?.resume === false || req.body?.resume === '0' || req.body?.resume === 0);
 
     const updated = wantResume
-      ? moocJobs.queueResume(job.id, userId)
-      : moocJobs.queueRestart(job.id, userId);
+      ? moocJobs.queueResume(job.id, userId, getAccessOpts(req, accessControl))
+      : moocJobs.queueRestart(job.id, userId, getAccessOpts(req, accessControl));
 
     if (!updated) {
       return res.status(400).json({
@@ -1085,7 +1103,7 @@ export function createMoocRouter(
   // Delete
   router.delete('/jobs/:id', (req: Request, res: Response) => {
     const userId = getUserId(req);
-    const ok = moocJobs.deleteJob(String(req.params.id), userId);
+    const ok = moocJobs.deleteJob(String(req.params.id), userId, getAccessOpts(req, accessControl));
     if (!ok) {
       return res.status(400).json({
         success: false, data: null,

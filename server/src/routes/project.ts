@@ -6,6 +6,7 @@ import fs from 'fs';
 import { ProjectService } from '../services/projectService';
 import { PptParserService } from '../services/pptParser';
 import { dispatchTask } from '../services/taskDispatcher';
+import { AccessControl } from '../services/accessControl';
 
 type P = { id: string; pageIndex: string };
 
@@ -27,7 +28,7 @@ const upload = multer({
   limits: { fileSize: 200 * 1024 * 1024 },
 });
 
-export function createProjectRouter(projectService: ProjectService, pptParser: PptParserService): Router {
+export function createProjectRouter(projectService: ProjectService, pptParser: PptParserService, accessControl?: AccessControl): Router {
   const router = Router();
 
   const getUserId = (req: Request): string => (req as any).user?.id || '';
@@ -63,8 +64,10 @@ export function createProjectRouter(projectService: ProjectService, pptParser: P
   router.get('/', (req: Request, res: Response) => {
     const userId = getUserId(req);
     const role = getUserRole(req);
+    const actor = AccessControl.actorFromRequest(req);
     const isAdminViewAll = req.query.all === '1' && role === 'admin';
-    const projects = isAdminViewAll ? projectService.listAllProjects() : projectService.listProjects(userId);
+    const ownerIds = accessControl && actor ? accessControl.listAccessibleOwnerIds(actor) : [userId];
+    const projects = isAdminViewAll ? projectService.listAllProjects() : projectService.listProjects(ownerIds);
     res.json({ success: true, data: projects, error: null });
   });
 
@@ -77,7 +80,8 @@ export function createProjectRouter(projectService: ProjectService, pptParser: P
     // 权限校验：非管理员只能访问自己的项目
     const userId = getUserId(req);
     const role = getUserRole(req);
-    if (role !== 'admin' && project.user_id && project.user_id !== userId) {
+    const actor = AccessControl.actorFromRequest(req);
+    if (project.user_id && !(accessControl ? accessControl.canAccessOwner(actor, project.user_id) : (role === 'admin' || project.user_id === userId))) {
       return res.status(403).json({ success: false, data: null, error: { code: '403', message: '无权访问该项目' } });
     }
     res.json({ success: true, data: project, error: null });
@@ -92,7 +96,8 @@ export function createProjectRouter(projectService: ProjectService, pptParser: P
       }
       const userId = getUserId(req);
       const role = getUserRole(req);
-      if (role !== 'admin' && project.user_id && project.user_id !== userId) {
+      const actor = AccessControl.actorFromRequest(req);
+    if (project.user_id && !(accessControl ? accessControl.canAccessOwner(actor, project.user_id) : (role === 'admin' || project.user_id === userId))) {
         return res.status(403).json({ success: false, data: null, error: { code: '403', message: '无权修改该项目' } });
       }
       const updated = projectService.updateProject(req.params.id, req.body);
@@ -110,7 +115,8 @@ export function createProjectRouter(projectService: ProjectService, pptParser: P
     }
     const userId = getUserId(req);
     const role = getUserRole(req);
-    if (role !== 'admin' && project.user_id && project.user_id !== userId) {
+    const actor = AccessControl.actorFromRequest(req);
+    if (project.user_id && !(accessControl ? accessControl.canAccessOwner(actor, project.user_id) : (role === 'admin' || project.user_id === userId))) {
       return res.status(403).json({ success: false, data: null, error: { code: '403', message: '无权删除该项目' } });
     }
     const deleted = projectService.deleteProject(req.params.id);

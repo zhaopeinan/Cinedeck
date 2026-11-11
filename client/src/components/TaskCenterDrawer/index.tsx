@@ -9,6 +9,7 @@ import {
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { jobsApi, type JobsSummary, type UnifiedJob, type UnifiedJobStatus } from '../../api';
+import { useAuthStore } from '../../stores/authStore';
 
 const KIND_LABEL: Record<string, string> = {
   tts_dubbing: '配音',
@@ -94,6 +95,7 @@ interface Props {
 
 export const TaskCenterDrawer: React.FC<Props> = ({ open, onClose }) => {
   const navigate = useNavigate();
+  const me = useAuthStore((s) => s.user);
   const [jobs, setJobs] = useState<UnifiedJob[]>([]);
   const [summary, setSummary] = useState<JobsSummary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -180,6 +182,13 @@ export const TaskCenterDrawer: React.FC<Props> = ({ open, onClose }) => {
           const meta = STATUS_META[job.status] || STATUS_META.failed;
           const active = job.status === 'queued' || job.status === 'running';
           const timing = timingLine(job);
+          const sharedOwner =
+            job.ownerUsername
+            && job.ownerUserId
+            && me?.id
+            && job.ownerUserId !== me.id
+              ? job.ownerUsername
+              : null;
           return (
             <div
               key={`${job.kind}:${job.id}`}
@@ -197,6 +206,7 @@ export const TaskCenterDrawer: React.FC<Props> = ({ open, onClose }) => {
                     <Tag color={meta.color} icon={meta.icon}>
                       {meta.label}
                     </Tag>
+                    {sharedOwner && <Tag color="orange">所有者 · {sharedOwner}</Tag>}
                   </Space>
                   <div style={{ fontWeight: 500, marginTop: 4 }}>{job.title}</div>
                   <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block' }}>

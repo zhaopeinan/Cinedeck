@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import { AccessOpts, ownerInClause, ownsOrGranted } from './accessControl';
 
 const DATA_DIR = path.resolve(process.cwd(), '..', 'data');
 export const HYPERFRAME_UPLOAD_DIR = path.join(DATA_DIR, 'hyperframe-uploads');
@@ -185,13 +186,15 @@ export class HyperframeJobService {
     return (this.db.prepare('SELECT * FROM hyperframe_jobs WHERE id = ?').get(id) as HyperframeJobRow | undefined) || null;
   }
 
-  listJobs(userId: string, isAdmin = false, limit = 50): HyperframeJobRow[] {
+  listJobs(ownerIds: string | string[], isAdmin = false, limit = 50): HyperframeJobRow[] {
     if (isAdmin) {
       return this.db.prepare('SELECT * FROM hyperframe_jobs ORDER BY created_at DESC LIMIT ?').all(limit) as HyperframeJobRow[];
     }
+    const ids = Array.isArray(ownerIds) ? ownerIds : [ownerIds];
+    const { sql, params } = ownerInClause(ids);
     return this.db.prepare(
-      'SELECT * FROM hyperframe_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
-    ).all(userId, limit) as HyperframeJobRow[];
+      `SELECT * FROM hyperframe_jobs WHERE user_id IN (${sql}) ORDER BY created_at DESC LIMIT ?`,
+    ).all(...params, limit) as HyperframeJobRow[];
   }
 
   parseConfig(job: HyperframeJobRow): HfJobConfig {
@@ -275,9 +278,9 @@ export class HyperframeJobService {
     });
   }
 
-  queueProduce(id: string, userId: string, config: HfJobConfig): HyperframeJobRow | null {
+  queueProduce(id: string, userId: string, config: HfJobConfig, accessOpts?: AccessOpts): HyperframeJobRow | null {
     const job = this.getJob(id);
-    if (!job || job.user_id !== userId) return null;
+    if (!job || !ownsOrGranted(job.user_id, userId, accessOpts)) return null;
     if (job.status !== 'review' && job.status !== 'failed' && job.status !== 'success') return null;
     if (!job.scripts_json) return null;
     const allScripts = this.parseScripts(job);
@@ -314,9 +317,9 @@ export class HyperframeJobService {
     });
   }
 
-  saveScripts(id: string, userId: string, scripts: HfPageScript[]): HyperframeJobRow | null {
+  saveScripts(id: string, userId: string, scripts: HfPageScript[], accessOpts?: AccessOpts): HyperframeJobRow | null {
     const job = this.getJob(id);
-    if (!job || job.user_id !== userId) return null;
+    if (!job || !ownsOrGranted(job.user_id, userId, accessOpts)) return null;
     if (job.status !== 'review' && job.status !== 'failed') return null;
     const normalized = normalizeHfPageScripts(scripts);
     if (!normalized.length) return null;

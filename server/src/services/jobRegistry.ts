@@ -61,6 +61,8 @@ export interface UnifiedJob {
   durationMs?: number | null;
   href?: string;
   cancellable: boolean;
+  ownerUserId?: string | null;
+  ownerUsername?: string | null;
 }
 
 function withTiming(job: Omit<UnifiedJob, 'durationMs'> & { durationMs?: number | null }): UnifiedJob {
@@ -124,30 +126,44 @@ export interface JobRegistryDeps {
   explainBatches?: ExplainBatchService;
 }
 
+
+function normalizeOwnerIds(ownerIds: string | string[]): string[] {
+  const ids = Array.isArray(ownerIds) ? ownerIds : [ownerIds];
+  return [...new Set(ids.filter(Boolean))];
+}
+
+function ownerInSql(ownerIds: string[]): { sql: string; params: string[] } {
+  const ids = normalizeOwnerIds(ownerIds);
+  if (!ids.length) return { sql: '0', params: [] };
+  return { sql: ids.map(() => '?').join(', '), params: ids };
+}
+
 export class JobRegistry {
   constructor(private deps: JobRegistryDeps) {}
 
   listForUser(
-    userId: string,
+    ownerIds: string | string[],
     opts: { status?: string; limit?: number } = {},
   ): UnifiedJob[] {
+    const ids = normalizeOwnerIds(ownerIds);
     const limit = Math.min(Math.max(opts.limit || 80, 1), 200);
     const filterStatus = opts.status?.trim() || '';
     const items: UnifiedJob[] = [];
+    if (!ids.length) return [];
 
-    items.push(...this.fromTranscribe(userId));
-    items.push(...this.fromMooc(userId));
-    items.push(...this.fromHyperframe(userId));
-    items.push(...this.fromDialogue(userId));
-    items.push(...this.fromVoiceTts(userId));
-    items.push(...this.fromAvatar(userId));
-    items.push(...this.fromCompose(userId));
-    items.push(...this.fromExplainBatch(userId));
-    items.push(...this.fromExplain(userId));
-    items.push(...this.fromExplainExport(userId));
-    items.push(...this.fromProjectDubbing(userId));
-    items.push(...this.fromProjectAvatar(userId));
-    items.push(...this.fromVideoCompose(userId));
+    items.push(...this.fromTranscribe(ids));
+    items.push(...this.fromMooc(ids));
+    items.push(...this.fromHyperframe(ids));
+    items.push(...this.fromDialogue(ids));
+    items.push(...this.fromVoiceTts(ids));
+    items.push(...this.fromAvatar(ids));
+    items.push(...this.fromCompose(ids));
+    items.push(...this.fromExplainBatch(ids));
+    items.push(...this.fromExplain(ids));
+    items.push(...this.fromExplainExport(ids));
+    items.push(...this.fromProjectDubbing(ids));
+    items.push(...this.fromProjectAvatar(ids));
+    items.push(...this.fromVideoCompose(ids));
 
     let filtered = items;
     if (filterStatus === 'active') {
@@ -174,8 +190,8 @@ export class JobRegistry {
     return filtered.slice(0, limit).map((j) => withTiming(j));
   }
 
-  summaryForUser(userId: string): JobsSummary {
-    const jobs = this.listForUser(userId, { status: 'active', limit: 200 });
+  summaryForUser(ownerIds: string | string[]): JobsSummary {
+    const jobs = this.listForUser(ownerIds, { status: 'active', limit: 200 });
     const byKind: Partial<Record<JobKind, number>> = {};
     let queuedCount = 0;
     let activeCount = 0;
@@ -197,13 +213,17 @@ export class JobRegistry {
     };
   }
 
-  private fromTranscribe(userId: string): UnifiedJob[] {
+  private fromTranscribe(ownerIds: string[]): UnifiedJob[] {
+    const { sql, params } = ownerInSql(ownerIds);
     const rows = this.deps.db
       .prepare(
-        `SELECT id, file_name, status, progress, message, created_at, updated_at
-         FROM transcribe_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 40`,
+        `SELECT t.id, t.file_name, t.status, t.progress, t.message, t.created_at, t.updated_at, t.user_id,
+                u.username AS owner_username
+         FROM transcribe_jobs t
+         LEFT JOIN users u ON u.id = t.user_id
+         WHERE t.user_id IN (${sql}) ORDER BY t.created_at DESC LIMIT 40`,
       )
-      .all(userId) as Array<{
+      .all(...params) as Array<{
       id: string;
       file_name: string;
       status: string;
@@ -211,6 +231,8 @@ export class JobRegistry {
       message: string | null;
       created_at: string;
       updated_at: string;
+      user_id: string;
+      owner_username: string | null;
     }>;
     const allQueued = this.deps.db
       .prepare(`SELECT id, status, created_at FROM transcribe_jobs WHERE status IN ('queued','running')`)
@@ -230,17 +252,23 @@ export class JobRegistry {
         updatedAt: r.updated_at,
         href: '/transcribe',
         cancellable: false,
+        ownerUserId: r.user_id,
+        ownerUsername: r.owner_username,
       };
     });
   }
 
-  private fromMooc(userId: string): UnifiedJob[] {
+  private fromMooc(ownerIds: string[]): UnifiedJob[] {
+    const { sql, params } = ownerInSql(ownerIds);
     const rows = this.deps.db
       .prepare(
-        `SELECT id, name, status, progress, message, created_at, updated_at
-         FROM mooc_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 40`,
+        `SELECT m.id, m.name, m.status, m.progress, m.message, m.created_at, m.updated_at, m.user_id,
+                u.username AS owner_username
+         FROM mooc_jobs m
+         LEFT JOIN users u ON u.id = m.user_id
+         WHERE m.user_id IN (${sql}) ORDER BY m.created_at DESC LIMIT 40`,
       )
-      .all(userId) as Array<{
+      .all(...params) as Array<{
       id: string;
       name: string;
       status: string;
@@ -248,6 +276,8 @@ export class JobRegistry {
       message: string | null;
       created_at: string;
       updated_at: string;
+      user_id: string;
+      owner_username: string | null;
     }>;
     const allQueued = this.deps.db
       .prepare(`SELECT id, status, created_at FROM mooc_jobs WHERE status IN ('queued','running')`)
@@ -267,17 +297,23 @@ export class JobRegistry {
         updatedAt: r.updated_at,
         href: '/mooc',
         cancellable: status === 'queued' || status === 'running',
+        ownerUserId: r.user_id,
+        ownerUsername: r.owner_username,
       };
     });
   }
 
-  private fromHyperframe(userId: string): UnifiedJob[] {
+  private fromHyperframe(ownerIds: string[]): UnifiedJob[] {
+    const { sql, params } = ownerInSql(ownerIds);
     const rows = this.deps.db
       .prepare(
-        `SELECT id, name, status, progress, message, created_at, updated_at
-         FROM hyperframe_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 40`,
+        `SELECT h.id, h.name, h.status, h.progress, h.message, h.created_at, h.updated_at, h.user_id,
+                u.username AS owner_username
+         FROM hyperframe_jobs h
+         LEFT JOIN users u ON u.id = h.user_id
+         WHERE h.user_id IN (${sql}) ORDER BY h.created_at DESC LIMIT 40`,
       )
-      .all(userId) as Array<{
+      .all(...params) as Array<{
       id: string;
       name: string;
       status: string;
@@ -285,6 +321,8 @@ export class JobRegistry {
       message: string | null;
       created_at: string;
       updated_at: string;
+      user_id: string;
+      owner_username: string | null;
     }>;
     const allQueued = this.deps.db
       .prepare(`SELECT id, status, created_at FROM hyperframe_jobs WHERE status IN ('queued','running')`)
@@ -304,17 +342,23 @@ export class JobRegistry {
         updatedAt: r.updated_at,
         href: '/hyperframe',
         cancellable: false,
+        ownerUserId: r.user_id,
+        ownerUsername: r.owner_username,
       };
     });
   }
 
-  private fromDialogue(userId: string): UnifiedJob[] {
+  private fromDialogue(ownerIds: string[]): UnifiedJob[] {
+    const { sql, params } = ownerInSql(ownerIds);
     const rows = this.deps.db
       .prepare(
-        `SELECT id, name, status, progress, message, created_at, updated_at
-         FROM dialogue_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 40`,
+        `SELECT d.id, d.name, d.status, d.progress, d.message, d.created_at, d.updated_at, d.user_id,
+                u.username AS owner_username
+         FROM dialogue_jobs d
+         LEFT JOIN users u ON u.id = d.user_id
+         WHERE d.user_id IN (${sql}) ORDER BY d.created_at DESC LIMIT 40`,
       )
-      .all(userId) as Array<{
+      .all(...params) as Array<{
       id: string;
       name: string;
       status: string;
@@ -322,6 +366,8 @@ export class JobRegistry {
       message: string | null;
       created_at: string;
       updated_at: string;
+      user_id: string;
+      owner_username: string | null;
     }>;
     const allQueued = this.deps.db
       .prepare(`SELECT id, status, created_at FROM dialogue_jobs WHERE status IN ('queued','running')`)
@@ -341,15 +387,18 @@ export class JobRegistry {
         updatedAt: r.updated_at,
         href: '/voice-factory',
         cancellable: status === 'queued' || status === 'running',
+        ownerUserId: r.user_id,
+        ownerUsername: r.owner_username,
       };
     });
   }
 
-  private fromVoiceTts(userId: string): UnifiedJob[] {
-    const rows = this.deps.voiceTtsJobs?.listForUser(userId, 40)
+  private fromVoiceTts(ownerIds: string[]): UnifiedJob[] {
+    const { sql, params } = ownerInSql(ownerIds);
+    const rows = this.deps.voiceTtsJobs?.listForUser(ownerIds, 40)
       || (this.deps.db.prepare(
-        `SELECT * FROM voice_tts_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT 40`,
-      ).all(userId) as Array<{
+        `SELECT * FROM voice_tts_jobs WHERE user_id IN (${sql}) ORDER BY created_at DESC LIMIT 40`,
+      ).all(...params) as Array<{
         id: string;
         text: string;
         voice_name: string | null;
@@ -393,11 +442,12 @@ export class JobRegistry {
     });
   }
 
-  private fromExplainBatch(userId: string): UnifiedJob[] {
-    const rows = this.deps.explainBatches?.listForUser(userId, 40)
+  private fromExplainBatch(ownerIds: string[]): UnifiedJob[] {
+    const { sql, params } = ownerInSql(ownerIds);
+    const rows = this.deps.explainBatches?.listForUser(ownerIds, 40)
       || (this.deps.db.prepare(
-        `SELECT * FROM explain_batches WHERE user_id = ? ORDER BY created_at DESC LIMIT 40`,
-      ).all(userId) as any[]);
+        `SELECT * FROM explain_batches WHERE user_id IN (${sql}) ORDER BY created_at DESC LIMIT 40`,
+      ).all(...params) as any[]);
 
     return rows.map((r: any) => {
       let status = mapDbStatus(r.status);
@@ -422,15 +472,19 @@ export class JobRegistry {
     });
   }
 
-  private fromExplain(userId: string): UnifiedJob[] {
+  private fromExplain(ownerIds: string[]): UnifiedJob[] {
     // 专题子任务由 explain_batch 汇总，任务中心不再重复列出
+    const { sql, params } = ownerInSql(ownerIds);
     const rows = this.deps.db
       .prepare(
-        `SELECT id, name, status, progress, message, created_at, updated_at, started_at, finished_at, config_json
-         FROM explain_jobs WHERE user_id = ? AND (batch_id IS NULL OR batch_id = '')
-         ORDER BY created_at DESC LIMIT 40`,
+        `SELECT e.id, e.name, e.status, e.progress, e.message, e.created_at, e.updated_at, e.started_at, e.finished_at, e.config_json, e.user_id,
+                u.username AS owner_username
+         FROM explain_jobs e
+         LEFT JOIN users u ON u.id = e.user_id
+         WHERE e.user_id IN (${sql}) AND (e.batch_id IS NULL OR e.batch_id = '')
+         ORDER BY e.created_at DESC LIMIT 40`,
       )
-      .all(userId) as Array<{
+      .all(...params) as Array<{
       id: string;
       name: string;
       status: string;
@@ -441,6 +495,8 @@ export class JobRegistry {
       started_at: string | null;
       finished_at: string | null;
       config_json: string;
+      user_id: string;
+      owner_username: string | null;
     }>;
     const allQueued = this.deps.db
       .prepare(`SELECT id, status, created_at FROM explain_jobs WHERE status IN ('queued','running')`)
@@ -468,12 +524,14 @@ export class JobRegistry {
         finishedAt: r.finished_at,
         href: '/explain',
         cancellable: ['queued', 'running', 'await_style', 'await_sample'].includes(r.status),
+        ownerUserId: r.user_id,
+        ownerUsername: r.owner_username,
       };
     });
   }
 
-  private fromExplainExport(userId: string): UnifiedJob[] {
-    const fromMem = listExplainExportJobsForUser(userId, 40).map((j) => {
+  private fromExplainExport(ownerIds: string[]): UnifiedJob[] {
+    const fromMem = ownerIds.flatMap((userId) => listExplainExportJobsForUser(userId, 40)).map((j) => {
       const status = mapDbStatus(j.status);
       return {
         id: j.id,
@@ -489,24 +547,27 @@ export class JobRegistry {
         finishedAt: j.finishedAt,
         href: '/explain',
         cancellable: status === 'queued' || status === 'running',
+        ownerUserId: j.userId,
       };
     });
     const memExplainIds = new Set(
-      listExplainExportJobsForUser(userId, 200).map((j) => j.explainJobId),
+      ownerIds.flatMap((userId) => listExplainExportJobsForUser(userId, 200).map((j) => j.explainJobId)),
     );
 
     // Persist recent exports from explain_jobs.config_json (survives restarts)
+    const { sql, params } = ownerInSql(ownerIds);
     const rows = this.deps.db
       .prepare(
-        `SELECT id, name, config_json, created_at, updated_at
-         FROM explain_jobs WHERE user_id = ? ORDER BY updated_at DESC LIMIT 40`,
+        `SELECT id, name, config_json, created_at, updated_at, user_id
+         FROM explain_jobs WHERE user_id IN (${sql}) ORDER BY updated_at DESC LIMIT 40`,
       )
-      .all(userId) as Array<{
+      .all(...params) as Array<{
       id: string;
       name: string;
       config_json: string;
       created_at: string;
       updated_at: string;
+      user_id: string;
     }>;
 
     const fromDb: UnifiedJob[] = [];
@@ -544,14 +605,15 @@ export class JobRegistry {
         finishedAt: exp.finishedAt || null,
         href: '/explain',
         cancellable: false,
+        ownerUserId: r.user_id,
       });
     }
 
     return [...fromMem, ...fromDb];
   }
 
-  private fromAvatar(userId: string): UnifiedJob[] {
-    return listAvatarJobsForUser(userId, 40).map((j) => {
+  private fromAvatar(ownerIds: string[]): UnifiedJob[] {
+    return ownerIds.flatMap((userId) => listAvatarJobsForUser(userId, 40)).map((j) => {
       const status = mapDbStatus(j.status);
       return {
         id: j.id,
@@ -565,12 +627,13 @@ export class JobRegistry {
         updatedAt: j.updatedAt,
         href: '/avatar',
         cancellable: status === 'queued' || status === 'running',
+        ownerUserId: j.userId,
       };
     });
   }
 
-  private fromCompose(userId: string): UnifiedJob[] {
-    return listComposeJobsForUser(userId, 40).map((j) => {
+  private fromCompose(ownerIds: string[]): UnifiedJob[] {
+    return ownerIds.flatMap((userId) => listComposeJobsForUser(userId, 40)).map((j) => {
       const status = mapDbStatus(j.status);
       return {
         id: j.id,
@@ -584,16 +647,19 @@ export class JobRegistry {
         updatedAt: j.updatedAt,
         href: '/avatar/compose',
         cancellable: status === 'queued' || status === 'running',
+        ownerUserId: j.userId,
       };
     });
   }
 
-  private fromProjectDubbing(userId: string): UnifiedJob[] {
-    const projects = this.deps.projectService.listProjects(userId) as Array<{
+  private fromProjectDubbing(ownerIds: string[]): UnifiedJob[] {
+    const projects = this.deps.projectService.listProjects(ownerIds) as Array<{
       id: string;
       name: string;
       updated_at?: string;
       created_at?: string;
+      user_id?: string;
+      owner_username?: string;
     }>;
     const out: UnifiedJob[] = [];
     for (const p of projects) {
@@ -615,15 +681,19 @@ export class JobRegistry {
         updatedAt: prog.updatedAt,
         href: `/project/${p.id}/dubbing`,
         cancellable: true,
+        ownerUserId: p.user_id || null,
+        ownerUsername: p.owner_username || null,
       });
     }
     return out;
   }
 
-  private fromProjectAvatar(userId: string): UnifiedJob[] {
-    const projects = this.deps.projectService.listProjects(userId) as Array<{
+  private fromProjectAvatar(ownerIds: string[]): UnifiedJob[] {
+    const projects = this.deps.projectService.listProjects(ownerIds) as Array<{
       id: string;
       name: string;
+      user_id?: string;
+      owner_username?: string;
     }>;
     const out: UnifiedJob[] = [];
     for (const p of projects) {
@@ -641,18 +711,22 @@ export class JobRegistry {
         updatedAt: prog.updatedAt,
         href: `/project/${p.id}/avatar`,
         cancellable: true,
+        ownerUserId: p.user_id || null,
+        ownerUsername: p.owner_username || null,
       });
     }
     return out;
   }
 
-  private fromVideoCompose(userId: string): UnifiedJob[] {
-    const projects = this.deps.projectService.listProjects(userId) as Array<{
+  private fromVideoCompose(ownerIds: string[]): UnifiedJob[] {
+    const projects = this.deps.projectService.listProjects(ownerIds) as Array<{
       id: string;
       name: string;
       video_status?: string;
       updated_at?: string;
       created_at?: string;
+      user_id?: string;
+      owner_username?: string;
     }>;
     const out: UnifiedJob[] = [];
     for (const p of projects) {
@@ -674,6 +748,8 @@ export class JobRegistry {
         updatedAt: prog?.updatedAt || p.updated_at || new Date().toISOString(),
         href: `/project/${p.id}/preview`,
         cancellable: false,
+        ownerUserId: p.user_id || null,
+        ownerUsername: p.owner_username || null,
       });
     }
     return out;

@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Card, Table, Button, Space, Typography, Modal, Form, Input, InputNumber, message, Tag, Popconfirm, Spin, Divider, Select } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined, CheckCircleOutlined, ApiOutlined, ArrowLeftOutlined, SettingOutlined } from '@ant-design/icons';
-import { llmApi, systemSettingsApi, explainApi, type ExplainGenSettings } from '../../api';
+import { llmApi, systemSettingsApi, explainApi, accessGrantApi, type ExplainGenSettings, type AccessGrant } from '../../api';
 import { useAuthStore } from '../../stores/authStore';
 
 const { Title, Text, Paragraph } = Typography;
@@ -49,6 +49,13 @@ const SettingsPage: React.FC = () => {
   const [explainGenLoading, setExplainGenLoading] = useState(false);
   const [savingExplainGen, setSavingExplainGen] = useState(false);
 
+  const [grantsLoading, setGrantsLoading] = useState(false);
+  const [granted, setGranted] = useState<AccessGrant[]>([]);
+  const [received, setReceived] = useState<AccessGrant[]>([]);
+  const [grantUsername, setGrantUsername] = useState('');
+  const [grantNote, setGrantNote] = useState('');
+  const [grantSubmitting, setGrantSubmitting] = useState(false);
+
   const loadConfigs = async () => {
     setLoading(true);
     try {
@@ -58,6 +65,49 @@ const SettingsPage: React.FC = () => {
       // ignore
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadGrants = async () => {
+    setGrantsLoading(true);
+    try {
+      const res = await accessGrantApi.list();
+      setGranted(res.data.data?.granted || []);
+      setReceived(res.data.data?.received || []);
+    } catch {
+      // ignore
+    } finally {
+      setGrantsLoading(false);
+    }
+  };
+
+  const handleCreateGrant = async () => {
+    const name = grantUsername.trim();
+    if (!name) {
+      message.warning('请输入被授权用户名');
+      return;
+    }
+    setGrantSubmitting(true);
+    try {
+      await accessGrantApi.create(name, grantNote.trim() || undefined);
+      message.success(`已授权 ${name} 查看并操作你的任务与项目`);
+      setGrantUsername('');
+      setGrantNote('');
+      await loadGrants();
+    } catch (err: any) {
+      message.error(err?.response?.data?.error?.message || err?.message || '授权失败');
+    } finally {
+      setGrantSubmitting(false);
+    }
+  };
+
+  const handleRevokeGrant = async (id: string) => {
+    try {
+      await accessGrantApi.revoke(id);
+      message.success('已撤销授权');
+      await loadGrants();
+    } catch (err: any) {
+      message.error(err?.response?.data?.error?.message || err?.message || '撤销失败');
     }
   };
 
@@ -155,6 +205,7 @@ const SettingsPage: React.FC = () => {
     loadBindings();
     loadExplainGen();
     loadSystemSettings();
+    loadGrants();
   }, []);
 
   const handleSaveBindings = async () => {
@@ -327,6 +378,82 @@ const SettingsPage: React.FC = () => {
           <Title level={4} style={{ margin: 0 }}>设置</Title>
         </Space>
       </div>
+
+      <Card title="数据授权" style={{ marginBottom: 16 }}>
+        <Paragraph type="secondary" style={{ marginTop: 0 }}>
+          授权其他用户查看并操作你的全部已有任务与项目（取消、重试、删除、下载等）。对方不能以你的身份新建任务，也不能改你的密码或 LLM 配置。授权不可传递。
+        </Paragraph>
+        <Space wrap style={{ marginBottom: 16 }}>
+          <Input
+            placeholder="被授权用户名"
+            value={grantUsername}
+            onChange={(e) => setGrantUsername(e.target.value)}
+            style={{ width: 180 }}
+            onPressEnter={() => void handleCreateGrant()}
+          />
+          <Input
+            placeholder="备注（可选）"
+            value={grantNote}
+            onChange={(e) => setGrantNote(e.target.value)}
+            style={{ width: 220 }}
+          />
+          <Button type="primary" loading={grantSubmitting} onClick={() => void handleCreateGrant()}>
+            授权
+          </Button>
+        </Space>
+        <Spin spinning={grantsLoading}>
+          <Title level={5} style={{ marginTop: 8 }}>我授出的</Title>
+          <Table
+            size="small"
+            rowKey="id"
+            pagination={false}
+            dataSource={granted}
+            locale={{ emptyText: '暂无授出授权' }}
+            columns={[
+              { title: '被授权人', dataIndex: 'granteeUsername', key: 'grantee' },
+              { title: '备注', dataIndex: 'note', key: 'note', render: (v: string | null) => v || '-' },
+              {
+                title: '时间',
+                dataIndex: 'createdAt',
+                key: 'createdAt',
+                render: (v: string) => (v ? new Date(v).toLocaleString('zh-CN') : '-'),
+              },
+              {
+                title: '操作',
+                key: 'action',
+                render: (_: any, row: AccessGrant) => (
+                  <Popconfirm title="确认撤销该授权？" onConfirm={() => void handleRevokeGrant(row.id)}>
+                    <Button size="small" danger>撤销</Button>
+                  </Popconfirm>
+                ),
+              },
+            ]}
+          />
+          <Title level={5} style={{ marginTop: 24 }}>别人授给我的</Title>
+          <Table
+            size="small"
+            rowKey="id"
+            pagination={false}
+            dataSource={received}
+            locale={{ emptyText: '暂无收到的授权' }}
+            columns={[
+              { title: '授权人', dataIndex: 'grantorUsername', key: 'grantor' },
+              { title: '备注', dataIndex: 'note', key: 'note', render: (v: string | null) => v || '-' },
+              {
+                title: '时间',
+                dataIndex: 'createdAt',
+                key: 'createdAt',
+                render: (v: string) => (v ? new Date(v).toLocaleString('zh-CN') : '-'),
+              },
+              {
+                title: '权限',
+                key: 'perm',
+                render: () => <Tag color="blue">可查看并操作其任务/项目</Tag>,
+              },
+            ]}
+          />
+        </Spin>
+      </Card>
 
       <Card title="大模型（LLM）" style={{ marginBottom: isAdmin ? 0 : undefined }}>
         <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>

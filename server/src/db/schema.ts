@@ -152,6 +152,24 @@ export function initDatabase(dbPath?: string): Database.Database {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_operation_logs_created_at ON operation_logs(created_at DESC);`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_operation_logs_user_id ON operation_logs(user_id);`);
 
+  // Data access grants: grantor shares view+operate on existing tasks/projects with grantee
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS data_access_grants (
+      id TEXT PRIMARY KEY,
+      grantor_user_id TEXT NOT NULL,
+      grantee_user_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_by TEXT NOT NULL,
+      note TEXT,
+      created_at TEXT NOT NULL,
+      revoked_at TEXT,
+      revoked_by TEXT
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_data_access_grants_grantor ON data_access_grants(grantor_user_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_data_access_grants_grantee ON data_access_grants(grantee_user_id);`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_data_access_grants_active ON data_access_grants(status, grantor_user_id, grantee_user_id);`);
+
   // System settings table (key-value, admin-managed)
   db.exec(`
     CREATE TABLE IF NOT EXISTS system_settings (

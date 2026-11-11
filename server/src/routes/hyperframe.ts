@@ -12,6 +12,7 @@ import {
 import { pumpHyperframeQueue } from '../services/hyperframeWorker';
 import { decodeUploadFilename } from '../utils/uploadFilename';
 import type { ProjectService } from '../services/projectService';
+import { AccessControl } from '../services/accessControl';
 
 const MAX_BYTES = 200 * 1024 * 1024;
 
@@ -22,6 +23,7 @@ function getUser(req: Request) {
 export function createHyperframeRouter(
   jobs: HyperframeJobService,
   projectService: ProjectService,
+  accessControl?: AccessControl,
 ): Router {
   const router = Router();
   fs.mkdirSync(HYPERFRAME_UPLOAD_DIR, { recursive: true });
@@ -56,7 +58,9 @@ export function createHyperframeRouter(
   router.get('/jobs', (req: Request, res: Response) => {
     const user = getUser(req);
     if (!user?.id) return res.status(401).json({ success: false, data: null, error: { code: 'AUTH001', message: '未登录' } });
-    const rows = jobs.listJobs(user.id, user.role === 'admin');
+    const actor = AccessControl.actorFromRequest(req);
+    const ownerIds = accessControl && actor ? accessControl.listAccessibleOwnerIds(actor) : [user.id];
+    const rows = jobs.listJobs(ownerIds, user.role === 'admin');
     res.json({
       success: true,
       data: {
@@ -71,7 +75,7 @@ export function createHyperframeRouter(
     const user = getUser(req);
     const row = jobs.getJob(String(req.params.id));
     if (!row) return res.status(404).json({ success: false, data: null, error: { code: '4040', message: '任务不存在' } });
-    if (user?.role !== 'admin' && row.user_id !== user?.id) {
+    if (!(accessControl ? accessControl.canAccessOwner(AccessControl.actorFromRequest(req), row.user_id) : (user?.role === 'admin' || row.user_id === user?.id))) {
       return res.status(403).json({ success: false, data: null, error: { code: 'AUTH003', message: '没有权限' } });
     }
     const pub = publicHyperframeJob(row);
@@ -128,7 +132,7 @@ export function createHyperframeRouter(
     if (!Array.isArray(scripts)) {
       return res.status(400).json({ success: false, data: null, error: { code: '4001', message: 'scripts 必须是数组' } });
     }
-    const updated = jobs.saveScripts(String(req.params.id), user.id, scripts);
+    const updated = jobs.saveScripts(String(req.params.id), user.id, scripts, accessControl && AccessControl.actorFromRequest(req) ? { access: accessControl, actor: AccessControl.actorFromRequest(req)! } : undefined);
     if (!updated) {
       return res.status(400).json({ success: false, data: null, error: { code: '4001', message: '无法保存（任务不存在或状态不允许）' } });
     }
@@ -145,7 +149,7 @@ export function createHyperframeRouter(
     }
     const scripts = req.body?.scripts as HfPageScript[] | undefined;
     if (Array.isArray(scripts)) {
-      jobs.saveScripts(String(req.params.id), user.id, scripts);
+      jobs.saveScripts(String(req.params.id), user.id, scripts, accessControl && AccessControl.actorFromRequest(req) ? { access: accessControl, actor: AccessControl.actorFromRequest(req)! } : undefined);
     }
     const rawPages = req.body?.selected_page_indexes ?? req.body?.selectedPageIndexes;
     const selectedPageIndexes = Array.isArray(rawPages)
@@ -155,7 +159,7 @@ export function createHyperframeRouter(
       selectedVoiceId: voiceId,
       selectedModelId: modelId,
       selectedPageIndexes,
-    });
+    }, accessControl && AccessControl.actorFromRequest(req) ? { access: accessControl, actor: AccessControl.actorFromRequest(req)! } : undefined);
     if (!updated) {
       return res.status(400).json({
         success: false,
@@ -171,7 +175,7 @@ export function createHyperframeRouter(
     const user = getUser(req);
     const row = jobs.getJob(String(req.params.id));
     if (!row) return res.status(404).json({ success: false, data: null, error: { code: '4040', message: '任务不存在' } });
-    if (user?.role !== 'admin' && row.user_id !== user?.id) {
+    if (!(accessControl ? accessControl.canAccessOwner(AccessControl.actorFromRequest(req), row.user_id) : (user?.role === 'admin' || row.user_id === user?.id))) {
       return res.status(403).json({ success: false, data: null, error: { code: 'AUTH003', message: '没有权限' } });
     }
     if (!row.video_path || !fs.existsSync(row.video_path)) {
@@ -184,7 +188,7 @@ export function createHyperframeRouter(
     const user = getUser(req);
     const row = jobs.getJob(String(req.params.id));
     if (!row) return res.status(404).json({ success: false, data: null, error: { code: '4040', message: '任务不存在' } });
-    if (user?.role !== 'admin' && row.user_id !== user?.id) {
+    if (!(accessControl ? accessControl.canAccessOwner(AccessControl.actorFromRequest(req), row.user_id) : (user?.role === 'admin' || row.user_id === user?.id))) {
       return res.status(403).json({ success: false, data: null, error: { code: 'AUTH003', message: '没有权限' } });
     }
     if (!row.composition_dir || !fs.existsSync(path.join(row.composition_dir, 'index.html'))) {
@@ -198,7 +202,7 @@ export function createHyperframeRouter(
     const user = getUser(req);
     const row = jobs.getJob(String(req.params.id));
     if (!row) return res.status(404).json({ success: false, data: null, error: { code: '4040', message: '任务不存在' } });
-    if (user?.role !== 'admin' && row.user_id !== user?.id) {
+    if (!(accessControl ? accessControl.canAccessOwner(AccessControl.actorFromRequest(req), row.user_id) : (user?.role === 'admin' || row.user_id === user?.id))) {
       return res.status(403).json({ success: false, data: null, error: { code: 'AUTH003', message: '没有权限' } });
     }
     if (row.status === 'running') {

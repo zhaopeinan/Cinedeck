@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import { AccessOpts, ownerInClause, ownsOrGranted } from './accessControl';
 
 const DATA_DIR = path.resolve(process.cwd(), '..', 'data');
 const MOOC_UPLOAD_DIR = path.join(DATA_DIR, 'mooc-uploads');
@@ -230,10 +231,18 @@ export class MoocJobService {
     return row;
   }
 
-  listJobs(userId: string, limit = 50): MoocJobRow[] {
+  listJobs(ownerIds: string | string[], limit = 50): MoocJobRow[] {
+    const ids = Array.isArray(ownerIds) ? ownerIds : [ownerIds];
+    const { sql, params } = ownerInClause(ids);
     return this.db.prepare(
-      'SELECT * FROM mooc_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
-    ).all(userId, limit) as MoocJobRow[];
+      `SELECT * FROM mooc_jobs WHERE user_id IN (${sql}) ORDER BY created_at DESC LIMIT ?`,
+    ).all(...params, limit) as MoocJobRow[];
+  }
+
+  getOwned(id: string, userId: string, opts?: AccessOpts): MoocJobRow | null {
+    const job = this.getJob(id);
+    if (!job || !ownsOrGranted(job.user_id, userId, opts)) return null;
+    return job;
   }
 
   parseConfig(job: MoocJobRow): MoocJobConfig {
@@ -325,9 +334,9 @@ export class MoocJobService {
     `).run(hint, new Date().toISOString());
   }
 
-  cancelJob(id: string, userId: string): MoocJobRow | null {
+  cancelJob(id: string, userId: string, opts?: AccessOpts): MoocJobRow | null {
     const job = this.getJob(id);
-    if (!job || job.user_id !== userId) return null;
+    if (!job || !ownsOrGranted(job.user_id, userId, opts)) return null;
     if (job.status === 'queued') {
       return this.updateJob(id, {
         status: 'cancelled',
@@ -405,9 +414,10 @@ export class MoocJobService {
     id: string,
     userId: string,
     opts?: { message?: string; force?: boolean },
+    accessOpts?: AccessOpts,
   ): MoocJobRow | null {
     const job = this.getJob(id);
-    if (!job || job.user_id !== userId) return null;
+    if (!job || !ownsOrGranted(job.user_id, userId, accessOpts)) return null;
     const cfg0: any = this.parseConfig(job);
     const repairing = !!(cfg0?.repairInProgress);
     // Already waiting for recompose — just wake the pump.
@@ -455,9 +465,10 @@ export class MoocJobService {
     id: string,
     userId: string,
     opts: { message: string; kind?: string },
+    accessOpts?: AccessOpts,
   ): MoocJobRow | null {
     const job = this.getJob(id);
-    if (!job || job.user_id !== userId) return null;
+    if (!job || !ownsOrGranted(job.user_id, userId, accessOpts)) return null;
     if (job.status === 'queued') return null;
     const cfg: any = { ...this.parseConfig(job) };
     cfg.repairInProgress = {
@@ -478,19 +489,19 @@ export class MoocJobService {
   }
 
   /** Resume from checkpoint (keep project). */
-  queueResume(id: string, userId: string): MoocJobRow | null {
+  queueResume(id: string, userId: string, opts?: AccessOpts): MoocJobRow | null {
     const job = this.getJob(id);
-    if (!job || job.user_id !== userId) return null;
+    if (!job || !ownsOrGranted(job.user_id, userId, opts)) return null;
     if (job.status === 'running' || job.status === 'queued') return null;
     if (!job.project_id && job.checkpoint === 'none') {
       // nothing to resume — fall back to full restart semantics
-      return this.queueRestart(id, userId);
+      return this.queueRestart(id, userId, opts);
     }
     if (job.project_id) {
       // project must still exist
       const p = this.db.prepare('SELECT id FROM projects WHERE id = ?').get(job.project_id);
       if (!p) {
-        return this.queueRestart(id, userId);
+        return this.queueRestart(id, userId, opts);
       }
     }
     const updated = this.updateJob(id, {
@@ -514,9 +525,10 @@ export class MoocJobService {
     id: string,
     userId: string,
     opts?: { explainExportQuality?: '720p' | '1080p' | '1440p'; force?: boolean },
+    accessOpts?: AccessOpts,
   ): MoocJobRow | null {
     const job = this.getJob(id);
-    if (!job || job.user_id !== userId) return null;
+    if (!job || !ownsOrGranted(job.user_id, userId, accessOpts)) return null;
     if (job.status === 'running' || job.status === 'queued') return null;
     if (!job.project_id) return null;
     const p = this.db.prepare('SELECT id FROM projects WHERE id = ?').get(job.project_id);
@@ -575,12 +587,13 @@ export class MoocJobService {
     id: string,
     userId: string,
     avatarPatch: Partial<MoocJobConfig>,
+    accessOpts?: AccessOpts,
   ): MoocJobRow | null {
     return this.queueOptimize(id, userId, {
       changeAvatar: true,
       addExplain: false,
       avatarPatch,
-    });
+    }, accessOpts);
   }
 
   /**
@@ -598,6 +611,7 @@ export class MoocJobService {
       avatarPatch?: Partial<MoocJobConfig>;
       explainExportQuality?: '720p' | '1080p' | '1440p';
     },
+    accessOpts?: AccessOpts,
   ): MoocJobRow | null {
     const changeAvatar = !!opts.changeAvatar;
     const addExplain = !!opts.addExplain;
@@ -609,11 +623,11 @@ export class MoocJobService {
       return this.queueOptimizeExplain(id, userId, {
         explainExportQuality: opts.explainExportQuality,
         force: true,
-      });
+      }, accessOpts);
     }
 
     const job = this.getJob(id);
-    if (!job || job.user_id !== userId) return null;
+    if (!job || !ownsOrGranted(job.user_id, userId, accessOpts)) return null;
     if (job.status === 'running' || job.status === 'queued') return null;
     if (!job.project_id) return null;
     const p = this.db.prepare('SELECT id, file_path FROM projects WHERE id = ?').get(job.project_id) as
@@ -702,9 +716,9 @@ export class MoocJobService {
   }
 
   /** Full restart from scratch (new project). */
-  queueRestart(id: string, userId: string): MoocJobRow | null {
+  queueRestart(id: string, userId: string, opts?: AccessOpts): MoocJobRow | null {
     const job = this.getJob(id);
-    if (!job || job.user_id !== userId) return null;
+    if (!job || !ownsOrGranted(job.user_id, userId, opts)) return null;
     if (job.status === 'running' || job.status === 'queued') return null;
     if (!fs.existsSync(job.file_path)) return null;
     const updated = this.updateJob(id, {
@@ -724,9 +738,9 @@ export class MoocJobService {
     return updated;
   }
 
-  deleteJob(id: string, userId: string): boolean {
+  deleteJob(id: string, userId: string, opts?: AccessOpts): boolean {
     const job = this.getJob(id);
-    if (!job || job.user_id !== userId) return false;
+    if (!job || !ownsOrGranted(job.user_id, userId, opts)) return false;
     if (job.status === 'running') return false;
     const jobDir = path.join(MOOC_UPLOAD_DIR, id);
     if (fs.existsSync(jobDir)) {

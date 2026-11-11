@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import { AccessOpts, ownerInClause, ownsOrGranted } from './accessControl';
 
 const DATA_DIR = path.resolve(process.cwd(), '..', 'data');
 export const EXPLAIN_UPLOAD_DIR = path.join(DATA_DIR, 'explain-uploads');
@@ -165,16 +166,18 @@ export class ExplainJobService {
     return row ? this.cleanupSampleIfCompleted(row) : null;
   }
 
-  getOwned(id: string, userId: string): ExplainJobRow | null {
+  getOwned(id: string, userId: string, opts?: AccessOpts): ExplainJobRow | null {
     const row = this.getJob(id);
-    if (!row || row.user_id !== userId) return null;
+    if (!row || !ownsOrGranted(row.user_id, userId, opts)) return null;
     return row;
   }
 
-  listJobs(userId: string, limit = 50): ExplainJobRow[] {
+  listJobs(ownerIds: string | string[], limit = 50): ExplainJobRow[] {
+    const ids = Array.isArray(ownerIds) ? ownerIds : [ownerIds];
+    const { sql, params } = ownerInClause(ids);
     const rows = this.db.prepare(
-      'SELECT * FROM explain_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
-    ).all(userId, limit) as ExplainJobRow[];
+      `SELECT * FROM explain_jobs WHERE user_id IN (${sql}) ORDER BY created_at DESC LIMIT ?`,
+    ).all(...params, limit) as ExplainJobRow[];
     return rows.map((r) => this.cleanupSampleIfCompleted(r));
   }
 
@@ -334,8 +337,8 @@ export class ExplainJobService {
     return !!(row && Number(row.cancel_requested));
   }
 
-  requestCancel(id: string, userId: string): ExplainJobRow | null {
-    const job = this.getOwned(id, userId);
+  requestCancel(id: string, userId: string, opts?: AccessOpts): ExplainJobRow | null {
+    const job = this.getOwned(id, userId, opts);
     if (!job) return null;
     if (job.status === 'queued' || job.status === 'await_style' || job.status === 'await_sample') {
       return this.updateJob(id, {
@@ -353,8 +356,8 @@ export class ExplainJobService {
     return job;
   }
 
-  deleteJob(id: string, userId: string): boolean {
-    const job = this.getOwned(id, userId);
+  deleteJob(id: string, userId: string, opts?: AccessOpts): boolean {
+    const job = this.getOwned(id, userId, opts);
     if (!job) return false;
     if (job.status === 'running') return false;
     this.db.prepare('DELETE FROM explain_jobs WHERE id = ?').run(id);

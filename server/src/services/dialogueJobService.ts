@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import { AccessOpts, ownerInClause, ownsOrGranted } from './accessControl';
 
 const DATA_DIR = path.resolve(process.cwd(), '..', 'data');
 export const DIALOGUE_JOBS_DIR = path.join(DATA_DIR, 'dialogue-jobs');
@@ -102,16 +103,18 @@ export class DialogueJobService {
     return (this.db.prepare('SELECT * FROM dialogue_jobs WHERE id = ?').get(id) as DialogueJobRow | undefined) || null;
   }
 
-  getOwned(id: string, userId: string): DialogueJobRow | null {
+  getOwned(id: string, userId: string, opts?: AccessOpts): DialogueJobRow | null {
     const row = this.getJob(id);
-    if (!row || row.user_id !== userId) return null;
+    if (!row || !ownsOrGranted(row.user_id, userId, opts)) return null;
     return row;
   }
 
-  listJobs(userId: string, limit = 50): DialogueJobRow[] {
+  listJobs(ownerIds: string | string[], limit = 50): DialogueJobRow[] {
+    const ids = Array.isArray(ownerIds) ? ownerIds : [ownerIds];
+    const { sql, params } = ownerInClause(ids);
     return this.db.prepare(
-      'SELECT * FROM dialogue_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?',
-    ).all(userId, limit) as DialogueJobRow[];
+      `SELECT * FROM dialogue_jobs WHERE user_id IN (${sql}) ORDER BY created_at DESC LIMIT ?`,
+    ).all(...params, limit) as DialogueJobRow[];
   }
 
   parseCast(job: DialogueJobRow): Record<string, string> {
@@ -187,8 +190,8 @@ export class DialogueJobService {
     return !!(row && Number(row.cancel_requested));
   }
 
-  requestCancel(id: string, userId: string): DialogueJobRow | null {
-    const job = this.getOwned(id, userId);
+  requestCancel(id: string, userId: string, opts?: AccessOpts): DialogueJobRow | null {
+    const job = this.getOwned(id, userId, opts);
     if (!job) return null;
     if (job.status === 'queued') {
       return this.updateJob(id, {
@@ -220,8 +223,8 @@ export class DialogueJobService {
     `).run(now, now);
   }
 
-  deleteJob(id: string, userId: string): boolean {
-    const job = this.getOwned(id, userId);
+  deleteJob(id: string, userId: string, opts?: AccessOpts): boolean {
+    const job = this.getOwned(id, userId, opts);
     if (!job) return false;
     if (job.status === 'running') return false;
     this.db.prepare('DELETE FROM dialogue_jobs WHERE id = ?').run(id);

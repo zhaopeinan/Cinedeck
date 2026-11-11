@@ -2,6 +2,7 @@
  * Persist造声工厂单人 TTS 生成记录（刷新后仍可见，并进入任务中心）。
  */
 import type Database from 'better-sqlite3';
+import { AccessOpts, ownerInClause, ownsOrGranted } from './accessControl';
 
 export type VoiceTtsStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -64,11 +65,10 @@ export class VoiceTtsJobService {
     return row;
   }
 
-  getOwned(id: string, userId: string): VoiceTtsJobRow | null {
-    const row = this.db.prepare(
-      `SELECT * FROM voice_tts_jobs WHERE id = ? AND user_id = ?`,
-    ).get(id, userId) as VoiceTtsJobRow | undefined;
-    return row || null;
+  getOwned(id: string, userId: string, opts?: AccessOpts): VoiceTtsJobRow | null {
+    const row = this.get(id);
+    if (!row || !ownsOrGranted(row.user_id, userId, opts)) return null;
+    return row;
   }
 
   get(id: string): VoiceTtsJobRow | null {
@@ -107,10 +107,12 @@ export class VoiceTtsJobService {
     return this.get(id);
   }
 
-  listForUser(userId: string, limit = 40): VoiceTtsJobRow[] {
+  listForUser(ownerIds: string | string[], limit = 40): VoiceTtsJobRow[] {
+    const ids = Array.isArray(ownerIds) ? ownerIds : [ownerIds];
+    const { sql, params } = ownerInClause(ids);
     return this.db.prepare(
-      `SELECT * FROM voice_tts_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?`,
-    ).all(userId, Math.min(100, Math.max(1, limit))) as VoiceTtsJobRow[];
+      `SELECT * FROM voice_tts_jobs WHERE user_id IN (${sql}) ORDER BY created_at DESC LIMIT ?`,
+    ).all(...params, Math.min(100, Math.max(1, limit))) as VoiceTtsJobRow[];
   }
 
   listActive(): VoiceTtsJobRow[] {

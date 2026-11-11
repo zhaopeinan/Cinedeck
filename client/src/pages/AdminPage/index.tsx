@@ -2,16 +2,16 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Tabs, Table, Button, Card, Row, Col, Statistic, Spin, Tag, Space,
-  Typography, Modal, Form, Input, Select, Switch, Popconfirm, message, Checkbox,
+  Typography, Modal, Form, Input, Select, Switch, Popconfirm, message, Checkbox, Drawer,
 } from 'antd';
 import type { TableColumnsType } from 'antd';
 import {
   PlusOutlined, LogoutOutlined, HomeOutlined, UserOutlined,
   TeamOutlined, FileTextOutlined, CheckCircleOutlined, ClockCircleOutlined,
-  DeleteOutlined, KeyOutlined, CopyOutlined,
+  DeleteOutlined, KeyOutlined, CopyOutlined, ShareAltOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { authApi, projectApi, openPlatformApi } from '../../api';
+import { authApi, projectApi, openPlatformApi, accessGrantApi, type AccessGrant } from '../../api';
 import { useAuthStore } from '../../stores/authStore';
 
 const { Title, Text } = Typography;
@@ -87,6 +87,14 @@ export const AdminPage: React.FC = () => {
   const [passwordTarget, setPasswordTarget] = useState<UserRecord | null>(null);
   const [passwordSubmitting, setPasswordSubmitting] = useState(false);
   const [passwordForm] = Form.useForm();
+
+  const [grantDrawerOpen, setGrantDrawerOpen] = useState(false);
+  const [grantTarget, setGrantTarget] = useState<UserRecord | null>(null);
+  const [grantRows, setGrantRows] = useState<AccessGrant[]>([]);
+  const [grantsLoading, setGrantsLoading] = useState(false);
+  const [grantUsername, setGrantUsername] = useState('');
+  const [grantNote, setGrantNote] = useState('');
+  const [grantSubmitting, setGrantSubmitting] = useState(false);
 
   // Logs
   const [logs, setLogs] = useState<LogRecord[]>([]);
@@ -338,6 +346,58 @@ export const AdminPage: React.FC = () => {
     }
   };
 
+  const openGrantDrawer = async (record: UserRecord) => {
+    setGrantTarget(record);
+    setGrantDrawerOpen(true);
+    setGrantUsername('');
+    setGrantNote('');
+    setGrantsLoading(true);
+    try {
+      const res = await accessGrantApi.adminList({ grantorUserId: record.id, status: 'active' });
+      setGrantRows(res.data.data || []);
+    } catch (err: any) {
+      message.error('加载授权失败：' + getErrMsg(err));
+      setGrantRows([]);
+    } finally {
+      setGrantsLoading(false);
+    }
+  };
+
+  const handleAdminCreateGrant = async () => {
+    if (!grantTarget) return;
+    const name = grantUsername.trim();
+    if (!name) {
+      message.warning('请输入被授权用户名');
+      return;
+    }
+    setGrantSubmitting(true);
+    try {
+      await accessGrantApi.adminCreate(grantTarget.id, name, grantNote.trim() || undefined);
+      message.success(`已代 ${grantTarget.username} 授权给 ${name}`);
+      setGrantUsername('');
+      setGrantNote('');
+      const res = await accessGrantApi.adminList({ grantorUserId: grantTarget.id, status: 'active' });
+      setGrantRows(res.data.data || []);
+    } catch (err: any) {
+      message.error(getErrMsg(err));
+    } finally {
+      setGrantSubmitting(false);
+    }
+  };
+
+  const handleAdminRevokeGrant = async (id: string) => {
+    try {
+      await accessGrantApi.revoke(id);
+      message.success('已撤销授权');
+      if (grantTarget) {
+        const res = await accessGrantApi.adminList({ grantorUserId: grantTarget.id, status: 'active' });
+        setGrantRows(res.data.data || []);
+      }
+    } catch (err: any) {
+      message.error(getErrMsg(err));
+    }
+  };
+
   const handleDeleteUser = async (id: string) => {
     try {
       await authApi.deleteUser(id);
@@ -414,7 +474,7 @@ export const AdminPage: React.FC = () => {
     {
       title: '操作',
       key: 'action',
-      width: 360,
+      width: 420,
       render: (_: any, record: UserRecord) => {
         const isSelf = record.id === user?.id;
         const isAdmin = record.role === 'admin';
@@ -433,6 +493,9 @@ export const AdminPage: React.FC = () => {
               onChange={(checked) => handleStatusChange(record, checked)}
               disabled={isSelf}
             />
+            <Button size="small" icon={<ShareAltOutlined />} onClick={() => void openGrantDrawer(record)}>
+              授权
+            </Button>
             <Button size="small" onClick={() => openPasswordModal(record)}>
               重置密码
             </Button>
@@ -956,6 +1019,63 @@ export const AdminPage: React.FC = () => {
           </Form.Item>
         </Form>
       </Modal>
+
+      <Drawer
+        title={grantTarget ? `数据授权 · ${grantTarget.username}` : '数据授权'}
+        open={grantDrawerOpen}
+        onClose={() => { setGrantDrawerOpen(false); setGrantTarget(null); setGrantRows([]); }}
+        width={480}
+      >
+        <Text type="secondary">
+          代该用户授权他人查看并操作其全部已有任务与项目；对方不能以该用户身份新建资源。
+        </Text>
+        <Space wrap style={{ margin: '16px 0', width: '100%' }}>
+          <Input
+            placeholder="被授权用户名"
+            value={grantUsername}
+            onChange={(e) => setGrantUsername(e.target.value)}
+            style={{ width: 160 }}
+            onPressEnter={() => void handleAdminCreateGrant()}
+          />
+          <Input
+            placeholder="备注（可选）"
+            value={grantNote}
+            onChange={(e) => setGrantNote(e.target.value)}
+            style={{ width: 180 }}
+          />
+          <Button type="primary" loading={grantSubmitting} onClick={() => void handleAdminCreateGrant()}>
+            代为授权
+          </Button>
+        </Space>
+        <Spin spinning={grantsLoading}>
+          <Table
+            size="small"
+            rowKey="id"
+            pagination={false}
+            dataSource={grantRows}
+            locale={{ emptyText: '暂无有效授权' }}
+            columns={[
+              { title: '被授权人', dataIndex: 'granteeUsername', key: 'grantee' },
+              { title: '备注', dataIndex: 'note', key: 'note', render: (v: string | null) => v || '-' },
+              {
+                title: '时间',
+                dataIndex: 'createdAt',
+                key: 'createdAt',
+                render: (v: string) => formatTime(v),
+              },
+              {
+                title: '操作',
+                key: 'action',
+                render: (_: any, row: AccessGrant) => (
+                  <Popconfirm title="确认撤销？" onConfirm={() => void handleAdminRevokeGrant(row.id)}>
+                    <Button size="small" danger>撤销</Button>
+                  </Popconfirm>
+                ),
+              },
+            ]}
+          />
+        </Spin>
+      </Drawer>
 
     </div>
   );

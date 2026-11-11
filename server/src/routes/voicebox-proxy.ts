@@ -8,6 +8,7 @@ import { DialogueJobService } from '../services/dialogueJobService';
 import { parseDialogueScript, validateCast } from '../services/dialogueScript';
 import { pumpDialogueQueue } from '../services/dialogueGenerator';
 import { VoiceTtsJobService } from '../services/voiceTtsJobService';
+import { AccessControl, type AccessOpts } from '../services/accessControl';
 
 type P = { id: string };
 
@@ -27,6 +28,12 @@ function getUserId(req: Request): string {
   return (req as any).user?.id || '';
 }
 
+function getAccessOpts(req: Request, accessControl?: AccessControl): AccessOpts | undefined {
+  const actor = AccessControl.actorFromRequest(req);
+  if (!accessControl || !actor) return undefined;
+  return { access: accessControl, actor };
+}
+
 /** HTTP Content-Disposition must be ASCII; put UTF-8 name in filename*. */
 function contentDisposition(download: boolean, filename: string): string {
   const safe = String(filename || 'download').replace(/[\r\n"]/g, '');
@@ -39,6 +46,7 @@ export function createVoiceboxRouter(
   voicebox: VoiceboxAdapter,
   dialogueJobs?: DialogueJobService,
   voiceTtsJobs?: VoiceTtsJobService,
+  accessControl?: AccessControl,
 ): Router {
   const router = Router();
 
@@ -218,7 +226,7 @@ export function createVoiceboxRouter(
     const userId = getUserId(req);
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 40));
     // 首次升级后本地为空时，从 Voicebox 历史回填近期完成项，避免刷新后「消失」
-    if (voiceTtsJobs.listForUser(userId, 1).length === 0) {
+    if (voiceTtsJobs.listForUser((accessControl && AccessControl.actorFromRequest(req)) ? accessControl.listAccessibleOwnerIds(AccessControl.actorFromRequest(req)!) : userId, 1).length === 0) {
       try {
         const hist = await voicebox.listHistory({ limit: 30 });
         for (const item of hist.items) {
@@ -244,7 +252,7 @@ export function createVoiceboxRouter(
         }
       } catch { /* voicebox unavailable — empty list ok */ }
     }
-    const jobs = voiceTtsJobs.listForUser(userId, limit).map((j) => voiceTtsJobs.publicRow(j));
+    const jobs = voiceTtsJobs.listForUser((accessControl && AccessControl.actorFromRequest(req)) ? accessControl.listAccessibleOwnerIds(AccessControl.actorFromRequest(req)!) : userId, limit).map((j) => voiceTtsJobs.publicRow(j));
     res.json({ success: true, data: { jobs }, error: null });
   });
 
@@ -448,7 +456,9 @@ export function createVoiceboxRouter(
       if (!userId) {
         return res.status(401).json({ success: false, data: null, error: { code: '401', message: '未登录' } });
       }
-      const rows = dialogueJobs.listJobs(userId).map((j) => dialogueJobs.publicRow(j));
+      const actor = AccessControl.actorFromRequest(req);
+      const ownerIds = accessControl && actor ? accessControl.listAccessibleOwnerIds(actor) : [userId];
+      const rows = dialogueJobs.listJobs(ownerIds).map((j) => dialogueJobs.publicRow(j));
       res.json({
         success: true,
         data: { jobs: rows, queue: { hasRunning: dialogueJobs.hasRunning() } },
@@ -536,7 +546,7 @@ export function createVoiceboxRouter(
 
     router.get('/dialogue/:id', (req: Request<P>, res: Response) => {
       const userId = getUserId(req);
-      const job = dialogueJobs.getOwned(String(req.params.id), userId);
+      const job = dialogueJobs.getOwned(String(req.params.id), userId, getAccessOpts(req, accessControl));
       if (!job) {
         return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
       }
@@ -545,7 +555,7 @@ export function createVoiceboxRouter(
 
     router.post('/dialogue/:id/cancel', (req: Request<P>, res: Response) => {
       const userId = getUserId(req);
-      const updated = dialogueJobs.requestCancel(String(req.params.id), userId);
+      const updated = dialogueJobs.requestCancel(String(req.params.id), userId, getAccessOpts(req, accessControl));
       if (!updated) {
         return res.status(404).json({ success: false, data: null, error: { code: '404', message: '任务不存在' } });
       }
@@ -554,7 +564,7 @@ export function createVoiceboxRouter(
 
     router.get('/dialogue/:id/audio', (req: Request<P>, res: Response) => {
       const userId = getUserId(req);
-      const job = dialogueJobs.getOwned(String(req.params.id), userId);
+      const job = dialogueJobs.getOwned(String(req.params.id), userId, getAccessOpts(req, accessControl));
       if (!job || !job.output_path || !fs.existsSync(job.output_path)) {
         return res.status(404).json({ success: false, data: null, error: { code: '404', message: '音频不存在' } });
       }
@@ -577,7 +587,7 @@ export function createVoiceboxRouter(
 
     router.delete('/dialogue/:id', (req: Request<P>, res: Response) => {
       const userId = getUserId(req);
-      const ok = dialogueJobs.deleteJob(String(req.params.id), userId);
+      const ok = dialogueJobs.deleteJob(String(req.params.id), userId, getAccessOpts(req, accessControl));
       if (!ok) {
         return res.status(400).json({
           success: false, data: null,

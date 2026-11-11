@@ -22,6 +22,9 @@ import { taskQueue } from './services/taskQueue';
 import { AuthService } from './services/authService';
 import { createAuthMiddleware } from './middleware/auth';
 import { createAuthRouter } from './routes/auth';
+import { AccessGrantService } from './services/accessGrantService';
+import { AccessControl } from './services/accessControl';
+import { createAccessGrantsRouter } from './routes/accessGrants';
 import { SystemSettingsService } from './services/systemSettingsService';
 import { createSystemSettingsRouter } from './routes/systemSettings';
 import { createSystemRouter } from './routes/system';
@@ -78,6 +81,8 @@ async function main() {
   // Initialize auth
   const authService = new AuthService(db);
   const { authRequired, adminRequired } = createAuthMiddleware(authService);
+  const accessGrants = new AccessGrantService(db);
+  const accessControl = new AccessControl(accessGrants);
 
   // Initialize Voicebox process manager (auto-starts Voicebox)
   const voiceboxProcess = new VoiceboxProcessManager();
@@ -102,6 +107,8 @@ async function main() {
   const openApiKeys = new OpenApiKeyService(db);
 
   // Auth routes (captcha + login are public; users/logs/stats require auth inside the router)
+  // Mount access-grants before the general /auth router so path matching is unambiguous.
+  app.use('/api/v1/auth/access-grants', createAccessGrantsRouter(accessGrants, authService, authRequired, adminRequired));
   const authRouter = createAuthRouter(authService, authRequired, adminRequired);
   app.use('/api/v1/auth', authRouter);
 
@@ -128,23 +135,24 @@ async function main() {
   }, express.static(dataDir));
 
   // Protected routes (require login)
-  app.use('/api/v1/projects', authRequired, createProjectRouter(projectService, pptParser));
-  app.use('/api/v1/voicebox', authRequired, createVoiceboxRouter(voicebox, dialogueJobs, voiceTtsJobs));
+  app.use('/api/v1/projects', authRequired, createProjectRouter(projectService, pptParser, accessControl));
+  app.use('/api/v1/voicebox', authRequired, createVoiceboxRouter(voicebox, dialogueJobs, voiceTtsJobs, accessControl));
   app.use('/api/v1/projects', authRequired, createVideoRouter(projectService, videoComposer));
   app.use('/api/v1/projects', authRequired, createDubbingRouter(projectService, voicebox, videoComposer, systemSettings));
   app.use('/api/v1/projects', authRequired, createOpenCutRouter(projectService, openCutAdapter, videoComposer));
   app.use('/api/v1/llm', authRequired, createLlmRouter(llmService, scriptGenerator));
-  app.use('/api/v1/avatar', authRequired, createAvatarRouter(db));
+  app.use('/api/v1/avatar', authRequired, createAvatarRouter(db, accessControl));
   app.use('/api/v1/projects', authRequired, createProjectAvatarRouter(projectService, db, videoComposer));
   app.use('/api/v1/mooc', authRequired, createMoocRouter(
     moocJobs, projectService, pptParser, explainBatches, explainJobs,
     { videoComposer, db },
+    accessControl,
   ));
   // Localhost-only: batch/ops scripts outside this process can wake the MOOC queue.
   app.use('/api/internal/mooc', createInternalMoocRouter());
-  app.use('/api/v1/transcribe', authRequired, createTranscribeRouter(transcribeJobs));
-  app.use('/api/v1/hyperframe', authRequired, createHyperframeRouter(hyperframeJobs, projectService));
-  app.use('/api/v1/explain', authRequired, createExplainRouter(explainJobs, llmService, explainGenSettings, explainBatches));
+  app.use('/api/v1/transcribe', authRequired, createTranscribeRouter(transcribeJobs, accessControl));
+  app.use('/api/v1/hyperframe', authRequired, createHyperframeRouter(hyperframeJobs, projectService, accessControl));
+  app.use('/api/v1/explain', authRequired, createExplainRouter(explainJobs, llmService, explainGenSettings, explainBatches, accessControl));
   app.use('/api/v1/workers', createWorkerRouter()); // workers use their own auth (API key)
 
   initMoocPipeline({
@@ -189,7 +197,11 @@ async function main() {
 
   // Unified job list / task center
   const jobRegistry = new JobRegistry({ db, projectService, videoComposer, voiceTtsJobs, explainBatches });
-  app.use('/api/v1/jobs', authRequired, createJobsRouter(jobRegistry, { dialogueJobs, moocJobs, explainJobs, voiceTtsJobs }));
+  app.use('/api/v1/jobs', authRequired, createJobsRouter(
+    jobRegistry,
+    { dialogueJobs, moocJobs, explainJobs, voiceTtsJobs, projectService },
+    accessControl,
+  ));
 
   // System settings — admin only
   app.use('/api/v1/system-settings', authRequired, adminRequired, createSystemSettingsRouter(systemSettings));

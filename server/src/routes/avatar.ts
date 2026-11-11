@@ -28,6 +28,7 @@ import {
 } from '../services/avatarComposeService';
 import type Database from 'better-sqlite3';
 import { sendMediaFile } from '../utils/sendMediaFile';
+import { AccessControl } from '../services/accessControl';
 
 const MAX_PHOTO_BYTES = 20 * 1024 * 1024;
 const MAX_VIDEO_BYTES = 100 * 1024 * 1024;
@@ -66,14 +67,18 @@ function publicJob(job: NonNullable<ReturnType<typeof getAvatarJob>>) {
   };
 }
 
-function assertJobOwner(job: NonNullable<ReturnType<typeof getAvatarJob>>, req: Request): boolean {
-  const userId = getUserId(req);
-  const role = (req as any).user?.role;
-  if (role === 'admin') return true;
-  return !!userId && job.userId === userId;
+function assertJobOwner(
+  job: NonNullable<ReturnType<typeof getAvatarJob>>,
+  req: Request,
+  accessControl?: AccessControl,
+): boolean {
+  const actor = AccessControl.actorFromRequest(req);
+  if (!actor) return false;
+  if (accessControl) return accessControl.canAccessOwner(actor, job.userId);
+  return actor.role === 'admin' || actor.id === job.userId;
 }
 
-export function createAvatarRouter(db: Database.Database): Router {
+export function createAvatarRouter(db: Database.Database, accessControl?: AccessControl): Router {
   const router = Router();
   const jobsDir = getAvatarJobsDir();
   const refService = new AvatarRefVideoService(db);
@@ -135,7 +140,9 @@ export function createAvatarRouter(db: Database.Database): Router {
     if (!userId) {
       return res.status(401).json({ success: false, data: null, error: { code: '401', message: '未登录' } });
     }
-    const rows = refService.listByUser(userId).map((r) => refService.publicRow(r));
+    const actor = AccessControl.actorFromRequest(req);
+    const ownerIds = accessControl && actor ? accessControl.listAccessibleOwnerIds(actor) : [userId];
+    const rows = refService.listByUser(ownerIds).map((r) => refService.publicRow(r));
     res.json({ success: true, data: rows, error: null });
   });
 
@@ -239,7 +246,7 @@ export function createAvatarRouter(db: Database.Database): Router {
 
   const streamOwnedRef = (req: Request, res: Response, asDownload: boolean) => {
     const userId = getUserId(req);
-    const row = refService.getOwned(String(req.params.id), userId);
+    const row = refService.getOwned(String(req.params.id), userId, accessControl && AccessControl.actorFromRequest(req) ? { access: accessControl, actor: AccessControl.actorFromRequest(req)! } : undefined);
     if (!row || !fs.existsSync(row.file_path)) {
       return res.status(404).json({ success: false, data: null, error: { code: '404', message: '参考视频不存在' } });
     }
@@ -354,7 +361,7 @@ export function createAvatarRouter(db: Database.Database): Router {
         }
       } else {
         if (refVideoId) {
-          const owned = refService.getOwned(refVideoId, userId);
+          const owned = refService.getOwned(refVideoId, userId, accessControl && AccessControl.actorFromRequest(req) ? { access: accessControl, actor: AccessControl.actorFromRequest(req)! } : undefined);
           if (!owned || !fs.existsSync(owned.file_path)) {
             return res.status(404).json({
               success: false,
@@ -430,7 +437,7 @@ export function createAvatarRouter(db: Database.Database): Router {
 
   router.get('/jobs/:id', (req: Request, res: Response) => {
     const job = getAvatarJob(String(req.params.id));
-    if (!job || !assertJobOwner(job, req)) {
+    if (!job || !assertJobOwner(job, req, accessControl)) {
       return res.status(404).json({
         success: false,
         data: null,
@@ -442,7 +449,7 @@ export function createAvatarRouter(db: Database.Database): Router {
 
   router.get('/jobs/:id/video', (req: Request, res: Response) => {
     const job = getAvatarJob(String(req.params.id));
-    if (!job || !assertJobOwner(job, req) || !job.outputPath || !fs.existsSync(job.outputPath)) {
+    if (!job || !assertJobOwner(job, req, accessControl) || !job.outputPath || !fs.existsSync(job.outputPath)) {
       return res.status(404).json({
         success: false,
         data: null,
@@ -544,7 +551,7 @@ export function createAvatarRouter(db: Database.Database): Router {
       }
 
       if (!greenscreenPath && greenscreenRefId) {
-        const owned = refService.getOwned(greenscreenRefId, userId);
+        const owned = refService.getOwned(greenscreenRefId, userId, accessControl && AccessControl.actorFromRequest(req) ? { access: accessControl, actor: AccessControl.actorFromRequest(req)! } : undefined);
         if (!owned || !fs.existsSync(owned.file_path)) {
           return res.status(404).json({
             success: false,
@@ -603,7 +610,7 @@ export function createAvatarRouter(db: Database.Database): Router {
     const job = getComposeJob(String(req.params.id));
     const userId = getUserId(req);
     const role = (req as any).user?.role;
-    if (!job || (role !== 'admin' && job.userId !== userId)) {
+    if (!job || !(accessControl ? accessControl.canAccessOwner(AccessControl.actorFromRequest(req), job.userId) : (role === 'admin' || job.userId === userId))) {
       return res.status(404).json({
         success: false,
         data: null,
