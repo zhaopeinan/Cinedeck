@@ -191,7 +191,8 @@ export function prepareExplainHtmlForRecording(html: string): string {
 
   // Expose timeline controls for headless capture. Screenshotting is slower than
   // realtime, so rAF-driven clocks freeze; the recorder seeks each frame instead.
-  // Decks vary: t / elapsed / currentTime / curTime (+ DUR|DURATION|TOTAL).
+  // Decks vary: time / t / elapsed / currentTime / curTime (+ DUR|DURATION|TOTAL).
+  // "time" is common in canvas scene decks (render() closes over var time).
   const bridge = `
 window.__explainRec = {
   seek: function(sec){
@@ -201,6 +202,7 @@ window.__explainRec = {
       if (typeof lastTs !== 'undefined') lastTs = 0;
       var s = Math.max(0, Number(sec) || 0);
       // Common playhead names across explain HTML templates.
+      if (typeof time === 'number') time = s;
       if (typeof t === 'number') t = s;
       if (typeof curTime === 'number') curTime = s;
       if (typeof currentTime === 'number') currentTime = s;
@@ -259,7 +261,9 @@ window.__explainRec = {
 `;
   // Prefer inject inside the main IIFE after timeline vars so it closes over them.
   if (!out.includes('window.__explainRec')) {
-    if (/\bvar\s+curTime\s*=\s*0\s*;/.test(out)) {
+    if (/\bvar\s+time\s*=\s*0\s*;/.test(out)) {
+      out = out.replace(/\bvar\s+time\s*=\s*0\s*;/, (m) => `${m}\n${bridge}`);
+    } else if (/\bvar\s+curTime\s*=\s*0\s*;/.test(out)) {
       out = out.replace(/\bvar\s+curTime\s*=\s*0\s*;/, (m) => `${m}\n${bridge}`);
     } else if (/\bvar\s+currentTime\s*=\s*0\s*;/.test(out)) {
       out = out.replace(/\bvar\s+currentTime\s*=\s*0\s*;/, (m) => `${m}\n${bridge}`);
@@ -408,7 +412,8 @@ export async function exportExplainHtmlToMp4(opts: {
     }
   }
 
-  // Motion QC: catch frozen/overlapped initial-frame exports before they enter MOOC.
+  // Motion QC is advisory only: keep the MP4 for human review / manual approve.
+  // Hard-failing here caused a loop — re-export → QC fail → delete → user approve → re-export…
   try {
     const animMatch = `${r.stdout || ''}\n${r.stderr || ''}`.match(
       /record seek-mode animTotal=([0-9.]+)s/i,
@@ -426,8 +431,7 @@ export async function exportExplainHtmlToMp4(opts: {
       + (animDurationSec > 1 ? ` animTotal=${animDurationSec}s` : ''),
     );
   } catch (e: any) {
-    try { if (fs.existsSync(outPath)) fs.unlinkSync(outPath); } catch { /* ignore */ }
-    throw new Error(`讲解动画画面质检失败：${e?.message || e}`);
+    opts.onLog?.(`motion qc soft-fail (kept mp4 for human review): ${e?.message || e}`);
   }
 
   opts.onLog?.(`export ok → ${outPath}`);
