@@ -120,8 +120,8 @@ export function createOpenAvatarRouter(openApiKeys: OpenApiKeyService): Router {
           return cb(new Error('参考视频仅支持 MP4/MOV/WEBM'));
         }
       } else if (file.fieldname === 'audio') {
-        if (!/\.(wav|mp3)$/.test(name) && !file.mimetype.startsWith('audio/')) {
-          return cb(new Error('音频仅支持 WAV/MP3'));
+        if (!/\.(wav|mp3|m4a|aac)$/.test(name) && !file.mimetype.startsWith('audio/')) {
+          return cb(new Error('音频仅支持 WAV/MP3/M4A/AAC'));
         }
       }
       cb(null, true);

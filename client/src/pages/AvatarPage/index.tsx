@@ -491,12 +491,12 @@ const AvatarPage: React.FC = () => {
                             <Col xs={24} md={12}>
                               <Card size="small" title={<Space><SoundOutlined /> 解说音频</Space>}>
                                 <Dragger
-                                  accept="audio/wav,audio/mpeg,audio/mp3,.wav,.mp3"
+                                  accept="audio/wav,audio/mpeg,audio/mp3,audio/mp4,audio/x-m4a,audio/aac,.wav,.mp3,.m4a,.aac"
                                   maxCount={1}
                                   showUploadList={false}
                                   beforeUpload={(file) => {
-                                    if (!/\.(wav|mp3)$/i.test(file.name)) {
-                                      message.error('仅支持 WAV / MP3');
+                                    if (!/\.(wav|mp3|m4a|aac)$/i.test(file.name)) {
+                                      message.error('仅支持 WAV / MP3 / M4A / AAC');
                                       return false;
                                     }
                                     setAudio(file);
@@ -510,6 +510,7 @@ const AvatarPage: React.FC = () => {
                                 >
                                   <p className="ant-upload-drag-icon"><InboxOutlined /></p>
                                   <p className="ant-upload-text">上传音频</p>
+                                  <p className="ant-upload-hint">支持 WAV / MP3 / M4A / AAC</p>
                                 </Dragger>
                                 {audio && (
                                   <div style={{ marginTop: 8 }}>
