@@ -1,9 +1,16 @@
 import axios from 'axios';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { withVoiceboxGpu, noteVoiceboxTaskStarted, noteVoiceboxTaskEnded } from './voiceboxGpuQueue';
 import { normalizeTtsText } from '../utils/ttsTextNormalize';
 import FormData from 'form-data';
 import fs from 'fs';
 import path from 'path';
+
+const execFileAsync = promisify(execFile);
+
+/** Voicebox rejects reference audio longer than 30s. Stay under that after its own padding. */
+const REFERENCE_MAX_SECONDS = 28;
 
 const VOICEBOX_BASE_URL = process.env.VOICEBOX_BASE_URL || 'http://localhost:17493';
 
@@ -112,35 +119,85 @@ export class VoiceboxAdapter {
     return '这是一段用于音色克隆的参考录音。';
   }
 
+  /** Cut a clone reference down to the length Voicebox will accept, as 24 kHz mono wav. */
+  private async trimReferenceAudio(audioPath: string): Promise<string> {
+    const out = `${audioPath}.ref.wav`;
+    try {
+      await execFileAsync('ffmpeg', [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-i', audioPath,
+        '-vn',
+        '-af', 'silenceremove=start_periods=1:start_duration=0.3:start_threshold=-40dB',
+        '-t', String(REFERENCE_MAX_SECONDS),
+        '-ac', '1',
+        '-ar', '24000',
+        '-c:a', 'pcm_s16le',
+        out,
+      ], { timeout: 120000 });
+    } catch (err: any) {
+      fs.unlink(out, () => undefined);
+      const detail = String(err?.stderr || err?.message || '').trim().slice(0, 300);
+      throw new Error(detail ? `参考音频处理失败：${detail}` : '参考音频处理失败');
+    }
+    if (!fs.existsSync(out) || fs.statSync(out).size < 1000) {
+      throw new Error('参考音频处理后为空，请换一段清晰人声');
+    }
+    return out;
+  }
+
+  private async uploadProfileSample(profileId: string, wavPath: string, referenceText: string): Promise<void> {
+    const formData = new FormData();
+    formData.append('file', fs.createReadStream(wavPath), {
+      filename: 'reference.wav',
+      contentType: 'audio/wav',
+    });
+    formData.append('reference_text', referenceText);
+    await axios.post(`${this.baseUrl}/profiles/${profileId}/samples`, formData, {
+      headers: formData.getHeaders(),
+      timeout: 120000,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+  }
+
+  private async discardProfile(profileId: string): Promise<void> {
+    try {
+      await axios.delete(`${this.baseUrl}/profiles/${profileId}`, { timeout: 10000 });
+    } catch (err: any) {
+      console.warn('[Voicebox] failed to roll back profile', profileId, err?.message || err);
+    }
+  }
+
   async createVoice(params: { name: string; language: string; description?: string; recordingPath: string; authorize: boolean }): Promise<any> {
-    // Step 1: Create the profile
-    const createRes = await axios.post(`${this.baseUrl}/profiles`, {
-      name: params.name,
-      language: toVoiceboxLanguage(params.language),
-      description: params.description || '',
-      voice_type: 'cloned',
-    }, { timeout: 30000 });
+    if (!params.recordingPath || !fs.existsSync(params.recordingPath)) {
+      throw new Error('请上传或录制参考音频');
+    }
+    const trimmedPath = await this.trimReferenceAudio(params.recordingPath);
+    let profileId = '';
+    try {
+      const createRes = await axios.post(`${this.baseUrl}/profiles`, {
+        name: params.name,
+        language: toVoiceboxLanguage(params.language),
+        description: params.description || '',
+        voice_type: 'cloned',
+      }, { timeout: 30000 });
+      profileId = String(createRes.data?.id || '');
+      if (!profileId) throw new Error('音色档案创建失败');
 
-    const profile = createRes.data;
-
-    // Step 2: Add the audio sample
-    if (params.recordingPath && fs.existsSync(params.recordingPath)) {
       const referenceText = await this.resolveReferenceText({
-        audioPath: params.recordingPath,
+        audioPath: trimmedPath,
+        originalName: 'reference.wav',
         language: params.language,
         fallback: params.description,
       });
-      const formData = new FormData();
-      formData.append('file', fs.createReadStream(params.recordingPath));
-      formData.append('reference_text', referenceText);
-
-      await axios.post(`${this.baseUrl}/profiles/${profile.id}/samples`, formData, {
-        headers: formData.getHeaders(),
-        timeout: 30000,
-      });
+      await this.uploadProfileSample(profileId, trimmedPath, referenceText);
+      return this.getVoice(profileId);
+    } catch (err) {
+      if (profileId) await this.discardProfile(profileId);
+      throw err;
+    } finally {
+      fs.unlink(trimmedPath, () => undefined);
     }
-
-    return this.getVoice(profile.id);
   }
 
   /**
@@ -155,41 +212,38 @@ export class VoiceboxAdapter {
     originalName?: string;
     referenceText?: string;
   }): Promise<any> {
-    // Step 1: Create the profile
-    const createRes = await axios.post(`${this.baseUrl}/profiles`, {
-      name: params.name,
-      language: toVoiceboxLanguage(params.language),
-      description: params.description || '',
-      voice_type: 'cloned',
-    }, { timeout: 30000 });
+    if (!params.audioPath || !fs.existsSync(params.audioPath)) {
+      throw new Error('请上传或录制参考音频');
+    }
+    const trimmedPath = await this.trimReferenceAudio(params.audioPath);
+    let profileId = '';
+    try {
+      const createRes = await axios.post(`${this.baseUrl}/profiles`, {
+        name: params.name,
+        language: toVoiceboxLanguage(params.language),
+        description: params.description || '',
+        voice_type: 'cloned',
+      }, { timeout: 30000 });
+      profileId = String(createRes.data?.id || '');
+      if (!profileId) throw new Error('音色档案创建失败');
 
-    const profile = createRes.data;
-
-    // Step 2: Add the audio sample
-    if (params.audioPath && fs.existsSync(params.audioPath)) {
       const provided = String(params.referenceText || '').trim();
       const referenceText = provided
         ? provided.slice(0, 1000)
         : await this.resolveReferenceText({
-          audioPath: params.audioPath,
-          originalName: params.originalName,
+          audioPath: trimmedPath,
+          originalName: 'reference.wav',
           language: params.language,
           fallback: params.description,
         });
-      const formData = new FormData();
-      formData.append('file', fs.createReadStream(params.audioPath), {
-        filename: params.originalName || 'recording.webm',
-        contentType: 'audio/webm',
-      });
-      formData.append('reference_text', referenceText);
-
-      await axios.post(`${this.baseUrl}/profiles/${profile.id}/samples`, formData, {
-        headers: formData.getHeaders(),
-        timeout: 60000,
-      });
+      await this.uploadProfileSample(profileId, trimmedPath, referenceText);
+      return this.getVoice(profileId);
+    } catch (err) {
+      if (profileId) await this.discardProfile(profileId);
+      throw err;
+    } finally {
+      fs.unlink(trimmedPath, () => undefined);
     }
-
-    return this.getVoice(profile.id);
   }
 
   async deleteVoice(voiceId: string): Promise<void> {
@@ -228,16 +282,26 @@ export class VoiceboxAdapter {
    * Preset voices have no clone samples — synthesize a short preview and cache it.
    */
   async getVoiceSampleBuffer(voiceId: string): Promise<{ data: Buffer; contentType: string }> {
+    let sampleListed = false;
     try {
       const url = await this.getVoiceSample(voiceId);
+      sampleListed = true;
       const res = await axios.get(url, {
         responseType: 'arraybuffer',
         timeout: 30000,
       });
       const contentType = String(res.headers['content-type'] || 'audio/wav');
       return { data: Buffer.from(res.data), contentType };
-    } catch {
-      // fall through to preview synthesis for preset / sample-less voices
+    } catch (err) {
+      if (sampleListed) throw err;
+    }
+
+    const profile = await this.getVoice(voiceId);
+    const isPreset = profile.source === 'preset'
+      || profile._voiceboxProfile?.voice_type === 'preset'
+      || !!profile._voiceboxProfile?.preset_voice_id;
+    if (!isPreset) {
+      throw new Error('这个克隆音色没有参考音频，无法试听。请删除后重新克隆。');
     }
 
     const cachePath = this._previewCachePath(voiceId);
@@ -245,13 +309,8 @@ export class VoiceboxAdapter {
       return { data: fs.readFileSync(cachePath), contentType: 'audio/wav' };
     }
 
-    const profile = await this.getVoice(voiceId);
     const lang = String(profile.language || 'zh').split('-')[0] || 'zh';
-    const isPreset = profile.source === 'preset'
-      || profile._voiceboxProfile?.voice_type === 'preset'
-      || !!profile._voiceboxProfile?.preset_voice_id;
-
-    const modelId = isPreset ? 'qwen-custom-voice-1.7B' : 'qwen-tts-1.7B';
+    const modelId = 'qwen-custom-voice-1.7B';
     const task = await this.generateDubbing({
       text: this._previewText(lang),
       voiceId,

@@ -258,7 +258,7 @@ export const VoiceCloneModal: React.FC<VoiceCloneModalProps> = ({
           fileList={cloneFile ? [{ uid: '1', name: cloneFile.name, status: 'done' as const }] : []}
         >
           <p className="ant-upload-drag-icon"><SoundOutlined /></p>
-          <p>拖入或点击上传参考音频（建议 5 秒以上清晰人声）</p>
+          <p>拖入或点击上传参考音频（建议 5–30 秒清晰人声，更长会自动截取开头）</p>
         </Upload.Dragger>
       ) : (
         <div>
