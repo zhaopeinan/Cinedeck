@@ -1,14 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Alert, Button, Card, Col, Progress, Row, Space, Steps, Tabs, Typography, Upload, message, Checkbox, Modal,
+  Alert, Button, Card, Col, Input, Progress, Radio, Row, Select, Space, Steps, Tabs, Typography, Upload, message, Checkbox, Modal,
 } from 'antd';
 import {
   ArrowLeftOutlined, InboxOutlined, SoundOutlined, PictureOutlined,
   DownloadOutlined, VideoCameraOutlined, ArrowRightOutlined,
 } from '@ant-design/icons';
 import {
-  avatarApi, withToken, type AvatarDriveMode,
+  avatarApi, voiceboxApi, withToken, type AvatarDriveMode,
 } from '../../api';
 import type { AvatarLayout } from '../../types';
 import { DEFAULT_AVATAR_LAYOUT } from '../../constants/avatarDefaults';
@@ -20,11 +20,61 @@ import {
   GreenscreenComposeEditor,
   useAvatarRefs,
 } from '../../components/avatar';
+import {
+  ModelSelectField, VoiceSelectField, useVoiceboxCatalog,
+} from '../../components/voicebox';
+import { isCustomVoiceModel, preferredModelForVoices } from '../../utils/voiceboxModels';
 import { formatFileSize } from '../../utils/formatFileSize';
 import { formatQueueHint } from '../../utils/queueHint';
 
 const { Title, Text, Paragraph } = Typography;
 const { Dragger } = Upload;
+const { TextArea } = Input;
+
+type NarrationSource = 'tts' | 'upload';
+const MAX_AVATAR_AUDIO_HINT_SEC = 120;
+/** Rough Chinese speaking rate for soft length guidance. */
+const CHARS_PER_SEC = 3.5;
+
+async function waitForTtsTask(
+  taskId: string,
+  onStatus: (msg: string) => void,
+): Promise<{ duration: number }> {
+  const started = Date.now();
+  while (Date.now() - started < 10 * 60 * 1000) {
+    const st = await voiceboxApi.getTaskStatus(taskId);
+    const status = String(st.data.data?.status || '');
+    if (status === 'succeeded' || status === 'completed' || status === 'success') {
+      const result = await voiceboxApi.getTaskResult(taskId);
+      return { duration: Number(result.data.data?.duration || 0) };
+    }
+    if (status === 'failed' || status === 'error' || status === 'cancelled') {
+      throw new Error(st.data.data?.error || '配音生成失败');
+    }
+    onStatus('正在合成解说音频…');
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  throw new Error('配音超时，请缩短文本后重试');
+}
+
+async function fetchTtsAudioFile(taskId: string): Promise<File> {
+  const token = localStorage.getItem('ppt_audio_token');
+  const res = await fetch(voiceboxApi.getTaskAudioUrl(taskId), {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  });
+  if (!res.ok) {
+    let msg = '下载配音失败';
+    try {
+      const body = await res.json();
+      msg = body?.error?.message || msg;
+    } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const type = blob.type || 'audio/wav';
+  const ext = /mpeg|mp3/i.test(type) ? 'mp3' : 'wav';
+  return new File([blob], `avatar-tts-${taskId.slice(0, 8)}.${ext}`, { type });
+}
 
 type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -62,7 +112,7 @@ const AvatarPage: React.FC = () => {
   const [step, setStep] = useState(0);
 
   // --- Step1: Duix gen / greenscreen / background ---
-  const [gsTab, setGsTab] = useState<'duix' | 'upload'>('upload');
+  const [gsTab, setGsTab] = useState<'duix' | 'upload'>('duix');
   const [driveMode, setDriveMode] = useState<AvatarDriveMode>('video');
   const [photo, setPhoto] = useState<File | null>(null);
   const [template, setTemplate] = useState<File | null>(null);
@@ -70,10 +120,20 @@ const AvatarPage: React.FC = () => {
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [templatePreview, setTemplatePreview] = useState<string | null>(null);
   const [audioPreview, setAudioPreview] = useState<string | null>(null);
+  const [narrationSource, setNarrationSource] = useState<NarrationSource>('tts');
+  const [scriptText, setScriptText] = useState('');
+  const [voiceId, setVoiceId] = useState<string>('');
+  const [modelId, setModelId] = useState<string>('');
+  const [ttsLanguage, setTtsLanguage] = useState('zh');
+  const [submitPhase, setSubmitPhase] = useState<string>('');
   const [selectedRefId, setSelectedRefId] = useState<string | null>(null);
   const [saveToLibrary, setSaveToLibrary] = useState(true);
   const [tempAsGreenscreen, setTempAsGreenscreen] = useState(true);
-  const { refs, setRefs, loading: refsLoading, loadRefs } = useAvatarRefs();
+  const { refs, setRefs, loading: refsLoading } = useAvatarRefs();
+  const {
+    voices, ttsModels, loadingVoices, loadingModels, voiceboxAvailable,
+    reloadAll, pickDefaultModelId,
+  } = useVoiceboxCatalog({ autoLoad: true });
   const [submitting, setSubmitting] = useState(false);
   const [job, setJob] = useState<JobState | null>(null);
   const pollRef = useRef<number | null>(null);
@@ -112,6 +172,25 @@ const AvatarPage: React.FC = () => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!voices.length) return;
+    if (!voiceId || !voices.some((v) => v.id === voiceId)) {
+      setVoiceId(voices[0].id);
+    }
+  }, [voices, voiceId]);
+
+  useEffect(() => {
+    if (!ttsModels.length || !voiceId) return;
+    const selected = voices.find((v) => v.id === voiceId);
+    const hasPreset = selected?.source === 'preset';
+    const pick = preferredModelForVoices({ models: ttsModels, hasPresetVoice: !!hasPreset })
+      || pickDefaultModelId(!!hasPreset);
+    if (!pick) return;
+    const modelMissing = !modelId || !ttsModels.some((m) => m.id === modelId);
+    const engineMismatch = !!modelId && isCustomVoiceModel(modelId) !== !!hasPreset;
+    if (modelMissing || engineMismatch) setModelId(pick);
+  }, [ttsModels, voices, voiceId, modelId, pickDefaultModelId]);
 
   /** Pull Duix job video to a local blob URL so摆位 Canvas can decode instantly. */
   const localizeJobGreenscreen = async (jobId: string): Promise<string> => {
@@ -197,23 +276,87 @@ const AvatarPage: React.FC = () => {
     }
   };
 
+  const estimatedScriptSec = Math.ceil(scriptText.trim().length / CHARS_PER_SEC);
+  const scriptTooLong = narrationSource === 'tts' && estimatedScriptSec > MAX_AVATAR_AUDIO_HINT_SEC;
+
   const canSubmitDuix = (() => {
-    if (!audio) return false;
-    if (driveMode === 'photo') return !!photo;
-    return !!selectedRefId || !!template;
+    if (driveMode === 'photo' ? !photo : !(selectedRefId || template)) return false;
+    if (narrationSource === 'upload') return !!audio;
+    return !!scriptText.trim() && !!voiceId && !!modelId && !scriptTooLong;
   })();
 
   const handleGenerateDuix = async () => {
-    if (!canSubmitDuix || !audio) {
-      message.warning(driveMode === 'video' ? '请选择/上传参考视频并上传音频' : '请上传照片和音频');
+    if (driveMode === 'video' && !(selectedRefId || template)) {
+      message.warning('请先选择或上传参考视频模板');
       return;
     }
+    if (driveMode === 'photo' && !photo) {
+      message.warning('请先上传照片');
+      return;
+    }
+
+    let audioFile = audio;
     setSubmitting(true);
     setJob(null);
+    setSubmitPhase('');
     try {
+      if (narrationSource === 'tts') {
+        const text = scriptText.trim();
+        if (!text) {
+          message.warning('请输入解说文案');
+          setSubmitting(false);
+          return;
+        }
+        if (!voiceId || !modelId) {
+          message.warning('请选择音色（及可用配音模型）');
+          setSubmitting(false);
+          return;
+        }
+        if (scriptTooLong) {
+          message.warning(`文案偏长（约 ${estimatedScriptSec} 秒），请控制在约 ${MAX_AVATAR_AUDIO_HINT_SEC} 秒内`);
+          setSubmitting(false);
+          return;
+        }
+        if (voiceboxAvailable === false) {
+          message.error('Voicebox 未就绪，无法用文字生成解说');
+          setSubmitting(false);
+          return;
+        }
+        setSubmitPhase('正在提交配音…');
+        const voiceName = voices.find((v) => v.id === voiceId)?.name;
+        const modelName = ttsModels.find((m) => m.id === modelId)?.name;
+        const gen = await voiceboxApi.generateDubbing({
+          text,
+          voiceId,
+          modelId,
+          language: ttsLanguage,
+          voiceName,
+          modelName,
+        });
+        const taskId = gen.data.data?.id as string | undefined;
+        if (!taskId) throw new Error('配音任务未返回 ID');
+        setSubmitPhase('正在合成解说音频…');
+        const { duration } = await waitForTtsTask(taskId, setSubmitPhase);
+        if (duration > MAX_AVATAR_AUDIO_HINT_SEC + 15) {
+          throw new Error(`配音约 ${duration.toFixed(0)} 秒，超过建议上限 ${MAX_AVATAR_AUDIO_HINT_SEC} 秒，请缩短文案`);
+        }
+        setSubmitPhase('正在准备音频并提交数字人…');
+        audioFile = await fetchTtsAudioFile(taskId);
+        setAudio(audioFile);
+        setAudioPreview((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return URL.createObjectURL(audioFile!);
+        });
+      } else if (!audioFile) {
+        message.warning('请上传解说音频');
+        setSubmitting(false);
+        return;
+      }
+
+      setSubmitPhase('正在提交 Duix 任务…');
       const res = await avatarApi.createJob({
         driveMode,
-        audio,
+        audio: audioFile!,
         photo,
         template: selectedRefId ? null : template,
         refVideoId: selectedRefId,
@@ -223,9 +366,11 @@ const AvatarPage: React.FC = () => {
       });
       const data = res.data.data as JobState;
       setJob(data);
+      setSubmitPhase('');
       startPolling(data.id);
     } catch (e: any) {
       setSubmitting(false);
+      setSubmitPhase('');
       message.error(e?.response?.data?.error?.message || e?.message || '提交失败');
     }
   };
@@ -304,7 +449,7 @@ const AvatarPage: React.FC = () => {
 
       <div style={{ marginBottom: 20 }}>
         <Title level={2} style={{ marginBottom: 4 }}>数字人解说</Title>
-        <Text type="secondary">绿幕数字人叠到底视频：摆位 → 预览 → 导出（也可先用 Duix 生成绿幕片）</Text>
+        <Text type="secondary">选视频模板 → 选音色写文案（或上传音频）→ 生成绿幕 → 摆位叠到底视频</Text>
       </div>
 
       <Steps
@@ -399,7 +544,7 @@ const AvatarPage: React.FC = () => {
                             type="info"
                             showIcon
                             style={{ marginBottom: 12 }}
-                            message="生成期间会独占 GPU；建议单段音频不超过 2 分钟。生成完成后可一键用作绿幕。"
+                            message="选好视频模板后，可用音色 + 文案直接生成数字人；也可改用上传音频。单段建议不超过 2 分钟，生成期间会占用 GPU。"
                           />
                           <AvatarDriveModePicker
                             value={driveMode}
@@ -489,42 +634,129 @@ const AvatarPage: React.FC = () => {
                               )}
                             </Col>
                             <Col xs={24} md={12}>
-                              <Card size="small" title={<Space><SoundOutlined /> 解说音频</Space>}>
-                                <Dragger
-                                  accept="audio/wav,audio/mpeg,audio/mp3,audio/mp4,audio/x-m4a,audio/aac,.wav,.mp3,.m4a,.aac"
-                                  maxCount={1}
-                                  showUploadList={false}
-                                  beforeUpload={(file) => {
-                                    if (!/\.(wav|mp3|m4a|aac)$/i.test(file.name)) {
-                                      message.error('仅支持 WAV / MP3 / M4A / AAC');
-                                      return false;
-                                    }
-                                    setAudio(file);
-                                    setAudioPreview((prev) => {
-                                      if (prev) URL.revokeObjectURL(prev);
-                                      return URL.createObjectURL(file);
-                                    });
-                                    return false;
-                                  }}
+                              <Card size="small" title={<Space><SoundOutlined /> 解说</Space>}>
+                                <Radio.Group
+                                  value={narrationSource}
+                                  onChange={(e) => setNarrationSource(e.target.value)}
+                                  optionType="button"
+                                  buttonStyle="solid"
                                   disabled={submitting}
-                                >
-                                  <p className="ant-upload-drag-icon"><InboxOutlined /></p>
-                                  <p className="ant-upload-text">上传音频</p>
-                                  <p className="ant-upload-hint">支持 WAV / MP3 / M4A / AAC</p>
-                                </Dragger>
-                                {audio && (
-                                  <div style={{ marginTop: 8 }}>
-                                    <Text type="secondary">{audio.name} · {formatFileSize(audio.size)}</Text>
-                                    {audioPreview && <audio controls src={audioPreview} style={{ width: '100%', marginTop: 6 }} />}
-                                  </div>
+                                  style={{ marginBottom: 12 }}
+                                  options={[
+                                    { value: 'tts', label: '音色 + 文案' },
+                                    { value: 'upload', label: '上传音频' },
+                                  ]}
+                                />
+                                {narrationSource === 'tts' ? (
+                                  <Space direction="vertical" style={{ width: '100%' }} size={10}>
+                                    {voiceboxAvailable === false && (
+                                      <Alert type="warning" showIcon message="Voicebox 未就绪，请稍后再试或改用上传音频" />
+                                    )}
+                                    <div>
+                                      <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>音色</Text>
+                                      <VoiceSelectField
+                                        value={voiceId || undefined}
+                                        onChange={setVoiceId}
+                                        voices={voices}
+                                        loading={loadingVoices}
+                                        disabled={submitting}
+                                        onReload={() => { void reloadAll(); }}
+                                      />
+                                    </div>
+                                    <div>
+                                      <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>语言</Text>
+                                      <Select
+                                        value={ttsLanguage}
+                                        onChange={setTtsLanguage}
+                                        disabled={submitting}
+                                        style={{ width: '100%' }}
+                                        options={[
+                                          { value: 'zh', label: '中文' },
+                                          { value: 'en', label: 'English' },
+                                        ]}
+                                      />
+                                    </div>
+                                    <div>
+                                      <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>配音模型</Text>
+                                      <ModelSelectField
+                                        value={modelId || undefined}
+                                        onChange={setModelId}
+                                        models={ttsModels}
+                                        loading={loadingModels}
+                                        disabled={submitting}
+                                        onReload={() => { void reloadAll(); }}
+                                      />
+                                    </div>
+                                    <div>
+                                      <Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>解说文案</Text>
+                                      <TextArea
+                                        value={scriptText}
+                                        onChange={(e) => setScriptText(e.target.value)}
+                                        disabled={submitting}
+                                        rows={6}
+                                        placeholder="输入要让数字人说的内容…"
+                                        showCount
+                                        maxLength={900}
+                                      />
+                                      <Text
+                                        type={scriptTooLong ? 'danger' : 'secondary'}
+                                        style={{ display: 'block', marginTop: 4 }}
+                                      >
+                                        {scriptText.trim()
+                                          ? `约 ${estimatedScriptSec} 秒（建议不超过 ${MAX_AVATAR_AUDIO_HINT_SEC} 秒）`
+                                          : `建议单段不超过约 ${MAX_AVATAR_AUDIO_HINT_SEC} 秒`}
+                                      </Text>
+                                    </div>
+                                    {audioPreview && narrationSource === 'tts' && (
+                                      <audio controls src={audioPreview} style={{ width: '100%' }} />
+                                    )}
+                                  </Space>
+                                ) : (
+                                  <>
+                                    <Dragger
+                                      accept="audio/wav,audio/mpeg,audio/mp3,audio/mp4,audio/x-m4a,audio/aac,.wav,.mp3,.m4a,.aac"
+                                      maxCount={1}
+                                      showUploadList={false}
+                                      beforeUpload={(file) => {
+                                        if (!/\.(wav|mp3|m4a|aac)$/i.test(file.name)) {
+                                          message.error('仅支持 WAV / MP3 / M4A / AAC');
+                                          return false;
+                                        }
+                                        setAudio(file);
+                                        setAudioPreview((prev) => {
+                                          if (prev) URL.revokeObjectURL(prev);
+                                          return URL.createObjectURL(file);
+                                        });
+                                        return false;
+                                      }}
+                                      disabled={submitting}
+                                    >
+                                      <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+                                      <p className="ant-upload-text">上传音频</p>
+                                      <p className="ant-upload-hint">支持 WAV / MP3 / M4A / AAC</p>
+                                    </Dragger>
+                                    {audio && (
+                                      <div style={{ marginTop: 8 }}>
+                                        <Text type="secondary">{audio.name} · {formatFileSize(audio.size)}</Text>
+                                        {audioPreview && <audio controls src={audioPreview} style={{ width: '100%', marginTop: 6 }} />}
+                                      </div>
+                                    )}
+                                  </>
                                 )}
                               </Card>
                             </Col>
                           </Row>
                           <div style={{ marginTop: 16, textAlign: 'center' }}>
-                            <Button type="primary" loading={submitting} disabled={!canSubmitDuix} onClick={handleGenerateDuix}>
-                              用 Duix · {driveMode === 'video' ? '参考视频' : '静照'} 生成绿幕
+                            <Button type="primary" loading={submitting} disabled={!canSubmitDuix} onClick={() => void handleGenerateDuix()}>
+                              {narrationSource === 'tts'
+                                ? `生成配音并出绿幕 · ${driveMode === 'video' ? '参考视频' : '静照'}`
+                                : `用 Duix · ${driveMode === 'video' ? '参考视频' : '静照'} 生成绿幕`}
                             </Button>
+                            {submitting && submitPhase && (
+                              <div style={{ marginTop: 8 }}>
+                                <Text type="secondary">{submitPhase}</Text>
+                              </div>
+                            )}
                           </div>
                           {job && (
                             <Card size="small" style={{ marginTop: 12 }} title={`Duix · ${driveLabel}`}>
