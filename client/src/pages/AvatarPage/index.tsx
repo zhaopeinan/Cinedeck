@@ -35,13 +35,15 @@ type NarrationSource = 'tts' | 'upload';
 const MAX_AVATAR_AUDIO_HINT_SEC = 120;
 /** Rough Chinese speaking rate for soft length guidance. */
 const CHARS_PER_SEC = 3.5;
+/** Long TTS (esp. first load / runaway) can exceed 10 minutes wall-clock. */
+const TTS_WAIT_MS = 25 * 60 * 1000;
 
 async function waitForTtsTask(
   taskId: string,
   onStatus: (msg: string) => void,
 ): Promise<{ duration: number }> {
   const started = Date.now();
-  while (Date.now() - started < 10 * 60 * 1000) {
+  while (Date.now() - started < TTS_WAIT_MS) {
     const st = await voiceboxApi.getTaskStatus(taskId);
     const status = String(st.data.data?.status || '');
     if (status === 'succeeded' || status === 'completed' || status === 'success') {
@@ -51,10 +53,11 @@ async function waitForTtsTask(
     if (status === 'failed' || status === 'error' || status === 'cancelled') {
       throw new Error(st.data.data?.error || '配音生成失败');
     }
-    onStatus('正在合成解说音频…');
-    await new Promise((r) => setTimeout(r, 1500));
+    const elapsedMin = Math.max(1, Math.round((Date.now() - started) / 60000));
+    onStatus(`正在合成解说音频…已等待约 ${elapsedMin} 分钟`);
+    await new Promise((r) => setTimeout(r, 2000));
   }
-  throw new Error('配音超时，请缩短文本后重试');
+  throw new Error('配音等待超时（约 25 分钟）。若文案不长却一直不出，请到造声工厂单独试该音色，或换预置音色重试');
 }
 
 async function fetchTtsAudioFile(taskId: string): Promise<File> {
@@ -325,6 +328,7 @@ const AvatarPage: React.FC = () => {
         setSubmitPhase('正在提交配音…');
         const voiceName = voices.find((v) => v.id === voiceId)?.name;
         const modelName = ttsModels.find((m) => m.id === modelId)?.name;
+        const expectedSec = Math.max(8, Math.ceil(text.length / CHARS_PER_SEC));
         const gen = await voiceboxApi.generateDubbing({
           text,
           voiceId,
@@ -332,13 +336,19 @@ const AvatarPage: React.FC = () => {
           language: ttsLanguage,
           voiceName,
           modelName,
+          maxChunkChars: 120,
         });
         const taskId = gen.data.data?.id as string | undefined;
         if (!taskId) throw new Error('配音任务未返回 ID');
         setSubmitPhase('正在合成解说音频…');
         const { duration } = await waitForTtsTask(taskId, setSubmitPhase);
-        if (duration > MAX_AVATAR_AUDIO_HINT_SEC + 15) {
-          throw new Error(`配音约 ${duration.toFixed(0)} 秒，超过建议上限 ${MAX_AVATAR_AUDIO_HINT_SEC} 秒，请缩短文案`);
+        const runaway = duration > Math.max(expectedSec * 3, 90)
+          || duration > MAX_AVATAR_AUDIO_HINT_SEC + 15;
+        if (runaway) {
+          throw new Error(
+            `配音异常偏长（约 ${duration.toFixed(0)} 秒，按文案约 ${expectedSec} 秒）。`
+            + '常见于克隆音色参考文稿不匹配。请换预置音色，或到造声工厂先单独试听该音色后再试',
+          );
         }
         setSubmitPhase('正在准备音频并提交数字人…');
         audioFile = await fetchTtsAudioFile(taskId);
@@ -366,12 +376,13 @@ const AvatarPage: React.FC = () => {
       });
       const data = res.data.data as JobState;
       setJob(data);
-      setSubmitPhase('');
+      setSubmitPhase('数字人生成中…');
       startPolling(data.id);
     } catch (e: any) {
       setSubmitting(false);
       setSubmitPhase('');
-      message.error(e?.response?.data?.error?.message || e?.message || '提交失败');
+      const msg = e?.response?.data?.error?.message || e?.message || '提交失败';
+      Modal.error({ title: '生成未完成', content: msg });
     }
   };
 
