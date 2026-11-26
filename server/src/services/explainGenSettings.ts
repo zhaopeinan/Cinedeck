@@ -12,10 +12,10 @@ export interface ExplainGenSettings {
 }
 
 export const EXPLAIN_GEN_DEFAULTS: ExplainGenSettings = {
-  maxTokensRecommend: 4000,
-  maxTokensScript: 6000,
-  maxTokensSample: 24000,
-  maxTokensFinal: 32000,
+  maxTokensRecommend: 128000,
+  maxTokensScript: 128000,
+  maxTokensSample: 256000,
+  maxTokensFinal: 256000,
   reasoningEffort: 'low',
 };
 
@@ -33,7 +33,7 @@ export const EXPLAIN_GEN_FIELD_META: Array<{
     label: '风格推荐 max_tokens',
     description: '选题 → 推荐 3 种风格时的补全上限',
     min: 500,
-    max: 32000,
+    max: 512000,
     type: 'int',
   },
   {
@@ -41,7 +41,7 @@ export const EXPLAIN_GEN_FIELD_META: Array<{
     label: '分镜脚本 max_tokens',
     description: '选定风格后撰写极简分镜 JSON',
     min: 500,
-    max: 32000,
+    max: 512000,
     type: 'int',
   },
   {
@@ -49,7 +49,7 @@ export const EXPLAIN_GEN_FIELD_META: Array<{
     label: 'HTML 样片 max_tokens',
     description: '约 20 秒样片单文件 HTML（含思考预算）',
     min: 2000,
-    max: 128000,
+    max: 512000,
     type: 'int',
   },
   {
@@ -57,7 +57,7 @@ export const EXPLAIN_GEN_FIELD_META: Array<{
     label: 'HTML 全片 max_tokens',
     description: '确认样片后扩展完整动画',
     min: 2000,
-    max: 128000,
+    max: 512000,
     type: 'int',
   },
   {
@@ -89,10 +89,10 @@ function normalize(raw: Partial<ExplainGenSettings> | null | undefined): Explain
     ? effort
     : d.reasoningEffort;
   return {
-    maxTokensRecommend: clampInt(raw?.maxTokensRecommend, 500, 32000, d.maxTokensRecommend),
-    maxTokensScript: clampInt(raw?.maxTokensScript, 500, 32000, d.maxTokensScript),
-    maxTokensSample: clampInt(raw?.maxTokensSample, 2000, 128000, d.maxTokensSample),
-    maxTokensFinal: clampInt(raw?.maxTokensFinal, 2000, 128000, d.maxTokensFinal),
+    maxTokensRecommend: clampInt(raw?.maxTokensRecommend, 500, 512000, d.maxTokensRecommend),
+    maxTokensScript: clampInt(raw?.maxTokensScript, 500, 512000, d.maxTokensScript),
+    maxTokensSample: clampInt(raw?.maxTokensSample, 2000, 512000, d.maxTokensSample),
+    maxTokensFinal: clampInt(raw?.maxTokensFinal, 2000, 512000, d.maxTokensFinal),
     reasoningEffort: okEffort,
   };
 }

@@ -338,8 +338,8 @@ export class LlmService {
       headers['Authorization'] = `Bearer ${config.api_key}`;
     }
 
-    // Long HTML / high max_tokens can take minutes on local gateways
-    const timeoutMs = Math.max(120000, Math.min(600000, (options?.maxTokens || 0) > 2000 ? 360000 : 180000));
+    // Long HTML / high max_tokens can take a long time on local gateways
+    const timeoutMs = Math.max(120000, Math.min(3_600_000, (options?.maxTokens || 0) > 2000 ? 3_600_000 : 180000));
 
     const postOnce = async (proxy?: ReturnType<typeof getAxiosProxy>) => {
       try {
